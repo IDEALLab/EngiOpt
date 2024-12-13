@@ -11,7 +11,10 @@ As much as we can, we follow the [CleanRL](https://github.com/vwxyzjn/cleanrl) p
 
 
 ## Wishlist
-- [ ] BezierGAN, CGAN, DCGAN, InfoGAN (images)
-- [ ] Diffusion Models (images), Diffusion Models (vector)
+- [x] GAN (vector)
+- [x] CGAN (vector)
+- [x] Diffusion (vector)
+- [ ] BezierGAN, DCGAN (images)
+- [ ] Diffusion Models (images)
 - [ ] Surrogate Models and Optimization
 - [ ] Metrics implementations
