@@ -361,7 +361,7 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval == 0:
                     # Extract 25 designs
                     desired_conds, designs = sample_designs(25)
-                    fig, axes = plt.subplots(5, 5, figsize=(12, 12))
+                    fig, axes = plt.subplots(5, 5, figsize=(24, 24))
 
                     # Flatten axes for easy indexing
                     axes = axes.flatten()
@@ -369,9 +369,11 @@ if __name__ == "__main__":
                     # Plot each tensor as a scatter plot
                     for j, tensor in enumerate(designs):
                         img = tensor.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
-                        do = desired_conds[j].cpu()
+                        dc = desired_conds[j].cpu()
                         axes[j].imshow(img)  # Scatter plot
-                        axes[j].title.set_text(f"volfrac: {do[0]:.2f}")
+                        axes[j].title.set_text(
+                            ", ".join(f"{key[:3]}: {val:.2f}" for key, val in zip(problem.conditions_keys, dc))
+                        )
                         axes[j].set_xticks([])  # Hide x ticks
                         axes[j].set_yticks([])  # Hide y ticks
 

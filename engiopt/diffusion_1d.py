@@ -147,7 +147,7 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval == 0:
                     # Extract 25 designs
                     designs = diffusion.sample(batch_size=25)
-                    fig, axes = plt.subplots(5, 5, figsize=(12, 12))
+                    fig, axes = plt.subplots(5, 5, figsize=(24, 24))
 
                     # Flatten axes for easy indexing
                     axes = axes.flatten()
