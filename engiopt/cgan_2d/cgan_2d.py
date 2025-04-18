@@ -175,9 +175,12 @@ if __name__ == "__main__":
     # Configure data loader
     training_ds = problem.dataset.with_format("torch", device=device)["train"]
 
-    training_ds = th.utils.data.TensorDataset(
-        training_ds["optimal_design"].flatten(1), *[training_ds[key] for key in problem.conditions_keys]
-    )
+    design_data = training_ds["optimal_design"].flatten(1)
+    if args.problem_id == "thermoelastic2d":
+        condition_data = [training_ds[key] for key, _ in problem.conditions[4:]]
+    else:
+        condition_data = [training_ds[key] for key, _ in problem.conditions]
+    training_ds = th.utils.data.TensorDataset(design_data, *condition_data)
     dataloader = th.utils.data.DataLoader(
         training_ds,
         batch_size=args.batch_size,

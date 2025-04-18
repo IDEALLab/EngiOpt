@@ -247,9 +247,11 @@ if __name__ == "__main__":
     else:
         device = th.device("cpu")
 
+    conditions = problem.conditions[4:] if args.problem_id == "thermoelastic2d" else problem.conditions
+
     # Loss function
     adversarial_loss = th.nn.MSELoss()
-    encoder_hid_dim = len(problem.conditions)
+    encoder_hid_dim = len(conditions)
     # Initialize UNet from Huggingface
     model = UNet2DConditionModel(
         sample_size=design_shape,
@@ -276,10 +278,10 @@ if __name__ == "__main__":
     filtered_ds_max = filtered_ds.max()
     filtered_ds_min = filtered_ds.min()
     filtered_ds_norm = (filtered_ds - filtered_ds_min) / (filtered_ds_max - filtered_ds_min)
-    training_ds = th.utils.data.TensorDataset(
-        filtered_ds_norm.flatten(1), *[training_ds[key] for key, _ in problem.conditions]
-    )
-    cond_tensors = th.stack(training_ds.tensors[1 : len(problem.conditions) + 1])
+
+    training_ds = th.utils.data.TensorDataset(filtered_ds_norm.flatten(1), *[training_ds[key] for key, _ in conditions])
+
+    cond_tensors = th.stack(training_ds.tensors[1 : len(conditions) + 1])
     conds_min = cond_tensors.amin(dim=tuple(range(1, cond_tensors.ndim)))
     conds_max = cond_tensors.amax(dim=tuple(range(1, cond_tensors.ndim)))
 
@@ -395,7 +397,7 @@ if __name__ == "__main__":
                         img = tensor.cpu().numpy()  # Extract x and y coordinates
                         do = hidden_states[j, 0, :].cpu()
                         axes[j].imshow(img[0])  # image plot
-                        title = [(problem.conditions[i][0], f"{do[i]:.2f}") for i in range(len(problem.conditions))]
+                        title = [(conditions[i][0], f"{do[i]:.2f}") for i in range(len(conditions))]
                         title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
                         axes[j].title.set_text(title_string)  # Set title
                         axes[j].set_xticks([])  # Hide x ticks
