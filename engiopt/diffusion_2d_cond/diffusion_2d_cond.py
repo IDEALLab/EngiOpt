@@ -230,6 +230,7 @@ if __name__ == "__main__":
     # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
     if args.track:
+        os.environ["WANDB_ARTIFACT_CACHE_SIZE"] = "0"
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args), save_code=True, name=run_name)
 
     # Seeding
