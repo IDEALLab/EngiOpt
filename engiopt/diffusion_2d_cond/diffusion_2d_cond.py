@@ -230,7 +230,6 @@ if __name__ == "__main__":
     # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
     if args.track:
-        os.environ["WANDB_ARTIFACT_CACHE_SIZE"] = "0"
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args), save_code=True, name=run_name)
 
     # Seeding
@@ -421,11 +420,11 @@ if __name__ == "__main__":
                             "optimizer_generator": optimizer.state_dict(),
                             "loss": loss.item(),
                         }
+                        if epoch % 50 == 0 or epoch == args.n_epochs - 1:
+                            th.save(ckpt_model, "model.pth")
+                            artifact_model = wandb.Artifact(f"{args.problem_id}_{args.algo}_model", type="model")
+                            artifact_model.add_file("model.pth")
 
-                        th.save(ckpt_model, "model.pth")
-                        artifact_model = wandb.Artifact(f"{args.problem_id}_{args.algo}_model", type="model")
-                        artifact_model.add_file("model.pth")
-
-                        wandb.log_artifact(artifact_model, aliases=[f"seed_{args.seed}"])
+                            wandb.log_artifact(artifact_model, aliases=[f"seed_{args.seed}"])
 
     wandb.finish()

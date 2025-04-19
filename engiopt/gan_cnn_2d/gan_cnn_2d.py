@@ -174,7 +174,6 @@ if __name__ == "__main__":
     # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
     if args.track:
-        os.environ["WANDB_ARTIFACT_CACHE_SIZE"] = "0"
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args), save_code=True, name=run_name)
 
     # Seeding
@@ -326,17 +325,17 @@ if __name__ == "__main__":
                             "optimizer_discriminator": optimizer_discriminator.state_dict(),
                             "loss": d_loss.item(),
                         }
+                        if epoch % 50 == 0 or epoch == args.n_epochs - 1:
+                            th.save(ckpt_gen, "generator.pth")
+                            th.save(ckpt_disc, "discriminator.pth")
+                            artifact_gen = wandb.Artifact(f"{args.problem_id}_{args.algo}_generator", type="model")
+                            artifact_gen.add_file("generator.pth")
+                            artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
+                            artifact_disc.add_file("discriminator.pth")
 
-                        th.save(ckpt_gen, "generator.pth")
-                        th.save(ckpt_disc, "discriminator.pth")
-                        artifact_gen = wandb.Artifact(f"{args.problem_id}_{args.algo}_generator", type="model")
-                        artifact_gen.add_file("generator.pth")
-                        artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
-                        artifact_disc.add_file("discriminator.pth")
-
-                        wandb.log_artifact(artifact_gen, aliases=[f"seed_{args.seed}"])
-                        wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
-                        wandb.log_artifact(artifact_gen, aliases=[f"seed_{args.seed}"])
-                        wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
+                            wandb.log_artifact(artifact_gen, aliases=[f"seed_{args.seed}"])
+                            wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
+                            wandb.log_artifact(artifact_gen, aliases=[f"seed_{args.seed}"])
+                            wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
 
     wandb.finish()
