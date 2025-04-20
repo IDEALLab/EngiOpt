@@ -26,7 +26,7 @@ import wandb
 class Args:
     """Command-line arguments."""
 
-    problem_id: str = "heatconduction2d"
+    problem_id: str = "thermoelastic2d"
     """Problem identifier."""
     algo: str = os.path.basename(__file__)[: -len(".py")]
     """The name of this algorithm."""
@@ -139,7 +139,8 @@ if __name__ == "__main__":
     problem.reset(seed=args.seed)
 
     design_shape = problem.design_space.shape
-    n_conds = len(problem.conditions)
+
+    n_conds = len(problem.conditions[4:]) if args.problem_id == "thermoelastic2d" else len(problem.conditions)
 
     # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
@@ -180,6 +181,7 @@ if __name__ == "__main__":
         condition_data = [training_ds[key] for key, _ in problem.conditions[4:]]
     else:
         condition_data = [training_ds[key] for key, _ in problem.conditions]
+
     training_ds = th.utils.data.TensorDataset(design_data, *condition_data)
     dataloader = th.utils.data.DataLoader(
         training_ds,

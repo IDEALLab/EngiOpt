@@ -18,8 +18,8 @@ MODELS = {
     "diffusion_2d_cond": os.path.join(HOME, "projects/EngiOpt/engiopt/diffusion_2d_cond", "diffusion_2d_cond.py"),
 }
 
-PROBLEMS = ["beams2d", "heatconduction2d", "thermoelastic2d"]
-SEEDS = range(1, 11)
+PROBLEMS = ["thermoelastic2d", "heatconduction2d", "beams2d"]
+SEEDS = range(1, 3)
 
 
 # ----------------------------------------------------------------------
@@ -37,7 +37,7 @@ def main() -> None:
             "--seed",
             str(seed),
             "--save_model",
-            "--n_epochs=100",
+            "--n_epochs=1",
         ]
 
         banner = f"[{datetime.now():%Y‑%m‑%d %H:%M:%S}] {model:<15} | {problem:<17} | seed={seed}"
