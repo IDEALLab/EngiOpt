@@ -313,7 +313,7 @@ if __name__ == "__main__":
                             "loss": d_loss.item(),
                         }
 
-                        if epoch % 50 == 0 or epoch == args.n_epochs - 1:
+                        if epoch == args.n_epochs - 1:
                             th.save(ckpt_gen, "generator.pth")
                             th.save(ckpt_disc, "discriminator.pth")
                             artifact_gen = wandb.Artifact(f"{args.problem_id}_{args.algo}_generator", type="model")
