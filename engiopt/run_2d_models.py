@@ -37,6 +37,7 @@ def main() -> None:
             "--seed",
             str(seed),
             "--save_model",
+            "--n_epochs=100",
         ]
 
         banner = f"[{datetime.now():%Y‑%m‑%d %H:%M:%S}] {model:<15} | {problem:<17} | seed={seed}"
