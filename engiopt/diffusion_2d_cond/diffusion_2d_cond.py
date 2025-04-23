@@ -409,22 +409,21 @@ if __name__ == "__main__":
                     plt.close()
                     wandb.log({"designs": wandb.Image(img_fname)})
 
-                    # --------------
-                    #  Save models
-                    # --------------
-                    if args.save_model:
-                        ckpt_model = {
-                            "epoch": epoch,
-                            "batches_done": batches_done,
-                            "model": model.state_dict(),
-                            "optimizer_generator": optimizer.state_dict(),
-                            "loss": loss.item(),
-                        }
-                        if epoch == (args.n_epochs - 1):
-                            th.save(ckpt_model, "model.pth")
-                            artifact_model = wandb.Artifact(f"{args.problem_id}_{args.algo}_model", type="model")
-                            artifact_model.add_file("model.pth")
+                # --------------
+                #  Save models
+                # --------------
+                if args.save_model and epoch == args.n_epochs - 1 and i == len(dataloader) - 1:
+                    ckpt_model = {
+                        "epoch": epoch,
+                        "batches_done": batches_done,
+                        "model": model.state_dict(),
+                        "optimizer_generator": optimizer.state_dict(),
+                        "loss": loss.item(),
+                    }
+                    th.save(ckpt_model, "model.pth")
+                    artifact_model = wandb.Artifact(f"{args.problem_id}_{args.algo}_model", type="model")
+                    artifact_model.add_file("model.pth")
 
-                            wandb.log_artifact(artifact_model, aliases=[f"seed_{args.seed}"])
+                    wandb.log_artifact(artifact_model, aliases=[f"seed_{args.seed}"])
 
     wandb.finish()
