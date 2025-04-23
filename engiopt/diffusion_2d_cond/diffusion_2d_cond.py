@@ -420,7 +420,7 @@ if __name__ == "__main__":
                             "optimizer_generator": optimizer.state_dict(),
                             "loss": loss.item(),
                         }
-                        if epoch == args.n_epochs - 1:
+                        if epoch == (args.n_epochs - 1):
                             th.save(ckpt_model, "model.pth")
                             artifact_model = wandb.Artifact(f"{args.problem_id}_{args.algo}_model", type="model")
                             artifact_model.add_file("model.pth")

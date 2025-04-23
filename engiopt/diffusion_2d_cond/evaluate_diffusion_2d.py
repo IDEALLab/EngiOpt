@@ -23,7 +23,7 @@ import wandb
 class Args:
     """Command-line arguments."""
 
-    problem_id: str = "beams2d"
+    problem_id: str = "heatconduction2d"
     """Problem identifier."""
     seed_start: int = 1
     """Random starting seed."""
