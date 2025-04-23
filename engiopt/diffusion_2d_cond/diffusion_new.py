@@ -220,6 +220,44 @@ class DiffusionSampler:
             return model_mean + th.sqrt(posterior_variance_t) * th.randn_like(x) * t_mask
 
 
+class ResizeSeqUNet(th.nn.Module):
+    """Wrap a UNet2DConditionModel with 100x100 down/up-resizing."""
+
+    def __init__(self, design_shape: tuple[int, int], unet_kwargs: dict):
+        super().__init__()
+        self.resize_in = transforms.Resize((100, 100))
+        self.unet = UNet2DConditionModel(**unet_kwargs)
+        self.resize_out = transforms.Resize(design_shape)
+
+    def forward(
+        self,
+        sample: th.Tensor,  # [B, C, H, W]
+        timestep: th.Tensor,  # [B]
+        encoder_hidden_states: th.Tensor,  # [...]
+    ) -> UNet2DConditionModel:
+        """Forward pass of the ResizeSeqUNet model.
+
+        Args:
+            sample: Input tensor with shape [batch_size, channels, height, width]
+            timestep: Tensor containing timestep information with shape [batch_size]
+            encoder_hidden_states: Tensor containing encoder hidden states
+
+        Returns:
+            UNet2DConditionModel output containing the processed sample
+        """
+        # 1) downsample to 100x100
+        x100 = self.resize_in(sample)
+        # 2) run the U-Net
+        out = self.unet(x100, timestep, encoder_hidden_states)
+        # 3) upsample the .sample field
+        sample_up = self.resize_out(out.sample)
+        # 4) re-wrap in the same output class without importing it directly
+        outclass = out.__class__
+        # collect all other fields except 'sample'
+        other_fields = {k: v for k, v in out.__dict__.items() if k != "sample"}
+        return outclass(sample=sample_up, **other_fields)
+
+
 if __name__ == "__main__":
     args = tyro.cli(Args)
 
@@ -253,25 +291,22 @@ if __name__ == "__main__":
     # Loss function
     adversarial_loss = th.nn.MSELoss()
     encoder_hid_dim = len(conditions)
-    # Initialize UNet from Huggingface
-    model = th.nn.Sequential(
-        transforms.Resize((100, 100)),
-        UNet2DConditionModel(
-            sample_size=(100, 100),
-            in_channels=1,
-            out_channels=1,
-            cross_attention_dim=64,
-            block_out_channels=(64, 128),
-            down_block_types=("CrossAttnDownBlock2D", "DownBlock2D"),
-            up_block_types=("UpBlock2D", "CrossAttnUpBlock2D"),
-            layers_per_block=args.layers_per_block,
-            transformer_layers_per_block=1,
-            encoder_hid_dim=encoder_hid_dim,
-            only_cross_attention=True,
-        ),
-        transforms.Resize(design_shape),
-    )
 
+    # Build the wrapped model
+    unet_kwargs = {
+        "sample_size": (100, 100),
+        "in_channels": 1,
+        "out_channels": 1,
+        "cross_attention_dim": 64,
+        "block_out_channels": (64, 128),
+        "down_block_types": ("CrossAttnDownBlock2D", "DownBlock2D"),
+        "up_block_types": ("UpBlock2D", "CrossAttnUpBlock2D"),
+        "layers_per_block": args.layers_per_block,
+        "transformer_layers_per_block": 1,
+        "encoder_hid_dim": encoder_hid_dim,
+        "only_cross_attention": True,
+    }
+    model = ResizeSeqUNet(design_shape=design_shape, unet_kwargs=unet_kwargs)
     model.to(device)
     adversarial_loss.to(device)
 
