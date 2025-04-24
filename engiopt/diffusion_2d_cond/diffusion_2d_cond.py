@@ -60,9 +60,9 @@ class Args:
     sample_interval: int = 400
     """interval between image samples"""
 
-    num_timesteps: int = 100
+    num_timesteps: int = 250
     """Number of timesteps in the diffusion schedule"""
-    layers_per_block: int = 1
+    layers_per_block: int = 2
     """Layers per U-NET block"""
     noise_schedule: Literal["linear", "cosine", "exp"] = "linear"
     """Diffusion schedule ('linear', 'cosine', 'exp')"""
@@ -258,9 +258,9 @@ if __name__ == "__main__":
         in_channels=1,
         out_channels=1,
         cross_attention_dim=64,
-        block_out_channels=(64, 128),
-        down_block_types=("CrossAttnDownBlock2D", "DownBlock2D"),
-        up_block_types=("UpBlock2D", "CrossAttnUpBlock2D"),
+        block_out_channels=(32, 64, 128, 256),
+        down_block_types=("CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "DownBlock2D"),
+        up_block_types=("UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D"),
         layers_per_block=args.layers_per_block,
         transformer_layers_per_block=1,
         encoder_hid_dim=encoder_hid_dim,
