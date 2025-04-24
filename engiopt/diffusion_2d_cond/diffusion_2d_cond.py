@@ -15,7 +15,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch as th
 from torch.nn import functional
-from torchvision import transforms
 import tqdm
 import tyro
 
@@ -254,22 +253,18 @@ if __name__ == "__main__":
     adversarial_loss = th.nn.MSELoss()
     encoder_hid_dim = len(conditions)
     # Initialize UNet from Huggingface
-    model = th.nn.Sequential(
-        transforms.Resize((100, 100)),
-        UNet2DConditionModel(
-            sample_size=(100, 100),
-            in_channels=1,
-            out_channels=1,
-            cross_attention_dim=64,
-            block_out_channels=(64, 128),
-            down_block_types=("CrossAttnDownBlock2D", "DownBlock2D"),
-            up_block_types=("UpBlock2D", "CrossAttnUpBlock2D"),
-            layers_per_block=args.layers_per_block,
-            transformer_layers_per_block=1,
-            encoder_hid_dim=encoder_hid_dim,
-            only_cross_attention=True,
-        ),
-        transforms.Resize(design_shape),
+    model = UNet2DConditionModel(
+        sample_size=(100, 100),
+        in_channels=1,
+        out_channels=1,
+        cross_attention_dim=64,
+        block_out_channels=(64, 128),
+        down_block_types=("CrossAttnDownBlock2D", "DownBlock2D"),
+        up_block_types=("UpBlock2D", "CrossAttnUpBlock2D"),
+        layers_per_block=args.layers_per_block,
+        transformer_layers_per_block=1,
+        encoder_hid_dim=encoder_hid_dim,
+        only_cross_attention=True,
     )
 
     model.to(device)
