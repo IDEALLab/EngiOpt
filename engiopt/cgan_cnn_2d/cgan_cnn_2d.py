@@ -232,7 +232,8 @@ if __name__ == "__main__":
 
     design_shape = problem.design_space.shape
 
-    n_conds = 3 if args.problem_id == "thermoelastic2d" else len(problem.conditions)
+    conditions = problem.conditions[4:] if args.problem_id == "thermoelastic2d" else problem.conditions
+    n_conds = len(conditions)
 
     # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
@@ -268,10 +269,7 @@ if __name__ == "__main__":
     # Configure data loader
     training_ds = problem.dataset.with_format("torch", device=device)["train"]
     design_data = training_ds["optimal_design"].flatten(1)
-    if args.problem_id == "thermoelastic2d":
-        condition_data = [training_ds[key] for key, _ in problem.conditions[4:]]
-    else:
-        condition_data = [training_ds[key] for key, _ in problem.conditions]
+    condition_data = [training_ds[key] for key, _ in conditions]
     training_ds = th.utils.data.TensorDataset(design_data, *condition_data)
     dataloader = th.utils.data.DataLoader(
         training_ds,
@@ -376,7 +374,9 @@ if __name__ == "__main__":
                         img = tensor.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
                         do = desired_conds[j].cpu()
                         axes[j].imshow(img)  # Scatter plot
-                        axes[j].title.set_text(f"volfrac: {do[0]:.2f}")
+                        title = [(conditions[i][0], f"{do[i]:.2f}") for i in range(len(conditions))]
+                        title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
+                        axes[j].title.set_text(title_string)  # Set title
                         axes[j].set_xticks([])  # Hide x ticks
                         axes[j].set_yticks([])  # Hide y ticks
 
