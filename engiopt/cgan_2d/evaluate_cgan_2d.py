@@ -22,7 +22,7 @@ from engiopt.dataset_sample_conditions import sample_conditions
 class Args:
     """Command-line arguments for a single-seed CGAN 2D evaluation."""
 
-    problem_id: str = "beams2d"
+    problem_id: str = "heatconduction2d"
     """Problem identifier (e.g. beams2d)."""
     seed: int = 1
     """Random seed to run."""
