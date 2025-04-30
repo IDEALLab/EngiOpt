@@ -4,18 +4,17 @@ from __future__ import annotations
 
 import dataclasses
 import os
-import sys
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import numpy as np
 import pandas as pd
 import torch as th
 import tyro
-import wandb
 
 from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.gan_2d.gan_2d import Generator
+import wandb
 
 
 @dataclasses.dataclass
@@ -74,10 +73,14 @@ if __name__ == "__main__":
 
     api = wandb.Api()
     artifact = api.artifact(artifact_path, type="model")
+
+    class RunRetrievalError(ValueError):
+        def __init__(self):
+            super().__init__("Failed to retrieve the run")
+
     run = artifact.logged_by()
     if run is None or not hasattr(run, "config"):
-        print("ERROR: Failed to retrieve WandB run", file=sys.stderr)
-        sys.exit(1)
+        raise RunRetrievalError
 
     artifact_dir = artifact.download()
     ckpt = th.load(
@@ -94,8 +97,9 @@ if __name__ == "__main__":
 
     # Generate designs
     z = th.randn((args.n_samples, run.config["latent_dim"]), device=device)
-    gen = model(z)
-    gen_designs_np = gen.detach().cpu().numpy().clip(1e-3, 1.0)
+    gen_designs = model(z)
+    gen_designs_np = gen_designs.detach().cpu().numpy()
+    gen_designs_np = np.clip(gen_designs_np, 1e-3, 1.0)
 
     # Compute metrics
     metrics_dict = metrics.metrics(

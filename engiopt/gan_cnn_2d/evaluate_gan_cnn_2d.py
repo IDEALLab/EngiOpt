@@ -4,18 +4,17 @@ from __future__ import annotations
 
 import dataclasses
 import os
-import sys
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import numpy as np
 import pandas as pd
 import torch as th
 import tyro
-import wandb
 
 from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.gan_cnn_2d.gan_cnn_2d import Generator
+import wandb
 
 
 @dataclasses.dataclass
@@ -74,12 +73,16 @@ if __name__ == "__main__":
 
     api = wandb.Api()
     artifact = api.artifact(artifact_path, type="model")
+
+    class RunRetrievalError(ValueError):
+        def __init__(self):
+            super().__init__("Failed to retrieve the run")
+
     run = artifact.logged_by()
     if run is None or not hasattr(run, "config"):
-        print("ERROR: Failed to retrieve WandB run", file=sys.stderr)
-        sys.exit(1)
-
+        raise RunRetrievalError
     artifact_dir = artifact.download()
+
     ckpt = th.load(
         os.path.join(artifact_dir, "generator.pth"),
         map_location=device,
@@ -98,9 +101,13 @@ if __name__ == "__main__":
         device=device,
         dtype=th.float32,
     )
-    gen = model(z)
-    gen_designs_np = gen.detach().cpu().numpy().reshape(args.n_samples, *problem.design_space.shape)
-    gen_designs_np = np.clip(gen_designs_np, 1e-3, 1.0)
+    # Generate a batch of designs
+    gen_designs = model(z)
+    gen_designs_np = gen_designs.detach().cpu().numpy()
+    gen_designs_np = gen_designs_np.reshape(args.n_samples, *problem.design_space.shape)
+
+    # Clip to boundaries for running THIS IS PROBLEM DEPENDENT
+    gen_designs_np = np.clip(gen_designs_np, 1e-3, 1)
 
     # Compute metrics
     metrics_dict = metrics.metrics(

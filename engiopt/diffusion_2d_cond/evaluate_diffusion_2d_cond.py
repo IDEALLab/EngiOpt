@@ -4,20 +4,19 @@ from __future__ import annotations
 
 import dataclasses
 import os
-import sys
 
-from diffusers import UNet2DConditionModel
+from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import numpy as np
 import pandas as pd
 import torch as th
 import tyro
-import wandb
 
 from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.diffusion_2d_cond.diffusion_2d_cond import beta_schedule
 from engiopt.diffusion_2d_cond.diffusion_2d_cond import DiffusionSampler
+import wandb
 
 
 @dataclasses.dataclass
@@ -32,7 +31,7 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
-    n_samples: int = 100
+    n_samples: int = 10
     """Number of generated samples per seed."""
     sigma: float = 1.0
     """Kernel bandwidth for MMD and DPP metrics."""
@@ -78,10 +77,14 @@ if __name__ == "__main__":
 
     api = wandb.Api()
     artifact = api.artifact(artifact_path, type="model")
+
+    class RunRetrievalError(ValueError):
+        def __init__(self):
+            super().__init__("Failed to retrieve the run")
+
     run = artifact.logged_by()
-    if run is None or not hasattr(run, "config"):
-        print("ERROR: Failed to retrieve WandB run", file=sys.stderr)
-        sys.exit(1)
+    if run is None or not hasattr(run, "config") or run.config is None:
+        raise RunRetrievalError
 
     artifact_dir = artifact.download()
     ckpt = th.load(
@@ -123,13 +126,16 @@ if __name__ == "__main__":
     model.eval()
 
     # Generate designs
-    gen = th.randn((args.n_samples, 1, *problem.design_space.shape), device=device)
+    design_shape: tuple = problem.design_space.shape
+    gen_designs = th.randn((args.n_samples, 1, *design_shape), device=device)
+    assert run.config["num_timesteps"] is not None
     for i in reversed(range(run.config["num_timesteps"])):
         t = th.full((args.n_samples,), i, device=device, dtype=th.long)
-        gen = sampler.sample_timestep(model, gen, t, conditions_tensor)
+        gen_designs = sampler.sample_timestep(model, gen_designs, t, conditions_tensor)
 
-    gen = gen.squeeze(1)
-    gen_designs_np = gen.detach().cpu().numpy().clip(1e-3, 1.0)
+    gen_designs = gen_designs.squeeze(1)
+    gen_designs_np = gen_designs.detach().cpu().numpy().reshape(args.n_samples, *problem.design_space.shape)
+    gen_designs_np = np.clip(gen_designs_np, 1e-3, 1.0)
 
     # Compute metrics
     metrics_dict = metrics.metrics(

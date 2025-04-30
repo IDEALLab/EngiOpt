@@ -4,18 +4,17 @@ from __future__ import annotations
 
 import dataclasses
 import os
-import sys
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import numpy as np
 import pandas as pd
 import torch as th
 import tyro
-import wandb
 
 from engiopt import metrics
 from engiopt.cgan_cnn_2d.cgan_cnn_2d import Generator
 from engiopt.dataset_sample_conditions import sample_conditions
+import wandb
 
 
 @dataclasses.dataclass
@@ -58,13 +57,13 @@ if __name__ == "__main__":
     else:
         device = th.device("cpu")
 
-    # Sample conditions & designs
-    _, sampled_conditions, sampled_designs_np, _ = sample_conditions(
-        problem=problem,
-        n_samples=args.n_samples,
-        device=device,
-        seed=seed,
+    ### Set up testing conditions ###
+    conditions_tensor, sampled_conditions, sampled_designs_np, selected_indices = sample_conditions(
+        problem=problem, n_samples=args.n_samples, device=device, seed=seed
     )
+
+    # Reshape to match the expected input shape for the model
+    conditions_tensor = conditions_tensor.unsqueeze(-1).unsqueeze(-1)
 
     # Load cGAN CNN generator artifact from WandB
     if args.wandb_entity:
@@ -74,29 +73,35 @@ if __name__ == "__main__":
 
     api = wandb.Api()
     artifact = api.artifact(artifact_path, type="model")
+
+    class RunRetrievalError(ValueError):
+        def __init__(self):
+            super().__init__("Failed to retrieve the run")
+
     run = artifact.logged_by()
     if run is None or not hasattr(run, "config"):
-        print("ERROR: Failed to retrieve WandB run", file=sys.stderr)
-        sys.exit(1)
-
+        raise RunRetrievalError
     artifact_dir = artifact.download()
-    ckpt = th.load(
-        os.path.join(artifact_dir, "generator.pth"),
-        map_location=device,
-    )
 
+    ckpt_path = os.path.join(artifact_dir, "generator.pth")
+    ckpt = th.load(ckpt_path, map_location=th.device(device))
     model = Generator(
-        latent_dim=run.config["latent_dim"],
-        design_shape=problem.design_space.shape,
-        feature_maps=run.config.get("feature_maps", 64),
-        num_layers=run.config.get("num_layers", 4),
-    ).to(device)
+        latent_dim=run.config["latent_dim"], n_conds=len(problem.conditions), design_shape=problem.design_space.shape
+    )
     model.load_state_dict(ckpt["generator"])
-    model.eval()
+    model.eval()  # Set to evaluation mode
+    model.to(device)
 
-    # Generate designs
-    z = th.randn((args.n_samples, run.config["latent_dim"]), device=device)
-    gen_designs_np = model(z).detach().cpu().numpy().clip(1e-3, 1.0)
+    # Sample noise as generator input
+    z = th.randn((args.n_samples, run.config["latent_dim"], 1, 1), device=device, dtype=th.float)
+
+    # Generate a batch of designs
+    gen_designs = model(z, conditions_tensor)
+    gen_designs_np = gen_designs.detach().cpu().numpy()
+    gen_designs_np = gen_designs_np.reshape(args.n_samples, *problem.design_space.shape)
+
+    # Clip to boundaries for running THIS IS PROBLEM DEPENDENT
+    gen_designs_np = np.clip(gen_designs_np, 1e-3, 1)
 
     # Compute metrics
     metrics_dict = metrics.metrics(

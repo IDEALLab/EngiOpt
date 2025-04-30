@@ -9,7 +9,7 @@ import random
 import time
 from typing import Literal
 
-from diffusers import UNet2DConditionModel
+from diffusers.models.unets.unet_2d_condition import UNet2DConditionModel
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import matplotlib.pyplot as plt
 import numpy as np
@@ -151,6 +151,7 @@ class DiffusionSampler:
 
         adds noise to reach the desired timestep.
         """
+        noise = th.randn_like(x_0).to(device)
         for i in range(t_final[0] - t_current[0]):
             t = t_final - i
 
