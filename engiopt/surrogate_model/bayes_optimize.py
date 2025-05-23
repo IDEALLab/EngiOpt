@@ -184,6 +184,7 @@ def optimise(opt_args: OptArgs) -> None:
         evaluation_function=lambda hp: _train_and_eval(hp, opt_args),
         minimize=opt_args.minimise,
         total_trials=opt_args.total_trials,
+        random_seed=opt_args.seed,
     )
 
     print("\n=== BEST RESULTS ===")
