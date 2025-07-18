@@ -1,0 +1,25 @@
+method: grid
+metric:
+  name: dpp
+  goal: maximize
+parameters:
+  algo:
+    values:
+    - cgan_cnn_3d
+  seed:
+    values: [1, 2, 3]
+  b1:
+    values: [0.25, 0.5, 0.75, 1.0]
+  b2:
+    values: [0.4995, 0.7495, 0.998]
+  batch_size:
+    values: [4, 8, 16]
+  latent_dim:
+    values: [32, 64, 128]
+  lr_disc:
+    values: [0.00005, 0.0001, 0.0002, 0.0004, 0.0008]
+  lr_gen:
+    values: [0.00005, 0.0001, 0.0002, 0.0004, 0.0008, 0.001, 0.002, 0.005]
+  n_epochs:
+    values: [150, 300, 450, 600]
+program: /cluster/home/chatterer/SemesterProject/projects/EngiOpt/engiopt/cgan_cnn_3d/cgan_cnn_3d.py

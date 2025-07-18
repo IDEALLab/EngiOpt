@@ -1,0 +1,35 @@
+method: grid
+metric:
+  name: dpp
+  goal: maximize
+parameters:
+  algo:
+    values:
+      - cgan_vae
+  seed:
+    values: [1, 2, 3]
+  batch_size:
+    values: [8, 6, 4]
+  b1:
+    values: [0.75, 0.65, 0.55, 0.45, 0.35]
+  lr_disc:
+    values: [0.00035, 0.0003, 0.00025]
+  latent_dim:
+    values: [90, 70, 50, 30]
+  gen_iters:
+    values: [1, 2]
+  discrim_iters:
+    values: [2]
+  n_slices:
+    values: [8]
+  b2:
+    values: [0.999]
+  lr_gen:
+    values: [0.0025]
+  lr_enc:
+    values: [0.001]
+  kl_weight:
+    values: [0.01]
+  recon_weight:
+    values: [1.0]
+program: /cluster/home/chatterer/SemesterProject/projects/EngiOpt/engiopt/cgan_vae/cgan_vae.py

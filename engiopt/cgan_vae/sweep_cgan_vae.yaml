@@ -1,0 +1,70 @@
+method: bayes
+metric:
+  name: dpp
+  goal: maximize
+early_terminate:
+  type: hyperband
+  max_iter: 7000
+  eta: 3
+parameters:
+  algo:
+    distribution: categorical
+    values:
+      - cgan_vae
+  b1:
+    distribution: uniform
+    min: 0.25
+    max: 1
+  b2:
+    distribution: uniform
+    min: 0.4995
+    max: 0.998
+  batch_size:
+    distribution: int_uniform
+    min: 4
+    max: 16
+  latent_dim:
+    distribution: int_uniform
+    min: 32
+    max: 128
+  lr_disc:
+    distribution: uniform
+    min: 0.00005
+    max: 0.0008
+  lr_gen:
+    distribution: uniform
+    min: 0.00005
+    max: 0.005
+  lr_enc:
+    distribution: uniform
+    min: 0.00005
+    max: 0.005
+  n_epochs:
+    distribution: int_uniform
+    min: 150
+    max: 600
+  kl_weight:
+    distribution: uniform
+    min: 0.001
+    max: 0.1
+  recon_weight:
+    distribution: uniform
+    min: 0.5
+    max: 2.0
+  n_views:
+    distribution: int_uniform
+    min: 1
+    max: 5
+  n_slices:
+    distribution: int_uniform
+    min: 3
+    max: 9
+  gen_iters:
+    distribution: int_uniform
+    min: 1
+    max: 2
+  discrim_iters:
+    distribution: int_uniform
+    min: 1
+    max: 2
+program: /cluster/home/chatterer/SemesterProject/projects/EngiOpt/engiopt/cgan_vae/cgan_vae.py

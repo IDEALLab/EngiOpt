@@ -1,0 +1,50 @@
+method: bayes
+metric:
+  name: dpp
+  goal: maximize
+early_terminate:
+  type: hyperband
+  max_iter: 7000
+  eta: 3
+parameters:
+  algo:
+    distribution: categorical
+    values:
+    - cgan_cnn_3d
+  b1:
+    distribution: uniform
+    max: 1
+    min: 0.25
+  b2:
+    distribution: uniform
+    max: 0.998
+    min: 0.4995
+  batch_size:
+    distribution: int_uniform
+    max: 16
+    min: 4
+  latent_dim:
+    distribution: int_uniform
+    max: 128
+    min: 32
+  lr_disc:
+    distribution: uniform
+    max: 0.0008
+    min: 0.00005
+  lr_gen:
+    distribution: uniform
+    max: 0.005
+    min: 0.00005
+  n_epochs:
+    distribution: int_uniform
+    max: 600
+    min: 150
+  gen_iters:
+    distribution: int_uniform
+    min: 1
+    max: 2
+  discrim_iters:
+    distribution: int_uniform
+    min: 1
+    max: 2
+program: /cluster/home/chatterer/SemesterProject/projects/EngiOpt/engiopt/cgan_cnn_3d/cgan_cnn_3d.py
