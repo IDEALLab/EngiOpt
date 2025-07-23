@@ -86,6 +86,18 @@ python engiopt/cgan_cnn_2d/evaluate_cgan_cnn_2d.py --problem-id "beams2d" --wand
 ```
 This will generate 10 designs from the trained model and run some [metrics](https://github.com/IDEALLab/EngiOpt/blob/main/engiopt/metrics.py) on them. This is what we used to generate the results in the paper. This by default will pull the model from wandb. It is possible to restore a model from a local file but is not currently supported.
 
+### Surrogate model
+
+The current surrogate model comprises several steps:
+- hyperparameter tuning,
+- training a (ensemble) model,
+- optimization, and
+- evaluation.
+
+See this [notebook](https://github.com/IDEALLab/EngiOpt/blob/main/engiopt/surrogate_model/case_study_pe_notebook.ipynb) for an example.
+
+
+
 
 ## Colab notebooks
 We have some colab notebooks that show how to use some of the EngiBench/EngiOpt features.
