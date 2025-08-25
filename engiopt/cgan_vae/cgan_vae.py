@@ -690,8 +690,8 @@ if __name__ == "__main__":
                 with th.no_grad():
                     n_samples = 50  # Generate more samples for meaningful comparison
                     # Generate samples for comparison
-                    generated_volumes = []
-                    real_volumes = []
+                    generated_volumes: list[np.ndarray] = []
+                    real_volumes: list[np.ndarray] = []
                     for _ in range(n_samples // batch_size + 1):
                         current_batch_size = min(batch_size, n_samples - len(generated_volumes) * batch_size)
                         if current_batch_size <= 0:
@@ -752,7 +752,10 @@ if __name__ == "__main__":
                 if dpp_value is not None:
                     log_dict["dpp_diversity"] = dpp_value
                     # Log the natural logarithm of DPP for optimization
-                    log_dict["log_dpp"] = np.log(max(dpp_value, np.finfo(np.float64).tiny))
+                    dpp_float = float(dpp_value)
+                    tiny_float = float(np.finfo(np.float64).tiny)
+                    max_val = max(dpp_float, tiny_float)
+                    log_dict["log_dpp"] = np.log(max_val)
 
                 wandb.log(log_dict)
 

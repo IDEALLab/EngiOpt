@@ -54,7 +54,7 @@ wandb agent <sweep_id>
 - `--n_epochs 300`: Number of training epochs
 - `--batch_size 8`: Batch size
 - `--lr_gen 0.0025`: Generator learning rate
-- `--lr_disc 10e-5`: Discriminator learning rate  
+- `--lr_disc 10e-5`: Discriminator learning rate
 - `--lr_enc 0.001`: Encoder learning rate
 - `--latent_dim 64`: Dimensionality of latent space
 
