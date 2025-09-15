@@ -104,3 +104,21 @@ See this [notebook](https://github.com/IDEALLab/EngiOpt/blob/main/engiopt/surrog
 We have some colab notebooks that show how to use some of the EngiBench/EngiOpt features.
 * [Example easy model (GAN)](https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/main/example_easy_model.ipynb)
 * [Example hard model (Diffusion)](https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/main/example_hard_model.ipynb)
+
+
+## Citing
+
+If you use EngiBenc/EngiOpt in your research, please cite the following paper:
+
+```bibtex
+@misc{felten_engibench_2025,
+	title = {{EngiBench}: {A} {Framework} for {Data}-{Driven} {Engineering} {Design} {Research}},
+	url = {http://arxiv.org/abs/2508.00831},
+	doi = {10.48550/arXiv.2508.00831},
+	urldate = {2025-08-07},
+	publisher = {arXiv},
+	author = {Felten, Florian and Apaza, Gabriel and B\¨aunlich, Gerhard and Diniz, Cashen and Dong, Xuliang and Drake, Arthur and Habibi, Milad and Hoffman, Nathaniel J. and Keeler, Matthew and Massoudi, Soheyl and VanGessel, Francis G. and Fuge, Mark},
+	month = jun,
+	year = {2025},
+}
+```
