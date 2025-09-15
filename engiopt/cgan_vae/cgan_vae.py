@@ -21,10 +21,10 @@ from torch import nn
 from torch.nn import functional
 import tqdm
 import tyro
-import wandb
 
 from engiopt.metrics import dpp_diversity
 from engiopt.metrics import mmd
+import wandb
 
 
 @dataclass
@@ -113,7 +113,7 @@ def visualize_3d_designs(
     # Create subplot grid (3 slices per design)
     rows = n_designs
     cols = 3  # XY, XZ, YZ slices
-    fig, axes = plt.subplots(rows, cols, figsize=(15, 5 * rows))
+    _, axes = plt.subplots(rows, cols, figsize=(15, 5 * rows))
 
     if rows == 1:
         axes = axes.reshape(1, -1)
