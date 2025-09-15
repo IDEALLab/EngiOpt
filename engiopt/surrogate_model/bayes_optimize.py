@@ -179,7 +179,7 @@ def optimise(opt_args: OptArgs) -> None:
         },
     ]
 
-    best_params, best_vals, experiment, _ = optimize(
+    best_params, best_vals, _, _ = optimize(
         parameters=space,
         evaluation_function=lambda hp: _train_and_eval(hp, opt_args),
         minimize=opt_args.minimise,
