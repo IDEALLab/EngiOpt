@@ -1,0 +1,66 @@
+cff-version: 1.2.0
+title: "EngiBench: A Framework for Data-Driven Engineering Design Research"
+preferred-citation:
+  type: conference-paper
+  title: "EngiBench: A Framework for Data-Driven Engineering Design Research"
+  authors:
+    - family-names: Felten
+      given-names: Florian
+    - family-names: Apaza
+      given-names: Gabriel
+    - family-names: B\¨aunlich
+      given-names: Gerhard
+    - family-names: Diniz
+      given-names: Cashen
+    - family-names: Dong
+      given-names: Xuliang
+    - family-names: Drake
+      given-names: Arthur
+    - family-names: Habibi
+      given-names: Milad
+    - family-names: Hoffman
+      given-names: Nathaniel J.
+    - family-names: Keeler
+      given-names: Matthew
+    - family-names: Massoudi
+      given-names: Soheyl
+    - family-names: VanGessel
+      given-names: Francis G.
+    - family-names: Fuge
+      given-names: Mark
+  date-released: 2025-06-01
+  doi: 10.48550/arXiv.2508.00831
+  url: "http://arxiv.org/abs/2508.00831"
+  version: "2025"
+  publisher: "arXiv"
+authors:
+  - family-names: Felten
+    given-names: Florian
+  - family-names: Apaza
+    given-names: Gabriel
+  - family-names: B\¨aunlich
+    given-names: Gerhard
+  - family-names: Diniz
+    given-names: Cashen
+  - family-names: Dong
+    given-names: Xuliang
+  - family-names: Drake
+    given-names: Arthur
+  - family-names: Habibi
+    given-names: Milad
+  - family-names: Hoffman
+    given-names: Nathaniel J.
+  - family-names: Keeler
+    given-names: Matthew
+  - family-names: Massoudi
+    given-names: Soheyl
+  - family-names: VanGessel
+    given-names: Francis G.
+  - family-names: Fuge
+    given-names: Mark
+date-released: 2025-06-01
+doi: 10.48550/arXiv.2508.00831
+url: "http://arxiv.org/abs/2508.00831"
+version: "2025"
+publisher: "arXiv"
+message: "If you use EngiBench in your research, please cite this work."
