@@ -291,5 +291,7 @@ module = [
     "hyppo.*",
     "plotly",
     "plotly.*",
+    "einops",
+    "einops.*",
 ]
 ignore_missing_imports = true
