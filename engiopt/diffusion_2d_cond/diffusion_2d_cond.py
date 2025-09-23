@@ -264,7 +264,7 @@ if __name__ == "__main__":
 
     # Loss function
     adversarial_loss: th.nn.Module = th.nn.MSELoss()
-    encoder_hid_dim = len(problem.conditions)
+    encoder_hid_dim = len(problem.conditions_keys)
     # Initialize UNet from Huggingface
     model = UNet2DConditionModel(
         sample_size=design_shape,
@@ -294,7 +294,7 @@ if __name__ == "__main__":
     training_ds = th.utils.data.TensorDataset(
         filtered_ds_norm.flatten(1), *[training_ds[key] for key in problem.conditions_keys]
     )
-    cond_tensors = th.stack(training_ds.tensors[1 : len(problem.conditions) + 1])
+    cond_tensors = th.stack(training_ds.tensors[1 : len(problem.conditions_keys) + 1])
     conds_min = cond_tensors.amin(dim=tuple(range(1, cond_tensors.ndim)))
     conds_max = cond_tensors.amax(dim=tuple(range(1, cond_tensors.ndim)))
 
@@ -412,7 +412,7 @@ if __name__ == "__main__":
                         img = tensor.cpu().numpy()  # Extract x and y coordinates
                         dc = hidden_states[j, 0, :].cpu()
                         axes[j].imshow(img[0])  # image plot
-                        title = [(problem.conditions[i][0], f"{dc[i]:.2f}") for i in range(len(problem.conditions))]
+                        title = [(problem.conditions_keys[i], f"{dc[i]:.2f}") for i in range(len(problem.conditions_keys))]
                         title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
                         axes[j].title.set_text(title_string)  # Set title
                         axes[j].set_xticks([])  # Hide x ticks

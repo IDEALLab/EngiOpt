@@ -460,7 +460,7 @@ if __name__ == "__main__":
     training_ds = th.utils.data.TensorDataset(
         th.stack(coords_set),
         th.stack(design_scalars).unsqueeze(1),
-        *[problem_dataset[key] for key, _ in problem.conditions],
+        *[problem_dataset[key] for key in problem.conditions_keys],
     )
 
     cond_tensors = th.stack(training_ds.tensors[2:])
@@ -481,7 +481,7 @@ if __name__ == "__main__":
     discriminator = Discriminator(
         latent_dim=args.latent_dim,
         design_scalars=len(design_scalar_keys),
-        num_conds=len(problem.conditions),
+        num_conds=len(problem.conditions_keys),
         design_shape=problem.design_space["coords"].shape,
         conds_normalizer=conds_normalizer,
         design_scalars_normalizer=design_scalars_normalizer,
@@ -490,7 +490,7 @@ if __name__ == "__main__":
     generator = Generator(
         latent_dim=args.latent_dim,
         noise_dim=args.noise_dim,
-        num_conds=len(problem.conditions),
+        num_conds=len(problem.conditions_keys),
         n_control_points=bezier_control_pts,
         n_data_points=n_data_points,
         conds_normalizer=conds_normalizer,
@@ -602,7 +602,7 @@ if __name__ == "__main__":
                     ax.figure.canvas.draw()
                     img = np.array(fig.canvas.renderer.buffer_rgba())
                     axes[j].imshow(img)
-                    title = [(problem.conditions[i - 1][0], f"{do1[i]:.2f}") for i in range(1, len(do1))]
+                    title = [(problem.conditions_keys[i - 1], f"{do1[i]:.2f}") for i in range(1, len(do1))]
                     title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
                     axes[j].title.set_text(title_string)  # Set title
                     axes[j].set_xticks([])

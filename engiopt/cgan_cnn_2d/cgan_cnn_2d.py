@@ -235,8 +235,7 @@ if __name__ == "__main__":
     problem.reset(seed=args.seed)
 
     design_shape = problem.design_space.shape
-    conditions = problem.conditions
-    n_conds = len(conditions)
+    n_conds = len(problem.conditions_keys)
 
     # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
@@ -377,7 +376,7 @@ if __name__ == "__main__":
                         img = tensor.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
                         dc = desired_conds[j].cpu()
                         axes[j].imshow(img)  # Scatter plot
-                        title = [(conditions[i][0], f"{dc[i]:.2f}") for i in range(n_conds)]
+                        title = [(problem.conditions_keys[i], f"{dc[i]:.2f}") for i in range(n_conds)]
                         title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
                         axes[j].title.set_text(title_string)  # Set title
                         axes[j].set_xticks([])  # Hide x ticks

@@ -212,8 +212,7 @@ if __name__ == "__main__":
     else:
         dummy_design, _ = problem.random_design()
         design_shape = spaces.flatten(problem.design_space, dummy_design).shape
-    conditions = problem.conditions
-    n_conds = len(conditions)
+    n_conds = len(problem.conditions_keys)
 
     # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
@@ -360,7 +359,7 @@ if __name__ == "__main__":
                         ax.figure.canvas.draw()
                         img = np.array(fig.canvas.renderer.buffer_rgba())
                         axes[j].imshow(img)
-                        title = [(conditions[i][0], f"{dc[i]:.2f}") for i in range(n_conds)]
+                        title = [(problem.conditions_keys[i], f"{dc[i]:.2f}") for i in range(n_conds)]
                         title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
                         axes[j].title.set_text(title_string)  # Set title
                         axes[j].set_xticks([])  # Hide x ticks
