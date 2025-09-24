@@ -94,17 +94,17 @@ class Args:
     """weighting factor for the reconstruction loss"""
     perceptual_loss_factor: float = 1.0
     """weighting factor for the perceptual loss"""
-    encoder_channels: tuple = (128, 128, 128, 256, 256, 512)
+    encoder_channels: tuple[int, ...] = (128, 128, 128, 256, 256, 512)
     """list of channel sizes for each encoder layer"""
-    encoder_attn_resolutions: tuple = (16,)
+    encoder_attn_resolutions: tuple[int, ...] = (16,)
     """list of resolutions at which to apply attention in the encoder"""
     encoder_num_res_blocks: int = 2
     """number of residual blocks per encoder layer"""
     encoder_start_resolution: int = 256
     """starting resolution for the encoder"""
-    decoder_channels: tuple = (512, 256, 256, 128, 128)
+    decoder_channels: tuple[int, ...] = (512, 256, 256, 128, 128)
     """list of channel sizes for each decoder layer"""
-    decoder_attn_resolutions: tuple = (16,)
+    decoder_attn_resolutions: tuple[int, ...] = (16,)
     """list of resolutions at which to apply attention in the decoder"""
     decoder_num_res_blocks: int = 3
     """number of residual blocks per decoder layer"""
@@ -145,28 +145,40 @@ class Args:
 class Codebook(nn.Module):
     """Improved version over vector quantizer, with the dynamic initialization for the unoptimized "dead" vectors.
 
-    num_embed: number of codebook entry
-    embed_dim: dimensionality of codebook entry
-    beta: weight for the commitment loss
-    distance: distance for looking up the closest code
-    anchor: anchor sampled methods
-    first_batch: if true, the offline version of our model
-    contras_loss: if true, use the contras_loss to further improve the performance
+    Parameters:
+        num_codebook_vectors (int): number of codebook entries
+        latent_dim (int): dimensionality of codebook entries
+        beta (float): weight for the commitment loss
+        decay (float): decay for the moving average of code usage
+        distance (str): distance type for looking up the closest code
+        anchor (str): anchor sampling methods
+        first_batch (bool): if true, the offline version of the model
+        contras_loss (bool): if true, use the contras_loss to further improve the performance
+        init (bool): if true, the codebook has been initialized
     """
-    def __init__(self, args):
+    def __init__(  # noqa: PLR0913
+        self, *,
+        num_codebook_vectors: int,
+        latent_dim: int,
+        beta: float = 0.25,
+        decay: float = 0.99,
+        distance: str = "cos",
+        anchor: str = "probrandom",
+        first_batch: bool = False,
+        contras_loss: bool = False,
+        init: bool = False,
+    ):
         super().__init__()
 
-        self.num_embed = args.c_num_codebook_vectors if args.is_c else args.num_codebook_vectors
-        self.embed_dim = args.c_latent_dim if args.is_c else args.latent_dim
-        self.beta = args.beta
-
-        # Fixed parameters from the original implementation
-        self.distance = "cos"
-        self.anchor = "probrandom"
-        self.first_batch = False
-        self.contras_loss = False
-        self.decay = 0.99
-        self.init = False
+        self.num_embed = num_codebook_vectors
+        self.embed_dim = latent_dim
+        self.beta = beta
+        self.decay = decay
+        self.distance = distance
+        self.anchor = anchor
+        self.first_batch = first_batch
+        self.contras_loss = contras_loss
+        self.init = init
 
         self.pool = FeaturePool(self.num_embed, self.embed_dim)
         self.embedding = nn.Embedding(self.num_embed, self.embed_dim)
@@ -198,7 +210,7 @@ class Codebook(nn.Module):
         encodings = th.zeros(encoding_indices.unsqueeze(1).shape[0], self.num_embed, device=z.device)
         encodings.scatter_(1, encoding_indices.unsqueeze(1), 1)
 
-        # quantise and unflatten
+        # quantize and unflatten
         z_q = th.matmul(encodings, self.embedding.weight).view(z.shape)
         # compute loss for embedding
         loss = self.beta * th.mean((z_q.detach()-z)**2) + th.mean((z_q - z.detach()) ** 2)
@@ -211,7 +223,7 @@ class Codebook(nn.Module):
         perplexity = th.exp(-th.sum(avg_probs * th.log(avg_probs + 1e-10)))
         min_encodings = encodings
 
-        # online clustered reinitialisation for unoptimized points
+        # online clustered reinitialization for unoptimized points
         if self.training:
             # calculate the average usage of code entries
             self.embed_prob.mul_(self.decay).add_(avg_probs, alpha= 1 - self.decay)
@@ -249,18 +261,21 @@ class Codebook(nn.Module):
 class FeaturePool:
     """Implements a feature buffer that stores previously encoded features.
 
-    This buffer enables us to initialize the codebook using a history of generated features rather than the ones produced by the latest encoders
-    """
-    def __init__(self, pool_size, dim=64):
-        """Initialize the FeaturePool class.
+    This buffer enables us to initialize the codebook using a history of generated features rather than the ones produced by the latest encoders.
 
-        Parameters:
-            pool_size(int) -- the size of featue buffer
-        """
+    Parameters:
+        pool_size (int): the size of featue buffer
+        dim (int): the dimension of each feature
+    """
+    def __init__(
+        self,
+        pool_size: int,
+        dim: int = 64
+    ):
         self.pool_size = pool_size
         if self.pool_size > 0:
             self.nums_features = 0
-            self.features = (th.rand((pool_size, dim)) * 2 - 1)/ pool_size
+            self.features = (th.rand((pool_size, dim)) * 2 - 1) / pool_size
 
     def query(self, features: th.Tensor) -> th.Tensor:
         """Return features from the pool."""
@@ -286,8 +301,15 @@ class FeaturePool:
 
 
 class GroupNorm(nn.Module):
-    """Group Normalization block to be used in VQGAN Encoder and Decoder."""
-    def __init__(self, channels):
+    """Group Normalization block to be used in VQGAN Encoder and Decoder.
+
+    Parameters:
+        channels (int): number of channels in the input feature map
+    """
+    def __init__(
+        self,
+        channels: int
+    ):
         super().__init__()
         self.gn = nn.GroupNorm(num_groups=32, num_channels=channels, eps=1e-6, affine=True)
 
@@ -302,8 +324,17 @@ class Swish(nn.Module):
 
 
 class ResidualBlock(nn.Module):
-    """Residual block to be used in VQGAN Encoder and Decoder."""
-    def __init__(self, in_channels, out_channels):
+    """Residual block to be used in VQGAN Encoder and Decoder.
+
+    Parameters:
+        in_channels (int): number of input channels
+        out_channels (int): number of output channels
+    """
+    def __init__(
+        self,
+        in_channels: int,
+        out_channels: int
+    ):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -326,8 +357,15 @@ class ResidualBlock(nn.Module):
 
 
 class UpSampleBlock(nn.Module):
-    """Up-sampling block to be used in VQGAN Decoder."""
-    def __init__(self, channels):
+    """Up-sampling block to be used in VQGAN Decoder.
+
+    Parameters:
+        channels (int): number of channels in the input feature map
+    """
+    def __init__(
+        self,
+        channels: int
+    ):
         super().__init__()
         self.conv = nn.Conv2d(channels, channels, 3, 1, 1)
 
@@ -337,8 +375,15 @@ class UpSampleBlock(nn.Module):
 
 
 class DownSampleBlock(nn.Module):
-    """Down-sampling block to be used in VQGAN Encoder."""
-    def __init__(self, channels):
+    """Down-sampling block to be used in VQGAN Encoder.
+
+    Parameters:
+        channels (int): number of channels in the input feature map
+    """
+    def __init__(
+        self,
+        channels: int
+    ):
         super().__init__()
         self.conv = nn.Conv2d(channels, channels, 3, 2, 0)
 
@@ -349,8 +394,15 @@ class DownSampleBlock(nn.Module):
 
 
 class NonLocalBlock(nn.Module):
-    """Non-local attention block to be used in VQGAN Encoder and Decoder."""
-    def __init__(self, channels):
+    """Non-local attention block to be used in VQGAN Encoder and Decoder.
+
+    Parameters:
+        channels (int): number of channels in the input feature map
+    """
+    def __init__(
+        self,
+        channels: int
+    ):
         super().__init__()
         self.in_channels = channels
 
@@ -385,8 +437,19 @@ class NonLocalBlock(nn.Module):
 
 
 class LinearCombo(nn.Module):
-    """Regular fully connected layer combo for the CVQGAN if enabled."""
-    def __init__(self, in_features, out_features, alpha=0.2):
+    """Regular fully connected layer combo for the CVQGAN if enabled.
+
+    Parameters:
+        in_features (int): number of input features
+        out_features (int): number of output features
+        alpha (float): negative slope for LeakyReLU
+    """
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        alpha: float = 0.2
+    ):
         super().__init__()
         self.model = nn.Sequential(
             nn.Linear(in_features, out_features),
@@ -403,19 +466,35 @@ class Encoder(nn.Module):
     Consists of a series of convolutional, residual, and attention blocks arranged using the provided arguments.
     The number of downsample blocks is determined by the length of the encoder channels list minus two.
     For example, if encoder_channels=(128, 128, 128, 128) and the starting resolution is 128, the encoder will downsample the input image twice, from 128x128 to 32x32.
+
+    Parameters:
+        encoder_channels (tuple[int, ...]): list of channel sizes for each encoder layer
+        encoder_start_resolution (int): starting resolution for the encoder
+        encoder_attn_resolutions (tuple[int, ...]): list of resolutions at which to apply attention in the encoder
+        encoder_num_res_blocks (int): number of residual blocks per encoder layer
+        image_channels (int): number of channels in the input image
+        latent_dim (int): dimensionality of the latent space
     """
-    def __init__(self, args):
+    def __init__(  # noqa: PLR0913
+        self,
+        encoder_channels: tuple[int, ...],
+        encoder_start_resolution: int,
+        encoder_attn_resolutions: tuple[int, ...],
+        encoder_num_res_blocks: int,
+        image_channels: int,
+        latent_dim: int,
+    ):
         super().__init__()
-        channels = args.encoder_channels
-        resolution = args.encoder_start_resolution
-        layers = [nn.Conv2d(args.image_channels, channels[0], 3, 1, 1)]
+        channels = encoder_channels
+        resolution = encoder_start_resolution
+        layers = [nn.Conv2d(image_channels, channels[0], 3, 1, 1)]
         for i in range(len(channels)-1):
             in_channels = channels[i]
             out_channels = channels[i + 1]
-            for _ in range(args.encoder_num_res_blocks):
+            for _ in range(encoder_num_res_blocks):
                 layers.append(ResidualBlock(in_channels, out_channels))
                 in_channels = out_channels
-                if resolution in args.encoder_attn_resolutions:
+                if resolution in encoder_attn_resolutions:
                     layers.append(NonLocalBlock(in_channels))
             if i != len(channels)-2:
                 layers.append(DownSampleBlock(channels[i+1]))
@@ -425,7 +504,7 @@ class Encoder(nn.Module):
         layers.append(ResidualBlock(channels[-1], channels[-1]))
         layers.append(GroupNorm(channels[-1]))
         layers.append(Swish())
-        layers.append(nn.Conv2d(channels[-1], args.latent_dim, 3, 1, 1))
+        layers.append(nn.Conv2d(channels[-1], latent_dim, 3, 1, 1))
         self.model = nn.Sequential(*layers)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
@@ -433,14 +512,27 @@ class Encoder(nn.Module):
 
 
 class CondEncoder(nn.Module):
-    """Simpler MLP-based encoder for the CVQGAN if enabled."""
-    def __init__(self, args):
+    """Simpler MLP-based encoder for the CVQGAN if enabled.
+
+    Parameters:
+        c_fmap_dim (int): feature map dimension for the CVQGAN encoder output
+        c_input_dim (int): number of input features
+        c_hidden_dim (int): hidden dimension of the CVQGAN MLP
+        c_latent_dim (int): individual code dimension for CVQGAN
+    """
+    def __init__(
+        self,
+        c_fmap_dim: int,
+        c_input_dim: int,
+        c_hidden_dim: int,
+        c_latent_dim: int
+    ):
         super().__init__()
-        self.c_fmap_dim = args.c_fmap_dim
+        self.c_fmap_dim = c_fmap_dim
         self.model = nn.Sequential(
-            LinearCombo(args.c_input_dim, args.c_hidden_dim),
-            LinearCombo(args.c_hidden_dim, args.c_hidden_dim),
-            nn.Linear(args.c_hidden_dim, args.c_latent_dim*args.c_fmap_dim**2)
+            LinearCombo(c_input_dim, c_hidden_dim),
+            LinearCombo(c_hidden_dim, c_hidden_dim),
+            nn.Linear(c_hidden_dim, c_latent_dim*c_fmap_dim**2)
         )
 
     def forward(self, x: th.Tensor) -> th.Tensor:
@@ -455,22 +547,38 @@ class Decoder(nn.Module):
     Consists of a series of convolutional, residual, and attention blocks arranged using the provided arguments.
     The number of upsample blocks is determined by the length of the decoder channels list minus one.
     For example, if decoder_channels=(128, 128, 128) and the starting resolution is 32, the decoder will upsample the input image twice, from 32x32 to 128x128.
+
+    Parameters:
+        decoder_channels (tuple[int, ...]): list of channel sizes for each decoder layer
+        decoder_start_resolution (int): starting resolution for the decoder
+        decoder_attn_resolutions (tuple[int, ...]): list of resolutions at which to apply attention in the decoder
+        decoder_num_res_blocks (int): number of residual blocks per decoder layer
+        image_channels (int): number of channels in the output image
+        latent_dim (int): dimensionality of the latent space
     """
-    def __init__(self, args):
+    def __init__(  # noqa: PLR0913
+        self,
+        decoder_channels: tuple[int, ...],
+        decoder_start_resolution: int,
+        decoder_attn_resolutions: tuple[int, ...],
+        decoder_num_res_blocks: int,
+        image_channels: int,
+        latent_dim: int
+    ):
         super().__init__()
-        in_channels = args.decoder_channels[0]
-        resolution = args.decoder_start_resolution
-        layers = [nn.Conv2d(args.latent_dim, in_channels, 3, 1, 1),
+        in_channels = decoder_channels[0]
+        resolution = decoder_start_resolution
+        layers = [nn.Conv2d(latent_dim, in_channels, 3, 1, 1),
                   ResidualBlock(in_channels, in_channels),
                   NonLocalBlock(in_channels),
                   ResidualBlock(in_channels, in_channels)]
 
-        for i in range(len(args.decoder_channels)):
-            out_channels = args.decoder_channels[i]
-            for _ in range(args.decoder_num_res_blocks):
+        for i in range(len(decoder_channels)):
+            out_channels = decoder_channels[i]
+            for _ in range(decoder_num_res_blocks):
                 layers.append(ResidualBlock(in_channels, out_channels))
                 in_channels = out_channels
-                if resolution in args.decoder_attn_resolutions:
+                if resolution in decoder_attn_resolutions:
                     layers.append(NonLocalBlock(in_channels))
 
             if i != 0:
@@ -479,7 +587,7 @@ class Decoder(nn.Module):
 
         layers.append(GroupNorm(in_channels))
         layers.append(Swish())
-        layers.append(nn.Conv2d(in_channels, args.image_channels, 3, 1, 1))
+        layers.append(nn.Conv2d(in_channels, image_channels, 3, 1, 1))
         self.model = nn.Sequential(*layers)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
@@ -487,14 +595,27 @@ class Decoder(nn.Module):
 
 
 class CondDecoder(nn.Module):
-    """Simpler MLP-based decoder for the CVQGAN if enabled."""
-    def __init__(self, args):
+    """Simpler MLP-based decoder for the CVQGAN if enabled.
+
+    Parameters:
+        c_fmap_dim (int): feature map dimension for the CVQGAN encoder output
+        c_input_dim (int): number of input features
+        c_hidden_dim (int): hidden dimension of the CVQGAN MLP
+        c_latent_dim (int): individual code dimension for CVQGAN
+    """
+    def __init__(
+        self,
+        c_latent_dim: int,
+        c_input_dim: int,
+        c_hidden_dim: int,
+        c_fmap_dim: int
+    ):
         super().__init__()
 
         self.model = nn.Sequential(
-            LinearCombo(args.c_latent_dim*args.c_fmap_dim**2, args.c_hidden_dim),
-            LinearCombo(args.c_hidden_dim, args.c_hidden_dim),
-            nn.Linear(args.c_hidden_dim, args.c_input_dim)
+            LinearCombo(c_latent_dim*c_fmap_dim**2, c_hidden_dim),
+            LinearCombo(c_hidden_dim, c_hidden_dim),
+            nn.Linear(c_hidden_dim, c_input_dim)
         )
 
     def forward(self, x: th.Tensor) -> th.Tensor:
