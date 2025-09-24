@@ -24,6 +24,7 @@ import os
 import random
 import time
 from typing import Optional, TYPE_CHECKING
+import warnings
 
 from einops import rearrange
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
@@ -101,7 +102,7 @@ class Args:
     """number of cpu threads to use during batch generation"""
     latent_dim: int = 16
     """dimensionality of the latent space"""
-    codebook_vectors: int = 256
+    num_codebook_vectors: int = 256
     """number of vectors in the codebook"""
     disc_start: int = 0
     """epoch to start discriminator training"""
@@ -135,7 +136,7 @@ class Args:
     """hidden dimension of the CVQGAN MLP"""
     cond_latent_dim: int = 4
     "individual code dimension for CVQGAN"
-    cond_codebook_vectors: int = 256
+    cond_codebook_vectors: int = 64
     """number of vectors in the CVQGAN codebook"""
     cond_feature_map_dim: int = 4
     """feature map dimension for the CVQGAN encoder output"""
@@ -201,7 +202,6 @@ class Codebook(nn.Module):
         self.embedding = nn.Embedding(self.num_embed, self.embed_dim)
         self.embedding.weight.data.uniform_(-1.0 / self.num_embed, 1.0 / self.num_embed)
         self.register_buffer("embed_prob", th.zeros(self.num_embed))
-
 
     def forward(self, z: th.Tensor) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         # reshape z -> (batch, height, width, channel) and flatten
@@ -532,30 +532,30 @@ class CondEncoder(nn.Module):
     """Simpler MLP-based encoder for the CVQGAN if enabled.
 
     Parameters:
-        c_fmap_dim (int): feature map dimension for the CVQGAN encoder output
-        c_input_dim (int): number of input features
-        c_hidden_dim (int): hidden dimension of the CVQGAN MLP
-        c_latent_dim (int): individual code dimension for CVQGAN
+        cond_feature_map_dim (int): feature map dimension for the CVQGAN encoder output
+        cond_dim (int): number of input features
+        cond_hidden_dim (int): hidden dimension of the CVQGAN MLP
+        cond_latent_dim (int): individual code dimension for CVQGAN
     """
     def __init__(
         self,
-        c_fmap_dim: int,
-        c_input_dim: int,
-        c_hidden_dim: int,
-        c_latent_dim: int
+        cond_feature_map_dim: int,
+        cond_dim: int,
+        cond_hidden_dim: int,
+        cond_latent_dim: int
     ):
         super().__init__()
-        self.c_fmap_dim = c_fmap_dim
+        self.c_feature_map_dim = cond_feature_map_dim
         self.model = nn.Sequential(
-            LinearCombo(c_input_dim, c_hidden_dim),
-            LinearCombo(c_hidden_dim, c_hidden_dim),
-            nn.Linear(c_hidden_dim, c_latent_dim*c_fmap_dim**2)
+            LinearCombo(cond_dim, cond_hidden_dim),
+            LinearCombo(cond_hidden_dim, cond_hidden_dim),
+            nn.Linear(cond_hidden_dim, cond_latent_dim*cond_feature_map_dim**2)
         )
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         encoded = self.model(x)
         s = encoded.shape
-        return encoded.view(s[0], s[1]//self.c_fmap_dim**2, self.c_fmap_dim, self.c_fmap_dim)
+        return encoded.view(s[0], s[1]//self.c_feature_map_dim**2, self.c_feature_map_dim, self.c_feature_map_dim)
 
 
 class Decoder(nn.Module):
@@ -615,24 +615,24 @@ class CondDecoder(nn.Module):
     """Simpler MLP-based decoder for the CVQGAN if enabled.
 
     Parameters:
-        c_fmap_dim (int): feature map dimension for the CVQGAN encoder output
-        c_input_dim (int): number of input features
-        c_hidden_dim (int): hidden dimension of the CVQGAN MLP
-        c_latent_dim (int): individual code dimension for CVQGAN
+        cond_feature_map_dim (int): feature map dimension for the CVQGAN encoder output
+        cond_dim (int): number of input features
+        cond_hidden_dim (int): hidden dimension of the CVQGAN MLP
+        cond_latent_dim (int): individual code dimension for CVQGAN
     """
     def __init__(
         self,
-        c_latent_dim: int,
-        c_input_dim: int,
-        c_hidden_dim: int,
-        c_fmap_dim: int
+        cond_latent_dim: int,
+        cond_dim: int,
+        cond_hidden_dim: int,
+        cond_feature_map_dim: int
     ):
         super().__init__()
 
         self.model = nn.Sequential(
-            LinearCombo(c_latent_dim*c_fmap_dim**2, c_hidden_dim),
-            LinearCombo(c_hidden_dim, c_hidden_dim),
-            nn.Linear(c_hidden_dim, c_input_dim)
+            LinearCombo(cond_latent_dim*cond_feature_map_dim**2, cond_hidden_dim),
+            LinearCombo(cond_hidden_dim, cond_hidden_dim),
+            nn.Linear(cond_hidden_dim, cond_dim)
         )
 
     def forward(self, x: th.Tensor) -> th.Tensor:
@@ -689,7 +689,7 @@ class Discriminator(nn.Module):
         )
         self.model = nn.Sequential(*layers)
 
-        # Adapter for CVQGAN latent vectors → image
+        # Adapter for CVQGAN latent vectors -> image
         self.cvqgan_adapter = nn.Sequential(
             nn.Linear(image_channels, image_size),
             nn.ReLU(inplace=True),
@@ -832,7 +832,7 @@ class GreyscaleLPIPS(nn.Module):
             real_x = th.clamp(real_x, 0.0, 1.0)
             fake_x = th.clamp(fake_x, 0.0, 1.0)
 
-        # Promote greyscale → RGB for VGG features
+        # Promote greyscale -> RGB for VGG features
         if real_x.shape[1] == 1:
             real_x = real_x.repeat(1, 3, 1, 1)
         if fake_x.shape[1] == 1:
@@ -855,13 +855,13 @@ class GreyscaleLPIPS(nn.Module):
     # Helpers
     @staticmethod
     def _norm_tensor(x: th.Tensor) -> th.Tensor:
-        """L2-normalize channels per spatial location: BxCxHxW → BxCxHxW."""
+        """L2-normalize channels per spatial location: BxCxHxW -> BxCxHxW."""
         norm = th.sqrt(th.sum(x**2, dim=1, keepdim=True))
         return x / (norm + 1e-10)
 
     @staticmethod
     def _spatial_average(x: th.Tensor) -> th.Tensor:
-        """Average over spatial dimensions with dims kept: BxCxHxW → BxCx1x1."""
+        """Average over spatial dimensions with dims kept: BxCxHxW -> BxCx1x1."""
         return x.mean(dim=(2, 3), keepdim=True)
 
     def _load_from_pretrained(self, *, name: str) -> None:
@@ -892,3 +892,136 @@ class GreyscaleLPIPS(nn.Module):
             self._download(URL_MAP[name], path)
         return path
 
+
+class VQGAN(nn.Module):
+    """VQGAN model for Stage 1.
+
+    Can be configured as a CVQGAN if desired.
+
+    Parameters:
+        device (th.device): torch device to use
+
+        **CVQGAN params**
+        is_c (bool): If True, use CVQGAN architecture (MLP-based encoder/decoder).
+        cond_feature_map_dim (int): Feature map dimension for the CVQGAN encoder output.
+        cond_dim (int): Number of input features for the CVQGAN encoder.
+        cond_hidden_dim (int): Hidden dimension of the CVQGAN MLP.
+        cond_latent_dim (int): Individual code dimension for CVQGAN.
+        cond_codebook_vectors (int): Number of codebook vectors for CVQGAN.
+
+        **VQGAN params**
+        encoder_channels (tuple[int, ...]): Tuple of channel sizes for each encoder layer.
+        encoder_start_resolution (int): Starting resolution for the encoder.
+        encoder_attn_resolutions (tuple[int, ...]): Tuple of resolutions at which to apply attention in the encoder.
+        encoder_num_res_blocks (int): Number of residual blocks per encoder layer.
+        decoder_channels (tuple[int, ...]): Tuple of channel sizes for each decoder layer.
+        decoder_start_resolution (int): Starting resolution for the decoder.
+        decoder_attn_resolutions (tuple[int, ...]): Tuple of resolutions at which to apply attention in the decoder.
+        decoder_num_res_blocks (int): Number of residual blocks per decoder layer.
+        image_channels (int): Number of channels in the input/output image.
+        latent_dim (int): Dimensionality of the latent space.
+        num_codebook_vectors (int): Number of codebook vectors.
+    """
+    def __init__(  # noqa: PLR0913
+        self, *,
+        device: th.device,
+
+        # CVQGAN parameters
+        is_c: bool = False,
+        cond_feature_map_dim: int = 4,
+        cond_dim: int = 3,
+        cond_hidden_dim: int = 256,
+        cond_latent_dim: int = 4,
+        cond_codebook_vectors: int = 64,
+
+        # VQGAN + Codebook parameters
+        encoder_channels: tuple[int, ...],
+        encoder_start_resolution: int,
+        encoder_attn_resolutions: tuple[int, ...],
+        encoder_num_res_blocks: int,
+        decoder_channels: tuple[int, ...],
+        decoder_start_resolution: int,
+        decoder_attn_resolutions: tuple[int, ...],
+        decoder_num_res_blocks: int,
+        image_channels: int = 1,
+        latent_dim: int = 16,
+        num_codebook_vectors: int = 256,
+
+    ):
+        super().__init__()
+        if is_c:
+            self.encoder = CondEncoder(
+                cond_feature_map_dim,
+                cond_dim,
+                cond_hidden_dim,
+                cond_latent_dim
+            ).to(device=device)
+
+            self.decoder = CondDecoder(
+                cond_latent_dim,
+                cond_dim,
+                cond_hidden_dim,
+                cond_feature_map_dim
+            ).to(device=device)
+
+            self.quant_conv = nn.Conv2d(cond_latent_dim, cond_latent_dim, 1).to(device=device)
+            self.post_quant_conv = nn.Conv2d(cond_latent_dim, cond_latent_dim, 1).to(device=device)
+        else:
+            self.encoder = Encoder(
+                encoder_channels,
+                encoder_start_resolution,
+                encoder_attn_resolutions,
+                encoder_num_res_blocks,
+                image_channels,
+                latent_dim
+            ).to(device=device)
+
+            self.decoder = Decoder(
+                decoder_channels,
+                decoder_start_resolution,
+                decoder_attn_resolutions,
+                decoder_num_res_blocks,
+                image_channels,
+                latent_dim
+            ).to(device=device)
+
+            self.quant_conv = nn.Conv2d(latent_dim, latent_dim, 1).to(device=device)
+            self.post_quant_conv = nn.Conv2d(latent_dim, latent_dim, 1).to(device=device)
+
+        self.codebook = Codebook(
+            num_codebook_vectors = cond_codebook_vectors if is_c else num_codebook_vectors,
+            latent_dim = cond_latent_dim if is_c else latent_dim
+        ).to(device=device)
+
+    def forward(self, imgs: th.Tensor) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
+        """Full VQGAN forward pass."""
+        encoded = self.encoder(imgs)
+        quant_encoded = self.quant_conv(encoded)
+        quant, indices, q_loss = self.codebook(quant_encoded)
+        post_quant = self.post_quant_conv(quant)
+        decoded = self.decoder(post_quant)
+        return decoded, indices, q_loss
+
+    def encode(self, imgs: th.Tensor) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
+        """Encode image batch into quantized latent representation."""
+        encoded = self.encoder(imgs)
+        quant_encoded = self.quant_conv(encoded)
+        return self.codebook(quant_encoded)
+
+    def decode(self, z: th.Tensor) -> th.Tensor:
+        """Decode quantized latent representation back to image space."""
+        return self.decoder(self.post_quant_conv(z))
+
+    def calculate_lambda(self, perceptual_loss: th.Tensor, gan_loss: th.Tensor) -> th.Tensor:
+        """Compute balancing factor λ between discriminator loss and the remaining loss terms."""
+        last_layer = self.decoder.model[-1]
+        last_weight = last_layer.weight
+        grad_perc = th.autograd.grad(perceptual_loss, last_weight, retain_graph=True)[0]
+        grad_gan = th.autograd.grad(gan_loss, last_weight, retain_graph=True)[0]
+        lamb = th.norm(grad_perc) / (th.norm(grad_gan) + 1e-4)
+        return 0.8 * th.clamp(lamb, 0.0, 1e4).detach()
+
+    @staticmethod
+    def adopt_weight(disc_factor: float, i: int, threshold: int, value: float = 0.0) -> float:
+        """Adopt weight scheduling: zero out `disc_factor` before threshold."""
+        return value if i < threshold else disc_factor
