@@ -293,5 +293,7 @@ module = [
     "plotly.*",
     "einops",
     "einops.*",
+    "torchvision.*",
+    "requests",
 ]
 ignore_missing_imports = true

@@ -18,19 +18,24 @@ We have updated the transformer architecture, converted VQGAN from a two-stage t
 
 from __future__ import annotations
 
+from collections import namedtuple
 from dataclasses import dataclass
 import os
 import random
 import time
+from typing import Optional, TYPE_CHECKING
 
 from einops import rearrange
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import matplotlib.pyplot as plt
 import numpy as np
+import requests
 import torch as th
 from torch import autograd
 from torch import nn
 from torch.nn import functional as f
+from torchvision.models import vgg16
+from torchvision.models import VGG16_Weights
 import tqdm
 import tyro
 import wandb
@@ -39,6 +44,18 @@ from engiopt.metrics import dpp_diversity
 from engiopt.metrics import mmd
 from engiopt.transforms import resize_to
 from engiopt.transforms import upsample_nearest
+
+if TYPE_CHECKING:
+    import logging
+
+# URL and checkpoint for LPIPS model
+URL_MAP = {
+    "vgg_lpips": "https://heibox.uni-heidelberg.de/f/607503859c864bc1b30b/?dl=1"
+}
+
+CKPT_MAP = {
+    "vgg_lpips": "vgg.pth"
+}
 
 
 @dataclass
@@ -95,17 +112,17 @@ class Args:
     perceptual_loss_factor: float = 1.0
     """weighting factor for the perceptual loss"""
     encoder_channels: tuple[int, ...] = (128, 128, 128, 256, 256, 512)
-    """list of channel sizes for each encoder layer"""
+    """tuple of channel sizes for each encoder layer"""
     encoder_attn_resolutions: tuple[int, ...] = (16,)
-    """list of resolutions at which to apply attention in the encoder"""
+    """tuple of resolutions at which to apply attention in the encoder"""
     encoder_num_res_blocks: int = 2
     """number of residual blocks per encoder layer"""
     encoder_start_resolution: int = 256
     """starting resolution for the encoder"""
     decoder_channels: tuple[int, ...] = (512, 256, 256, 128, 128)
-    """list of channel sizes for each decoder layer"""
+    """tuple of channel sizes for each decoder layer"""
     decoder_attn_resolutions: tuple[int, ...] = (16,)
-    """list of resolutions at which to apply attention in the decoder"""
+    """tuple of resolutions at which to apply attention in the decoder"""
     decoder_num_res_blocks: int = 3
     """number of residual blocks per decoder layer"""
     sample_interval: int = 1600
@@ -461,16 +478,16 @@ class LinearCombo(nn.Module):
 
 
 class Encoder(nn.Module):
-    """Encoder module for VQGAN.
+    """Encoder module for VQGAN Stage 1.
 
     Consists of a series of convolutional, residual, and attention blocks arranged using the provided arguments.
-    The number of downsample blocks is determined by the length of the encoder channels list minus two.
+    The number of downsample blocks is determined by the length of the encoder channels tuple minus two.
     For example, if encoder_channels=(128, 128, 128, 128) and the starting resolution is 128, the encoder will downsample the input image twice, from 128x128 to 32x32.
 
     Parameters:
-        encoder_channels (tuple[int, ...]): list of channel sizes for each encoder layer
+        encoder_channels (tuple[int, ...]): tuple of channel sizes for each encoder layer
         encoder_start_resolution (int): starting resolution for the encoder
-        encoder_attn_resolutions (tuple[int, ...]): list of resolutions at which to apply attention in the encoder
+        encoder_attn_resolutions (tuple[int, ...]): tuple of resolutions at which to apply attention in the encoder
         encoder_num_res_blocks (int): number of residual blocks per encoder layer
         image_channels (int): number of channels in the input image
         latent_dim (int): dimensionality of the latent space
@@ -542,16 +559,16 @@ class CondEncoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    """Decoder module for VQGAN.
+    """Decoder module for VQGAN Stage 1.
 
     Consists of a series of convolutional, residual, and attention blocks arranged using the provided arguments.
-    The number of upsample blocks is determined by the length of the decoder channels list minus one.
+    The number of upsample blocks is determined by the length of the decoder channels tuple minus one.
     For example, if decoder_channels=(128, 128, 128) and the starting resolution is 32, the decoder will upsample the input image twice, from 32x32 to 128x128.
 
     Parameters:
-        decoder_channels (tuple[int, ...]): list of channel sizes for each decoder layer
+        decoder_channels (tuple[int, ...]): tuple of channel sizes for each decoder layer
         decoder_start_resolution (int): starting resolution for the decoder
-        decoder_attn_resolutions (tuple[int, ...]): list of resolutions at which to apply attention in the decoder
+        decoder_attn_resolutions (tuple[int, ...]): tuple of resolutions at which to apply attention in the decoder
         decoder_num_res_blocks (int): number of residual blocks per decoder layer
         image_channels (int): number of channels in the output image
         latent_dim (int): dimensionality of the latent space
@@ -620,3 +637,258 @@ class CondDecoder(nn.Module):
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         return self.model(x.contiguous().view(len(x), -1))
+
+
+class Discriminator(nn.Module):
+    """PatchGAN-style discriminator.
+
+    Adapted from: https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix/blob/master/models/networks.py#L538
+
+    Parameters:
+        num_filters_last: Number of filters in the last conv layer.
+        n_layers: Number of convolutional layers.
+        image_channels: Number of channels in the input image.
+        image_size: Spatial size (H=W) of the input image.
+    """
+
+    def __init__(
+        self,
+        *,
+        num_filters_last: int = 64,
+        n_layers: int = 3,
+        image_channels: int = 1,
+        image_size: int = 128,
+    ) -> None:
+        super().__init__()
+
+        # Convolutional backbone (PatchGAN)
+        layers: list[nn.Module] = [
+            nn.Conv2d(image_channels, num_filters_last, kernel_size=4, stride=2, padding=1),
+            nn.LeakyReLU(0.2, inplace=True),
+        ]
+        num_filters_mult = 1
+
+        for i in range(1, n_layers + 1):
+            num_filters_mult_last = num_filters_mult
+            num_filters_mult = min(2**i, 8)
+            layers += [
+                nn.Conv2d(
+                    num_filters_last * num_filters_mult_last,
+                    num_filters_last * num_filters_mult,
+                    kernel_size=4,
+                    stride=2 if i < n_layers else 1,
+                    padding=1,
+                    bias=False,
+                ),
+                nn.BatchNorm2d(num_filters_last * num_filters_mult),
+                nn.LeakyReLU(0.2, inplace=True),
+            ]
+
+        layers.append(
+            nn.Conv2d(num_filters_last * num_filters_mult, 1, kernel_size=4, stride=1, padding=1)
+        )
+        self.model = nn.Sequential(*layers)
+
+        # Adapter for CVQGAN latent vectors → image
+        self.cvqgan_adapter = nn.Sequential(
+            nn.Linear(image_channels, image_size),
+            nn.ReLU(inplace=True),
+            nn.Linear(image_size, image_channels * image_size**2),
+            nn.ReLU(inplace=True),
+            nn.Unflatten(1, (image_channels, image_size, image_size)),
+        )
+
+        # Initialize weights
+        self.apply(self._weights_init)
+
+
+    @staticmethod
+    def _weights_init(m: nn.Module) -> None:
+        """Custom weight initialization (DCGAN-style)."""
+        classname = m.__class__.__name__
+        if "Conv" in classname:
+            nn.init.normal_(m.weight.data, mean=0.0, std=0.02)
+        elif "BatchNorm" in classname:
+            nn.init.normal_(m.weight.data, mean=1.0, std=0.02)
+            nn.init.constant_(m.bias.data, 0.0)
+
+
+    def forward(self, x: th.Tensor, *, is_cvqgan: bool = False) -> th.Tensor:
+        """Forward pass with optional CVQGAN adapter."""
+        if is_cvqgan:
+            x = self.cvqgan_adapter(x)
+        return self.model(x)
+
+
+class ScalingLayer(nn.Module):
+    """Channel-wise affine normalization used by LPIPS."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.register_buffer("shift", th.tensor([-.030, -.088, -.188])[None, :, None, None])
+        self.register_buffer("scale", th.tensor([.458, .448, .450])[None, :, None, None])
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        return (x - self.shift) / self.scale
+
+
+class NetLinLayer(nn.Module):
+    """1x1 conv with dropout (per-layer LPIPS linear head)."""
+
+    def __init__(self, in_channels: int, out_channels: int = 1) -> None:
+        super().__init__()
+        self.model = nn.Sequential(
+            nn.Dropout(),
+            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False),
+        )
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        return self.model(x)
+
+
+class VGG16(nn.Module):
+    """Torchvision VGG16 feature extractor sliced at LPIPS tap points."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        vgg_feats = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features
+        blocks = [vgg_feats[i] for i in range(30)]
+        self.slice1 = nn.Sequential(*blocks[0:4])    # relu1_2
+        self.slice2 = nn.Sequential(*blocks[4:9])    # relu2_2
+        self.slice3 = nn.Sequential(*blocks[9:16])   # relu3_3
+        self.slice4 = nn.Sequential(*blocks[16:23])  # relu4_3
+        self.slice5 = nn.Sequential(*blocks[23:30])  # relu5_3
+        self.requires_grad_(requires_grad=False)
+
+    def forward(self, x: th.Tensor) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+        h1 = self.slice1(x)
+        h2 = self.slice2(h1)
+        h3 = self.slice3(h2)
+        h4 = self.slice4(h3)
+        h5 = self.slice5(h4)
+        return (h1, h2, h3, h4, h5)
+
+
+class GreyscaleLPIPS(nn.Module):
+    """LPIPS for greyscale/topological data with optional 'raw' aggregation.
+
+    ``use_raw=True`` is often preferable for non-natural images since learned
+    linear heads are tuned on natural RGB photos.
+
+    Parameters:
+        use_raw: If True, average raw per-layer squared diffs (no linear heads).
+        clamp_output: Clamp the final loss to ``>= 0``.
+        robust_clamp: Clamp inputs to [0, 1] before feature extraction.
+        warn_on_clamp: If True, log warnings when inputs fall outside [0, 1].
+        freeze: If True, disables grads on all params.
+        ckpt_name: Key in URL_MAP/CKPT_MAP for loading LPIPS heads.
+        logger: Optional logger for non-intrusive messages/warnings.
+    """
+
+    def __init__(  # noqa: PLR0913
+        self,
+        *,
+        use_raw: bool = True,
+        clamp_output: bool = False,
+        robust_clamp: bool = True,
+        warn_on_clamp: bool = False,
+        freeze: bool = True,
+        ckpt_name: str = "vgg_lpips",
+        logger: logging.Logger | None = None,
+    ) -> None:
+        super().__init__()
+        self.use_raw = use_raw
+        self.clamp_output = clamp_output
+        self.robust_clamp = robust_clamp
+        self.warn_on_clamp = warn_on_clamp
+        self._logger = logger
+
+        self.scaling_layer = ScalingLayer()
+        self.channels = (64, 128, 256, 512, 512)
+        self.vgg = VGG16()
+        self.lins = nn.ModuleList([NetLinLayer(c) for c in self.channels])
+
+        self._load_from_pretrained(name=ckpt_name)
+        if freeze:
+            self.requires_grad_(requires_grad=False)
+
+
+    def forward(self, real_x: th.Tensor, fake_x: th.Tensor) -> th.Tensor:
+        """Compute greyscale-aware LPIPS distance between two batches."""
+        if self.warn_on_clamp and self._logger is not None:
+            with th.no_grad():
+                if (fake_x < 0).any() or (fake_x > 1).any():
+                    self._logger.warning(
+                        "GreyscaleLPIPS: generated input outside [0,1]: [%.4f, %.4f]",
+                        float(fake_x.min().item()), float(fake_x.max().item()),
+                    )
+                if (real_x < 0).any() or (real_x > 1).any():
+                    self._logger.warning(
+                        "GreyscaleLPIPS: reference input outside [0,1]: [%.4f, %.4f]",
+                        float(real_x.min().item()), float(real_x.max().item()),
+                    )
+
+        if self.robust_clamp:
+            real_x = th.clamp(real_x, 0.0, 1.0)
+            fake_x = th.clamp(fake_x, 0.0, 1.0)
+
+        # Promote greyscale → RGB for VGG features
+        if real_x.shape[1] == 1:
+            real_x = real_x.repeat(1, 3, 1, 1)
+        if fake_x.shape[1] == 1:
+            fake_x = fake_x.repeat(1, 3, 1, 1)
+
+        fr = self.vgg(self.scaling_layer(real_x))
+        ff = self.vgg(self.scaling_layer(fake_x))
+        diffs = [(self._norm_tensor(a) - self._norm_tensor(b)) ** 2 for a, b in zip(fr, ff)]
+
+        if self.use_raw:
+            parts = [self._spatial_average(d).mean(dim=1, keepdim=True) for d in diffs]
+        else:
+            parts = [self._spatial_average(self.lins[i](d)) for i, d in enumerate(diffs)]
+
+        loss = th.stack(parts, dim=0).sum()
+        if self.clamp_output:
+            loss = th.clamp(loss, min=0.0)
+        return loss
+
+    # Helpers
+    @staticmethod
+    def _norm_tensor(x: th.Tensor) -> th.Tensor:
+        """L2-normalize channels per spatial location: BxCxHxW → BxCxHxW."""
+        norm = th.sqrt(th.sum(x**2, dim=1, keepdim=True))
+        return x / (norm + 1e-10)
+
+    @staticmethod
+    def _spatial_average(x: th.Tensor) -> th.Tensor:
+        """Average over spatial dimensions with dims kept: BxCxHxW → BxCx1x1."""
+        return x.mean(dim=(2, 3), keepdim=True)
+
+    def _load_from_pretrained(self, *, name: str) -> None:
+        """Load LPIPS linear heads (and any required buffers) from a checkpoint."""
+        ckpt = self._get_ckpt_path(name, "vgg_lpips")
+        state_dict = th.load(ckpt, map_location=th.device("cpu"), weights_only=True)
+        self.load_state_dict(state_dict, strict=False)
+
+    @staticmethod
+    def _download(url: str, local_path: str, *, chunk_size: int = 1024) -> None:
+        """Stream a file to disk with a progress bar."""
+        os.makedirs(os.path.split(local_path)[0], exist_ok=True)
+        with requests.get(url, stream=True, timeout=10) as r:
+            total_size = int(r.headers.get("content-length", 0))
+            with tqdm.tqdm(total=total_size, unit="B", unit_scale=True) as pbar, open(local_path, "wb") as f:
+                for data in r.iter_content(chunk_size=chunk_size):
+                    if data:
+                        f.write(data)
+                        pbar.update(len(data))
+
+    def _get_ckpt_path(self, name: str, root: str) -> str:
+        """Return local path to a pretrained LPIPS checkpoint; download if missing."""
+        assert name in URL_MAP, f"Unknown LPIPS checkpoint name: {name!r}"
+        path = os.path.join(root, CKPT_MAP[name])
+        if not os.path.exists(path):
+            if self._logger is not None:
+                self._logger.info("Downloading LPIPS weights '%s' from %s to %s", name, URL_MAP[name], path)
+            self._download(URL_MAP[name], path)
+        return path
+
