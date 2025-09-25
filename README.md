@@ -26,6 +26,8 @@ As much as we can, we follow the [CleanRL](https://github.com/vwxyzjn/cleanrl) p
 [cgan_2d](engiopt/cgan_2d/) | Inverse Design | 2D | ✅ | GAN MLP
 [cgan_bezier](engiopt/cgan_bezier/) | Inverse Design | 1D | ✅ | GAN + Bezier layer
 [cgan_cnn_2d](engiopt/cgan_cnn_2d/) | Inverse Design | 2D | ✅ | GAN + CNN
+[cgan_cnn_3d](engiopt/cgan_cnn_3d/) | Inverse Design | 3D | ✅ | GAN + 3D CNN
+[cgan_vae](engiopt/cgan_vae/) | Inverse Design | 3D | ✅ | MultiView GAN + VAE
 [diffusion_1d](engiopt/diffusion_1d/) | Inverse Design | 1D | ❌ | Diffusion
 [diffusion_2d_cond](engiopt/diffusion_2d_cond/) | Inverse Design | 2D | ✅ | Diffusion
 [gan_1d](engiopt/gan_1d/) | Inverse Design | 1D | ❌ | GAN MLP

@@ -509,8 +509,8 @@ if __name__ == "__main__":
     training_ds = problem.dataset.with_format("torch", device=device)["train"]
 
     # Extract 3d designs and conditions
-    designs_3d = training_ds["optimal_design"]
-    condition_tensors = [training_ds[key] for key in problem.conditions_keys]
+    designs_3d = training_ds["optimal_design"][:]
+    condition_tensors = [training_ds[key][:] for key in problem.conditions_keys]
 
     training_ds = th.utils.data.TensorDataset(designs_3d, *condition_tensors)
     dataloader = th.utils.data.DataLoader(

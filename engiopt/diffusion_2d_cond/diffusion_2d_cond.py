@@ -287,12 +287,12 @@ if __name__ == "__main__":
     training_ds = problem.dataset.with_format("torch", device=device)["train"]
     filtered_ds = th.zeros(len(training_ds), design_shape[0], design_shape[1], device=device)
     for i in range(len(training_ds)):
-        filtered_ds[i] = training_ds[i]["optimal_design"].reshape(1, design_shape[0], design_shape[1])
+        filtered_ds[i] = training_ds[i]["optimal_design"][:].reshape(1, design_shape[0], design_shape[1])
     filtered_ds_max = filtered_ds.max()
     filtered_ds_min = filtered_ds.min()
     filtered_ds_norm = (filtered_ds - filtered_ds_min) / (filtered_ds_max - filtered_ds_min)
     training_ds = th.utils.data.TensorDataset(
-        filtered_ds_norm.flatten(1), *[training_ds[key] for key in problem.conditions_keys]
+        filtered_ds_norm.flatten(1), *[training_ds[key][:] for key in problem.conditions_keys]
     )
     cond_tensors = th.stack(training_ds.tensors[1 : len(problem.conditions_keys) + 1])
     conds_min = cond_tensors.amin(dim=tuple(range(1, cond_tensors.ndim)))
