@@ -20,6 +20,8 @@ from __future__ import annotations
 
 from collections import namedtuple
 from dataclasses import dataclass
+import inspect
+import math
 import os
 import random
 import time
@@ -38,6 +40,7 @@ from torch.nn import functional as f
 from torchvision.models import vgg16
 from torchvision.models import VGG16_Weights
 import tqdm
+from transformers import GPT2LMHeadModel
 import tyro
 import wandb
 
@@ -129,18 +132,24 @@ class Args:
     sample_interval: int = 1600
     """interval between image samples"""
 
-    # Algorithm-specific: Stage 1 (Conditional AE if the model is conditional)
+    # Algorithm-specific: Stage 1 (Conditional AE or "CVQGAN" if the model is conditional)
+    # Note that a Discriminator is not used for CVQGAN, as it is generally a much simpler model.
     cond_dim: int = 3
     """dimensionality of the condition space"""
     cond_hidden_dim: int = 256
     """hidden dimension of the CVQGAN MLP"""
     cond_latent_dim: int = 4
-    "individual code dimension for CVQGAN"
+    """individual code dimension for CVQGAN"""
     cond_codebook_vectors: int = 64
     """number of vectors in the CVQGAN codebook"""
     cond_feature_map_dim: int = 4
     """feature map dimension for the CVQGAN encoder output"""
-
+    cond_epochs: int = 100
+    """number of epochs of CVQGAN training"""
+    cond_lr: float = 2e-4
+    """learning rate for CVQGAN"""
+    cond_sample_interval: int = 1600
+    """interval between CVQGAN image samples"""
 
     # Algorithm-specific: Stage 2 (Transformer)
     # From original implementation: assume pkeep=1.0, sos_token=0, bias=True
@@ -281,7 +290,7 @@ class FeaturePool:
     This buffer enables us to initialize the codebook using a history of generated features rather than the ones produced by the latest encoders.
 
     Parameters:
-        pool_size (int): the size of featue buffer
+        pool_size (int): the size of feature buffer
         dim (int): the dimension of each feature
     """
     def __init__(
@@ -643,22 +652,20 @@ class Discriminator(nn.Module):
     """PatchGAN-style discriminator.
 
     Adapted from: https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix/blob/master/models/networks.py#L538
+    This assumes we never use a discriminator for the CVQGAN, since it is generally a much simpler model.
 
     Parameters:
         num_filters_last: Number of filters in the last conv layer.
         n_layers: Number of convolutional layers.
         image_channels: Number of channels in the input image.
-        image_size: Spatial size (H=W) of the input image.
     """
 
     def __init__(
         self,
-        *,
         num_filters_last: int = 64,
         n_layers: int = 3,
-        image_channels: int = 1,
-        image_size: int = 128,
-    ) -> None:
+        image_channels: int = 1
+    ):
         super().__init__()
 
         # Convolutional backbone (PatchGAN)
@@ -689,15 +696,6 @@ class Discriminator(nn.Module):
         )
         self.model = nn.Sequential(*layers)
 
-        # Adapter for CVQGAN latent vectors -> image
-        self.cvqgan_adapter = nn.Sequential(
-            nn.Linear(image_channels, image_size),
-            nn.ReLU(inplace=True),
-            nn.Linear(image_size, image_channels * image_size**2),
-            nn.ReLU(inplace=True),
-            nn.Unflatten(1, (image_channels, image_size, image_size)),
-        )
-
         # Initialize weights
         self.apply(self._weights_init)
 
@@ -713,17 +711,15 @@ class Discriminator(nn.Module):
             nn.init.constant_(m.bias.data, 0.0)
 
 
-    def forward(self, x: th.Tensor, *, is_cvqgan: bool = False) -> th.Tensor:
+    def forward(self, x: th.Tensor) -> th.Tensor:
         """Forward pass with optional CVQGAN adapter."""
-        if is_cvqgan:
-            x = self.cvqgan_adapter(x)
         return self.model(x)
 
 
 class ScalingLayer(nn.Module):
     """Channel-wise affine normalization used by LPIPS."""
 
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__()
         self.register_buffer("shift", th.tensor([-.030, -.088, -.188])[None, :, None, None])
         self.register_buffer("scale", th.tensor([.458, .448, .450])[None, :, None, None])
@@ -735,7 +731,7 @@ class ScalingLayer(nn.Module):
 class NetLinLayer(nn.Module):
     """1x1 conv with dropout (per-layer LPIPS linear head)."""
 
-    def __init__(self, in_channels: int, out_channels: int = 1) -> None:
+    def __init__(self, in_channels: int, out_channels: int = 1):
         super().__init__()
         self.model = nn.Sequential(
             nn.Dropout(),
@@ -749,7 +745,7 @@ class NetLinLayer(nn.Module):
 class VGG16(nn.Module):
     """Torchvision VGG16 feature extractor sliced at LPIPS tap points."""
 
-    def __init__(self) -> None:
+    def __init__(self):
         super().__init__()
         vgg_feats = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features
         blocks = [vgg_feats[i] for i in range(30)]
@@ -795,7 +791,7 @@ class GreyscaleLPIPS(nn.Module):
         freeze: bool = True,
         ckpt_name: str = "vgg_lpips",
         logger: logging.Logger | None = None,
-    ) -> None:
+    ):
         super().__init__()
         self.use_raw = use_raw
         self.clamp_output = clamp_output
@@ -806,7 +802,7 @@ class GreyscaleLPIPS(nn.Module):
         self.scaling_layer = ScalingLayer()
         self.channels = (64, 128, 256, 512, 512)
         self.vgg = VGG16()
-        self.lins = nn.ModuleList([NetLinLayer(c) for c in self.channels])
+        self.linears = nn.ModuleList([NetLinLayer(c) for c in self.channels])
 
         self._load_from_pretrained(name=ckpt_name)
         if freeze:
@@ -845,7 +841,7 @@ class GreyscaleLPIPS(nn.Module):
         if self.use_raw:
             parts = [self._spatial_average(d).mean(dim=1, keepdim=True) for d in diffs]
         else:
-            parts = [self._spatial_average(self.lins[i](d)) for i, d in enumerate(diffs)]
+            parts = [self._spatial_average(self.linears[i](d)) for i, d in enumerate(diffs)]
 
         loss = th.stack(parts, dim=0).sum()
         if self.clamp_output:
@@ -1025,3 +1021,492 @@ class VQGAN(nn.Module):
     def adopt_weight(disc_factor: float, i: int, threshold: int, value: float = 0.0) -> float:
         """Adopt weight scheduling: zero out `disc_factor` before threshold."""
         return value if i < threshold else disc_factor
+
+
+###########################################
+########## GPT-2 BASE CODE BELOW ##########
+###########################################
+class LayerNorm(nn.Module):
+    """LayerNorm with optional bias (PyTorch lacks bias=False support)."""
+
+    def __init__(self, ndim: int, *, bias: bool):
+        super().__init__()
+        self.weight = nn.Parameter(th.ones(ndim))
+        self.bias = nn.Parameter(th.zeros(ndim)) if bias else None
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        return f.layer_norm(x, self.weight.shape, self.weight, self.bias, 1e-5)
+
+
+class CausalSelfAttention(nn.Module):
+    """Causal self-attention with FlashAttention fallback when unavailable."""
+
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        assert config.n_embd % config.n_head == 0, "n_embd must be divisible by n_head"
+
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
+        self.attn_dropout = nn.Dropout(config.dropout)
+        self.resid_dropout = nn.Dropout(config.dropout)
+
+        self.n_head = config.n_head
+        self.n_embd = config.n_embd
+        self.dropout = config.dropout
+
+        self.flash = hasattr(f, "scaled_dot_product_attention")
+        if not self.flash:
+            warnings.warn(
+                "Falling back to non-flash attention; PyTorch >= 2.0 enables FlashAttention.",
+                stacklevel=2,
+            )
+            self.register_buffer(
+                "bias",
+                th.tril(th.ones(config.block_size, config.block_size)).view(
+                    1, 1, config.block_size, config.block_size
+                ),
+            )
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        b, t, c = x.size()
+
+        q, k, v = self.c_attn(x).split(self.n_embd, dim=2)
+        k = k.view(b, t, self.n_head, c // self.n_head).transpose(1, 2)
+        q = q.view(b, t, self.n_head, c // self.n_head).transpose(1, 2)
+        v = v.view(b, t, self.n_head, c // self.n_head).transpose(1, 2)
+
+        if self.flash:
+            y = f.scaled_dot_product_attention(
+                q, k, v,
+                attn_mask=None,
+                dropout_p=self.dropout if self.training else 0.0,
+                is_causal=True,
+            )
+        else:
+            att = (q @ k.transpose(-2, -1)) * (1.0 / math.sqrt(k.size(-1)))
+            att = att.masked_fill(self.bias[:, :, :t, :t] == 0, float("-inf"))
+            att = f.softmax(att, dim=-1)
+            att = self.attn_dropout(att)
+            y = att @ v
+
+        y = y.transpose(1, 2).contiguous().view(b, t, c)
+        return self.resid_dropout(self.c_proj(y))
+
+
+class MLP(nn.Module):
+    """Feed-forward block used inside Transformer blocks."""
+
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.c_fc = nn.Linear(config.n_embd, 4 * config.n_embd, bias=config.bias)
+        self.gelu = nn.GELU()
+        self.c_proj = nn.Linear(4 * config.n_embd, config.n_embd, bias=config.bias)
+        self.dropout = nn.Dropout(config.dropout)
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        x = self.c_fc(x)
+        x = self.gelu(x)
+        x = self.c_proj(x)
+        return self.dropout(x)
+
+
+class Block(nn.Module):
+    """Transformer block: LayerNorm -> Self-Attn -> residual; LayerNorm -> MLP -> residual."""
+
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.ln_1 = LayerNorm(config.n_embd, bias=config.bias)
+        self.attn = CausalSelfAttention(config)
+        self.ln_2 = LayerNorm(config.n_embd, bias=config.bias)
+        self.mlp = MLP(config)
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        x = x + self.attn(self.ln_1(x))
+        return x + self.mlp(self.ln_2(x))
+
+
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 50304  # GPT-2 uses 50257; padded to multiple of 64
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    dropout: float = 0.0
+    bias: bool = True  # GPT-2 uses biases in Linear/LayerNorm
+
+
+class GPT(nn.Module):
+    """Minimal GPT-2 style Transformer with HF weight import."""
+
+    def __init__(self, config: GPTConfig):
+        super().__init__()
+        self.config = config
+
+        self.transformer = nn.ModuleDict(
+            {
+                "wte": nn.Embedding(config.vocab_size, config.n_embd),
+                "wpe": nn.Embedding(config.block_size, config.n_embd),
+                "drop": nn.Dropout(config.dropout),
+                "h": nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
+                "ln_f": LayerNorm(config.n_embd, bias=config.bias),
+            }
+        )
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.transformer["wte"].weight = self.lm_head.weight  # weight tying
+
+        self.apply(self._init_weights)
+        for pn, p in self.named_parameters():
+            if pn.endswith("c_proj.weight"):
+                th.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
+
+    def get_num_params(self, *, non_embedding: bool = True) -> int:
+        """Return total parameter count (optionally excluding position embeddings)."""
+        n_params = sum(p.numel() for p in self.parameters())
+        if non_embedding:
+            n_params -= self.transformer["wpe"].weight.numel()
+        return n_params
+
+    def _init_weights(self, module: nn.Module) -> None:
+        if isinstance(module, nn.Linear):
+            th.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+            if module.bias is not None:
+                th.nn.init.zeros_(module.bias)
+        elif isinstance(module, nn.Embedding):
+            th.nn.init.normal_(module.weight, mean=0.0, std=0.02)
+
+    def forward(
+        self,
+        idx: th.Tensor,
+        targets: th.Tensor | None = None,
+    ) -> tuple[th.Tensor, th.Tensor | None]:
+        """Forward pass returning logits and optional cross-entropy loss."""
+        device = idx.device
+        _, t = idx.size()
+        assert t <= self.config.block_size, (
+            f"Cannot forward sequence of length {t}; block size is {self.config.block_size}"
+        )
+        pos = th.arange(0, t, dtype=th.long, device=device)
+
+        tok_emb = self.transformer["wte"](idx)
+        pos_emb = self.transformer["wpe"](pos)
+        x = self.transformer["drop"](tok_emb + pos_emb)
+        for block in self.transformer["h"]:
+            x = block(x)
+        x = self.transformer["ln_f"](x)
+
+        logits = self.lm_head(x)
+        loss: th.Tensor | None
+        if targets is not None:
+            loss = f.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+        else:
+            loss = None
+        return logits, loss
+
+    def crop_block_size(self, block_size: int) -> None:
+        """Reduce maximum context length and trim position embeddings."""
+        assert block_size <= self.config.block_size
+        self.config.block_size = block_size
+        self.transformer["wpe"].weight = nn.Parameter(self.transformer["wpe"].weight[:block_size])
+        for block in self.transformer["h"]:
+            attn = block.attn
+            if hasattr(attn, "bias"):
+                attn.bias = attn.bias[:, :, :block_size, :block_size]
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        model_type: str,
+        override_args: dict[str, float] | None = None,
+    ) -> GPT:
+        """Load HF GPT-2 weights into this minimal GPT implementation."""
+        assert model_type in {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"}
+        override_args = override_args or {}
+        assert all(k == "dropout" for k in override_args), "Only 'dropout' can be overridden"
+
+        cfg_map: dict[str, dict[str, int]] = {
+            "gpt2": {"n_layer": 12, "n_head": 12, "n_embd": 768},
+            "gpt2-medium": {"n_layer": 24, "n_head": 16, "n_embd": 1024},
+            "gpt2-large": {"n_layer": 36, "n_head": 20, "n_embd": 1280},
+            "gpt2-xl": {"n_layer": 48, "n_head": 25, "n_embd": 1600},
+        }
+
+        # Use object so we can mix int, float, and bool
+        config_args: dict[str, object] = dict(cfg_map[model_type])
+        config_args.update({"vocab_size": 50257, "block_size": 1024, "bias": True})
+
+        if "dropout" in override_args:
+            config_args["dropout"] = float(override_args["dropout"])
+
+        config = GPTConfig(**config_args)  # type: ignore[arg-type]
+        model = GPT(config)
+
+        sd = model.state_dict()
+        sd_keys = [k for k in sd if not k.endswith(".attn.bias")]
+
+        hf: GPT2LMHeadModel = GPT2LMHeadModel.from_pretrained(model_type)
+        sd_hf = hf.state_dict()
+        sd_keys_hf = [
+            k
+            for k in sd_hf
+            if not (k.endswith((".attn.masked_bias", ".attn.bias")))
+        ]
+
+        transposed = {"attn.c_attn.weight", "attn.c_proj.weight", "mlp.c_fc.weight", "mlp.c_proj.weight"}
+        assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
+
+        for k in sd_keys_hf:
+            if any(k.endswith(w) for w in transposed):
+                assert sd_hf[k].shape[::-1] == sd[k].shape
+                with th.no_grad():
+                    sd[k].copy_(sd_hf[k].t())
+            else:
+                assert sd_hf[k].shape == sd[k].shape
+                with th.no_grad():
+                    sd[k].copy_(sd_hf[k])
+
+        return model
+
+    def configure_optimizers(
+        self,
+        weight_decay: float,
+        learning_rate: float,
+        betas: tuple[float, float],
+        device_type: str,
+    ) -> th.optim.Optimizer:
+        """Create AdamW with decoupled weight decay for matrix weights only."""
+        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
+        dim_threshold = 2
+        decay_params = [p for p in param_dict.values() if p.dim() >= dim_threshold]
+        nodecay_params = [p for p in param_dict.values() if p.dim() < dim_threshold]
+        optim_groups = [
+            {"params": decay_params, "weight_decay": weight_decay},
+            {"params": nodecay_params, "weight_decay": 0.0},
+        ]
+
+        fused_available = "fused" in inspect.signature(th.optim.AdamW).parameters
+        use_fused = bool(fused_available and device_type == "cuda")
+        extra_args: dict[str, object] = {"fused": True} if use_fused else {}
+        return th.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
+
+    def estimate_mfu(self, fwdbwd_per_iter: int, dt: float) -> float:
+        """Estimate model FLOPS utilization relative to A100 bf16 peak (312 TFLOPS)."""
+        n = self.get_num_params()
+        cfg = self.config
+        l, h, q, t = cfg.n_layer, cfg.n_head, cfg.n_embd // cfg.n_head, cfg.block_size
+        flops_per_token = 6 * n + 12 * l * h * q * t
+        flops_per_fwdbwd = flops_per_token * t
+        flops_per_iter = flops_per_fwdbwd * float(fwdbwd_per_iter)
+        flops_achieved = flops_per_iter * (1.0 / dt)
+        flops_peak = 312e12
+        return float(flops_achieved / flops_peak)
+
+    @th.no_grad()
+    def generate(
+        self,
+        idx: th.Tensor,
+        max_new_tokens: int,
+        *,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+    ) -> th.Tensor:
+        """Autoregressively sample tokens conditioned on idx."""
+        for _ in range(max_new_tokens):
+            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size :]
+            logits, _ = self(idx_cond)
+            logits = logits[:, -1, :] / temperature
+            if top_k is not None:
+                v, _ = th.topk(logits, min(top_k, logits.size(-1)))
+                logits[logits < v[:, [-1]]] = -float("inf")
+            probs = f.softmax(logits, dim=-1)
+            idx_next = th.multinomial(probs, num_samples=1)
+            idx = th.cat((idx, idx_next), dim=1)
+        return idx
+###########################################
+########## GPT-2 BASE CODE ABOVE ##########
+###########################################
+
+
+class VQGANTransformer(nn.Module):
+    """Wrapper for VQGAN Stage 2: Transformer.
+
+    Generative component of VQGAN trained on the Stage 1 discrete latent space.
+
+    Parameters:
+        conditional (bool): If True, use CVQGAN for conditioning.
+        vqgan (VQGAN): Pretrained VQGAN model for primary image encoding/decoding.
+        cvqgan (VQGAN): Pretrained CVQGAN model for conditional encoding (if conditional=True).
+        image_size (int): Input image size (assumed square).
+        decoder_channels (tuple[int, ...]): Decoder channels from the VQGAN model.
+        cond_fmap_dim (int): Feature map dimension from the CVQGAN encoder (if conditional=True).
+        num_codebook_vectors (int): Number of codebook vectors from the VQGAN model.
+        n_layer (int): Number of Transformer layers.
+        n_head (int): Number of attention heads in the Transformer.
+        n_embd (int): Embedding dimension in the Transformer.
+        dropout (float): Dropout rate in the Transformer.
+        bias (bool): If True, use bias terms in the Transformer layers.
+    """
+    def __init__(  # noqa: PLR0913
+        self, *,
+        conditional: bool = True,
+        vqgan: VQGAN,
+        cvqgan: VQGAN,
+        image_size: int,
+        decoder_channels: tuple[int, ...],
+        cond_fmap_dim: int,
+        num_codebook_vectors: int,
+        n_layer: int,
+        n_head: int,
+        n_embd: int,
+        dropout: int,
+        bias: bool = True
+    ):
+        super().__init__()
+        self.sos_token = 0
+        self.vqgan = vqgan.eval()
+        for param in self.vqgan.parameters():
+            param.requires_grad = False
+
+        if conditional:
+            self.cvqgan = cvqgan
+            for param in self.cvqgan.parameters():
+                param.requires_grad = False
+
+        #  block_size is automatically set to the combined sequence length of the VQGAN and CVQGAN
+        block_size = (image_size // (2 ** (len(decoder_channels) - 1))) ** 2
+        if conditional:
+            block_size += cond_fmap_dim ** 2
+
+        #  Create config object for NanoGPT
+        transformer_config = GPTConfig(
+            vocab_size=num_codebook_vectors,
+            block_size=block_size,
+            n_layer=n_layer,
+            n_head=n_head,
+            n_embd=n_embd,
+            dropout=dropout,    #  Add dropout parameter (default in nanoGPT)
+            bias=bias           #  Add bias parameter (default in nanoGPT)
+        )
+        self.transformer = GPT(transformer_config)
+        self.conditional = conditional
+        self.sidelen = image_size // (2 ** (len(decoder_channels) - 1))  #  Note: assumes square image
+
+    @th.no_grad()
+    def encode_to_z(self, *, x: th.Tensor, is_c: bool = False) -> tuple[th.Tensor, th.Tensor]:
+        """Encode images to quantized latent vectors (z) and their indices."""
+        if is_c:  #  For the conditional tokens, use the CVQGAN encoder
+            quant_z, indices, _ = self.cvqgan.encode(x)
+        else:
+            quant_z, indices, _ = self.vqgan.encode(x)
+        indices = indices.view(quant_z.shape[0], -1)
+        return quant_z, indices
+
+    @th.no_grad()
+    def z_to_image(self, indices: th.Tensor) -> th.Tensor:
+        """Convert quantized latent indices back to image space."""
+        ix_to_vectors = self.vqgan.codebook.embedding(indices).reshape(indices.shape[0], self.sidelen, self.sidelen, -1)
+        ix_to_vectors = ix_to_vectors.permute(0, 3, 1, 2)
+        return self.vqgan.decode(ix_to_vectors)
+
+    def forward(self, x: th.Tensor, c: th.Tensor, pkeep: float = 1.0) -> tuple[th.Tensor, th.Tensor]:
+        """Forward pass through the Transformer. Returns logits and targets for loss computation."""
+        _, indices = self.encode_to_z(x=x)
+
+        # Replace the start token with the encoded conditional input if using CVQGAN
+        if self.conditional:
+            _, sos_tokens = self.encode_to_z(x=c, is_c=True)
+        else:
+            sos_tokens = th.ones(x.shape[0], 1) * self.sos_token
+            sos_tokens = sos_tokens.long().to(x.device)
+
+        if pkeep < 1.0:
+            mask = th.bernoulli(pkeep * th.ones(indices.shape, device=indices.device))
+            mask = mask.round().to(dtype=th.int64)
+            random_indices = th.randint_like(indices, self.transformer.config.vocab_size)
+            new_indices = mask * indices + (1 - mask) * random_indices
+        else:
+            new_indices = indices
+
+        new_indices = th.cat((sos_tokens, new_indices), dim=1)
+
+        target = indices
+
+        # NanoGPT forward doesn't use embeddings parameter, but takes targets
+        # We're ignoring the loss returned by NanoGPT
+        logits, _ = self.transformer(new_indices[:, :-1], None)
+        logits = logits[:, -indices.shape[1]:]  # Always predict the last 256 tokens
+
+        return logits, target
+
+    def top_k_logits(self, logits: th.Tensor, k: int) -> th.Tensor:
+        """Zero out all logits that are not in the top-k."""
+        v, _ = th.topk(logits, k)
+        out = logits.clone()
+        out[out < v[..., [-1]]] = -float("inf")
+        return out
+
+    @th.no_grad()
+    def sample(self, x: th.Tensor, c: th.Tensor, steps: int, temperature: float = 1.0, top_k: int | None = None) -> th.Tensor:
+        """Autoregressively sample from the model given initial context x and conditional c."""
+        x = th.cat((c, x), dim=1)
+
+        # Keep the original sampling logic for compatibility
+        for _ in range(steps):
+            logits, _ = self.transformer(x, None)
+            logits = logits[:, -1, :] / temperature
+
+            if top_k is not None:
+                # Determine the actual vocabulary size for this batch
+                # Count non-negative infinity values in the logits
+                n_tokens = th.sum(th.isfinite(logits), dim=-1).min().item()
+
+                # Use the minimum of top_k and the actual number of tokens
+                effective_top_k = min(top_k, n_tokens)
+
+                # Apply top_k with the effective value
+                if effective_top_k > 0:  # Ensure we have at least one token to sample
+                    logits = self.top_k_logits(logits, effective_top_k)
+                else:
+                    # Fallback if all logits are -inf (shouldn't happen, but just in case)
+                    print("Warning: No finite logits found for sampling")
+                    # Make all logits equal (uniform distribution)
+                    logits = th.zeros_like(logits)
+
+            probs = f.softmax(logits, dim=-1)
+
+            # In the VQGAN paper we use multinomial sampling (top_k=None, greedy=False)
+            ix = th.multinomial(probs, num_samples=1)
+
+            x = th.cat((x, ix), dim=1)
+
+        return x[:, c.shape[1]:]
+
+    @th.no_grad()
+    def log_images(self, x: th.Tensor, c: th.Tensor, top_k: int | None = None) -> tuple[dict[str, th.Tensor], th.Tensor]:
+        """Generate reconstructions and samples from the model for logging."""
+        log = {}
+
+        _, indices = self.encode_to_z(x=x)
+        # Replace the start token with the encoded conditional input if using CVQGAN
+        if self.conditional:
+            _, sos_tokens = self.encode_to_z(x=c, is_c=True)
+        else:
+            sos_tokens = th.ones(x.shape[0], 1) * self.sos_token
+            sos_tokens = sos_tokens.long().to(x.device)
+
+        start_indices = indices[:, :indices.shape[1] // 2]
+        sample_indices = self.sample(start_indices, sos_tokens, steps=indices.shape[1] - start_indices.shape[1], top_k=top_k)
+        half_sample = self.z_to_image(sample_indices)
+
+        start_indices = indices[:, :0]
+        sample_indices = self.sample(start_indices, sos_tokens, steps=indices.shape[1], top_k=top_k)
+        full_sample = self.z_to_image(sample_indices)
+
+        x_rec = self.z_to_image(indices)
+
+        log["input"] = x
+        log["rec"] = x_rec
+        log["half_sample"] = half_sample
+        log["full_sample"] = full_sample
+
+        return log, th.concat((x, x_rec, half_sample, full_sample))

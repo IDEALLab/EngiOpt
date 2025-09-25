@@ -223,7 +223,7 @@ strict = []
 typeCheckingMode = "basic"
 pythonVersion = "3.9"
 pythonPlatform = "All"
-typeshedPath = "typeshed"
+# typeshedPath = "typeshed" -> commented out may lead to precommit out of memory error
 enableTypeIgnoreComments = true
 
 # This is required as the CI pre-commit does not download the module (i.e. numpy, pygame)
@@ -295,5 +295,6 @@ module = [
     "einops.*",
     "torchvision.*",
     "requests",
+    "transformers",
 ]
 ignore_missing_imports = true
