@@ -451,7 +451,7 @@ if __name__ == "__main__":
     if len(design_shape) != DESIGN_SHAPE_LEN:
         raise ValueError(f"Expected 3D design shape, got {design_shape}")
 
-    conditions = problem.conditions
+    conditions = problem.conditions_keys
     n_conds = len(conditions)
     condition_names = [cond[0] for cond in conditions]
 
