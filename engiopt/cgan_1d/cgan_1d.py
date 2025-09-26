@@ -180,8 +180,8 @@ def prepare_data(problem: Problem, device: th.device) -> tuple[th.utils.data.Ten
         transform = flatten_dict_factory(problem, device)
 
     training_ds = th.utils.data.TensorDataset(
-        transform(training_ds["optimal_design"]),
-        *[training_ds[key] for key in problem.conditions_keys],
+        transform(training_ds["optimal_design"][:]),
+        *[training_ds[key][:] for key in problem.conditions_keys],
     )
 
     # Create condition normalizer

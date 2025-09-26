@@ -419,12 +419,12 @@ def prepare_data(problem, batch_size, device):
     problem_dataset = problem.dataset.with_format("torch")["train"]
     design_scalar_keys = list(problem_dataset["optimal_design"][0].keys())
     design_scalar_keys.remove("coords")
-    coords_set = [problem_dataset[i]["optimal_design"]["coords"] for i in range(len(problem_dataset))]
+    coords_set = [problem_dataset[i]["optimal_design"]["coords"][:] for i in range(len(problem_dataset))]
     design_scalars = [example["optimal_design"][key] for example in problem_dataset for key in design_scalar_keys]
     training_ds = th.utils.data.TensorDataset(
         th.stack(coords_set),
         th.stack(design_scalars).unsqueeze(1),
-        *[problem_dataset[key] for key, _ in problem.conditions],
+        *[problem_dataset[key][:] for key, _ in problem.conditions],
     )
 
     dataloader = th.utils.data.DataLoader(training_ds, batch_size=batch_size, shuffle=True)
