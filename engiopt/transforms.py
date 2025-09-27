@@ -3,6 +3,7 @@
 from collections.abc import Callable
 import math
 
+from datasets import Dataset
 from engibench.core import Problem
 from gymnasium import spaces
 import torch as th
@@ -32,32 +33,82 @@ def _nearest_power_of_two(x: int) -> int:
     return upper if abs(x - upper) < abs(x - lower) else lower
 
 
-def upsample_nearest(data: th.Tensor, mode: str="bicubic") -> th.Tensor:
-    """Upsample 2D data to the nearest 2^n dimensions. Data should be a Tensor in the format (B, C, H, W)."""
+def upsample_nearest(data: th.Tensor, mode: str = "bicubic") -> th.Tensor:
+    """Upsample 2D data to the nearest square 2^n based on the maximum dimension.
+
+    Accepts input of shape (B, H, W) or (B, C, H, W).
+    """
+    low_dim = 3
+    if data.ndim == low_dim:
+        data = data.unsqueeze(1)  # (B, 1, H, W)
     _, _, h, w = data.shape
-    target_h = _nearest_power_of_two(h)
-    target_w = _nearest_power_of_two(w)
-    # If nearest power of two is smaller, multiply it by 2
-    if target_h < h:
-        target_h *= 2
-    if target_w < w:
-        target_w *= 2
-    return f.interpolate(data, size=(target_h, target_w), mode=mode)
+
+    max_dim = max(h, w)
+    target = _nearest_power_of_two(max_dim)
+    if target < max_dim:
+        target *= 2
+
+    return f.interpolate(data, size=(target, target), mode=mode)
 
 
-def downsample_nearest(data: th.Tensor, mode: str="bicubic") -> th.Tensor:
-    """Downsample 2D data to the nearest 2^n dimensions. Data should be a Tensor in the format (B, C, H, W)."""
+def downsample_nearest(data: th.Tensor, mode: str = "bicubic") -> th.Tensor:
+    """Downsample 2D data to the nearest square 2^n based on the maximum dimension.
+
+    Accepts input of shape (B, H, W) or (B, C, H, W).
+    """
+    low_dim = 3
+    if data.ndim == low_dim:
+        data = data.unsqueeze(1)  # (B, 1, H, W)
     _, _, h, w = data.shape
-    target_h = _nearest_power_of_two(h)
-    target_w = _nearest_power_of_two(w)
-    # If nearest power of two is larger, divide it by 2
-    if target_h > h:
-        target_h //= 2
-    if target_w > w:
-        target_w //= 2
-    return f.interpolate(data, size=(target_h, target_w), mode=mode)
+
+    max_dim = max(h, w)
+    target = _nearest_power_of_two(max_dim)
+    if target > max_dim:
+        target //= 2
+
+    return f.interpolate(data, size=(target, target), mode=mode)
 
 
 def resize_to(data: th.Tensor, h: int, w: int, mode: str = "bicubic") -> th.Tensor:
     """Resize 2D data back to any desired (h, w). Data should be a Tensor in the format (B, C, H, W)."""
     return f.interpolate(data, size=(h, w), mode=mode)
+
+
+def normalize(
+    ds: Dataset, condition_names: list[str]
+) -> tuple[Dataset, th.Tensor, th.Tensor]:
+    """Normalize specified condition columns with global mean/std (torch version, CPU)."""
+    # stack condition columns into a single tensor (N, C) on CPU
+    conds = th.stack([th.as_tensor(ds[c]).float() for c in condition_names], dim=1)
+    mean = conds.mean(dim=0)
+    std = conds.std(dim=0).clamp(min=1e-8)
+
+    # normalize each condition column (HF expects numpy back)
+    ds = ds.map(
+        lambda batch: {
+            c: ((th.as_tensor(batch[c]).float() - mean[i]) / std[i]).numpy()
+            for i, c in enumerate(condition_names)
+        },
+        batched=True,
+    )
+
+    return ds, mean, std
+
+
+def drop_constant(
+    ds: Dataset, condition_names: list[str]
+) -> tuple[Dataset, list[str]]:
+    """Drop constant condition columns (std=0) from dataset."""
+    conds = th.stack([th.as_tensor(ds[c]).float() for c in condition_names], dim=1)
+    std = conds.std(dim=0)
+
+    kept = [c for i, c in enumerate(condition_names) if std[i] > 0]
+    dropped = [c for i, c in enumerate(condition_names) if std[i] == 0]
+
+    if dropped:
+        print(f"Warning: Dropping constant condition columns (std=0): {dropped}")
+
+    # remove dropped columns from dataset
+    ds = ds.remove_columns(dropped)
+
+    return ds, kept

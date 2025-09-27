@@ -296,5 +296,6 @@ module = [
     "torchvision.*",
     "requests",
     "transformers",
+    "wandb",
 ]
 ignore_missing_imports = true

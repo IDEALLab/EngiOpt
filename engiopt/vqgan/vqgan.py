@@ -1,4 +1,3 @@
-# ruff: noqa: F401 # REMOVE THIS LATER
 """Vector Quantized Generative Adversarial Network (VQGAN).
 
 Based on https://github.com/dome272/VQGAN-pyth with an "Online Clustered Codebook" for better codebook usage from https://github.com/lyndonzheng/CVQ-VAE/blob/main/quantise.py
@@ -18,23 +17,20 @@ We have updated the transformer architecture, converted VQGAN from a two-stage t
 
 from __future__ import annotations
 
-from collections import namedtuple
 from dataclasses import dataclass
 import inspect
 import math
 import os
 import random
 import time
-from typing import Optional, TYPE_CHECKING
+from typing import TYPE_CHECKING
 import warnings
 
 from einops import rearrange
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
-import matplotlib.pyplot as plt
 import numpy as np
 import requests
 import torch as th
-from torch import autograd
 from torch import nn
 from torch.nn import functional as f
 from torchvision.models import vgg16
@@ -44,9 +40,8 @@ from transformers import GPT2LMHeadModel
 import tyro
 import wandb
 
-from engiopt.metrics import dpp_diversity
-from engiopt.metrics import mmd
-from engiopt.transforms import resize_to
+from engiopt.transforms import drop_constant
+from engiopt.transforms import normalize
 from engiopt.transforms import upsample_nearest
 
 if TYPE_CHECKING:
@@ -72,7 +67,7 @@ class Args:
     """The name of this algorithm."""
 
     # Tracking
-    track: bool = True
+    track: bool = False
     """Track the experiment with wandb."""
     wandb_project: str = "engiopt"
     """Wandb project name."""
@@ -86,13 +81,44 @@ class Args:
     # Algorithm-specific: General
     conditional: bool = True
     """whether the model is conditional or not"""
+    normalize_conditions: bool = True
+    """whether to normalize the condition columns to zero mean and unit std"""
+    drop_constant_conditions: bool = True
+    """whether to drop constant condition columns (i.e., overhang_constraint in beams2d)"""
+    image_size: int = 128
+    """size of each image dimension (determined automatically later)"""
+    image_channels: int = 1
+    """number of channels in the input image (determined automatically later)"""
+    latent_size: int = 16
+    """size of each latent feature map dimension (determined automatically later)"""
+
+    # Algorithm-specific: Stage 1 Conditional AE or "CVQGAN" if the model is specified as conditional
+    # Note that a Discriminator is not used for CVQGAN, as it is generally a much simpler model.
+    cond_dim: int = 3
+    """dimensionality of the condition space"""
+    cond_hidden_dim: int = 256
+    """hidden dimension of the CVQGAN MLP"""
+    cond_latent_dim: int = 4
+    """individual code dimension for CVQGAN"""
+    cond_codebook_vectors: int = 64
+    """number of vectors in the CVQGAN codebook"""
+    cond_feature_map_dim: int = 4
+    """feature map dimension for the CVQGAN encoder output"""
+    batch_size_0: int = 16
+    """size of the batches for CVQGAN"""
+    n_epochs_0: int = 1000  # Default: 1000
+    """number of epochs of CVQGAN training"""
+    cond_lr: float = 2e-4
+    """learning rate for CVQGAN"""
+    cond_sample_interval: int = 1600
+    """interval between CVQGAN image samples"""
 
     # Algorithm-specific: Stage 1 (AE)
     # From original implementation: assume image_channels=1, use greyscale LPIPS only, use_Online=True, determine image_size automatically, calculate decoder_start_resolution automatically
-    n_epochs_1: int = 100
+    n_epochs_1: int = 100  # Default: 100
     """number of epochs of training"""
     batch_size_1: int = 16
-    """size of the batches"""
+    """size of the batches for Stage 1"""
     lr_1: float = 2e-4
     """learning rate for Stage 1"""
     beta: float = 0.25
@@ -115,15 +141,13 @@ class Args:
     """weighting factor for the reconstruction loss"""
     perceptual_loss_factor: float = 1.0
     """weighting factor for the perceptual loss"""
-    encoder_channels: tuple[int, ...] = (128, 128, 128, 256, 256, 512)
+    encoder_channels: tuple[int, ...] = (64, 64, 128, 128, 256)
     """tuple of channel sizes for each encoder layer"""
     encoder_attn_resolutions: tuple[int, ...] = (16,)
     """tuple of resolutions at which to apply attention in the encoder"""
     encoder_num_res_blocks: int = 2
     """number of residual blocks per encoder layer"""
-    encoder_start_resolution: int = 256
-    """starting resolution for the encoder"""
-    decoder_channels: tuple[int, ...] = (512, 256, 256, 128, 128)
+    decoder_channels: tuple[int, ...] = (256, 128, 128, 64)
     """tuple of channel sizes for each decoder layer"""
     decoder_attn_resolutions: tuple[int, ...] = (16,)
     """tuple of resolutions at which to apply attention in the decoder"""
@@ -132,31 +156,12 @@ class Args:
     sample_interval: int = 1600
     """interval between image samples"""
 
-    # Algorithm-specific: Stage 1 (Conditional AE or "CVQGAN" if the model is conditional)
-    # Note that a Discriminator is not used for CVQGAN, as it is generally a much simpler model.
-    cond_dim: int = 3
-    """dimensionality of the condition space"""
-    cond_hidden_dim: int = 256
-    """hidden dimension of the CVQGAN MLP"""
-    cond_latent_dim: int = 4
-    """individual code dimension for CVQGAN"""
-    cond_codebook_vectors: int = 64
-    """number of vectors in the CVQGAN codebook"""
-    cond_feature_map_dim: int = 4
-    """feature map dimension for the CVQGAN encoder output"""
-    cond_epochs: int = 100
-    """number of epochs of CVQGAN training"""
-    cond_lr: float = 2e-4
-    """learning rate for CVQGAN"""
-    cond_sample_interval: int = 1600
-    """interval between CVQGAN image samples"""
-
     # Algorithm-specific: Stage 2 (Transformer)
     # From original implementation: assume pkeep=1.0, sos_token=0, bias=True
-    n_epochs_2: int = 100
+    n_epochs_2: int = 100  # Default: 100
     """number of epochs of training"""
     batch_size_2: int = 16
-    """size of the batches"""
+    """size of the batches for Stage 2"""
     lr_2: float = 6e-4
     """learning rate for Stage 2"""
     n_layer: int = 12
@@ -931,18 +936,17 @@ class VQGAN(nn.Module):
         cond_codebook_vectors: int = 64,
 
         # VQGAN + Codebook parameters
-        encoder_channels: tuple[int, ...],
-        encoder_start_resolution: int,
-        encoder_attn_resolutions: tuple[int, ...],
-        encoder_num_res_blocks: int,
-        decoder_channels: tuple[int, ...],
-        decoder_start_resolution: int,
-        decoder_attn_resolutions: tuple[int, ...],
-        decoder_num_res_blocks: int,
+        encoder_channels: tuple[int, ...] = (64, 64, 128, 128, 256),
+        encoder_start_resolution: int = 128,
+        encoder_attn_resolutions: tuple[int, ...] = (16,),
+        encoder_num_res_blocks: int = 2,
+        decoder_channels: tuple[int, ...] = (256, 128, 128, 64),
+        decoder_start_resolution: int = 16,
+        decoder_attn_resolutions: tuple[int, ...] = (16,),
+        decoder_num_res_blocks: int = 3,
         image_channels: int = 1,
         latent_dim: int = 16,
-        num_codebook_vectors: int = 256,
-
+        num_codebook_vectors: int = 256
     ):
         super().__init__()
         if is_c:
@@ -989,18 +993,18 @@ class VQGAN(nn.Module):
             latent_dim = cond_latent_dim if is_c else latent_dim
         ).to(device=device)
 
-    def forward(self, imgs: th.Tensor) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
+    def forward(self, designs: th.Tensor) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
         """Full VQGAN forward pass."""
-        encoded = self.encoder(imgs)
+        encoded = self.encoder(designs)
         quant_encoded = self.quant_conv(encoded)
-        quant, indices, q_loss = self.codebook(quant_encoded)
+        quant, indices, q_loss, _, _ = self.codebook(quant_encoded)
         post_quant = self.post_quant_conv(quant)
         decoded = self.decoder(post_quant)
         return decoded, indices, q_loss
 
-    def encode(self, imgs: th.Tensor) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
+    def encode(self, designs: th.Tensor) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         """Encode image batch into quantized latent representation."""
-        encoded = self.encoder(imgs)
+        encoded = self.encoder(designs)
         quant_encoded = self.quant_conv(encoded)
         return self.codebook(quant_encoded)
 
@@ -1338,7 +1342,7 @@ class VQGANTransformer(nn.Module):
         cvqgan (VQGAN): Pretrained CVQGAN model for conditional encoding (if conditional=True).
         image_size (int): Input image size (assumed square).
         decoder_channels (tuple[int, ...]): Decoder channels from the VQGAN model.
-        cond_fmap_dim (int): Feature map dimension from the CVQGAN encoder (if conditional=True).
+        cond_feature_map_dim (int): Feature map dimension from the CVQGAN encoder (if conditional=True).
         num_codebook_vectors (int): Number of codebook vectors from the VQGAN model.
         n_layer (int): Number of Transformer layers.
         n_head (int): Number of attention heads in the Transformer.
@@ -1353,7 +1357,7 @@ class VQGANTransformer(nn.Module):
         cvqgan: VQGAN,
         image_size: int,
         decoder_channels: tuple[int, ...],
-        cond_fmap_dim: int,
+        cond_feature_map_dim: int,
         num_codebook_vectors: int,
         n_layer: int,
         n_head: int,
@@ -1363,19 +1367,13 @@ class VQGANTransformer(nn.Module):
     ):
         super().__init__()
         self.sos_token = 0
-        self.vqgan = vqgan.eval()
-        for param in self.vqgan.parameters():
-            param.requires_grad = False
-
-        if conditional:
-            self.cvqgan = cvqgan
-            for param in self.cvqgan.parameters():
-                param.requires_grad = False
+        self.vqgan = vqgan
+        self.cvqgan = cvqgan
 
         #  block_size is automatically set to the combined sequence length of the VQGAN and CVQGAN
         block_size = (image_size // (2 ** (len(decoder_channels) - 1))) ** 2
         if conditional:
-            block_size += cond_fmap_dim ** 2
+            block_size += cond_feature_map_dim ** 2
 
         #  Create config object for NanoGPT
         transformer_config = GPTConfig(
@@ -1395,9 +1393,9 @@ class VQGANTransformer(nn.Module):
     def encode_to_z(self, *, x: th.Tensor, is_c: bool = False) -> tuple[th.Tensor, th.Tensor]:
         """Encode images to quantized latent vectors (z) and their indices."""
         if is_c:  #  For the conditional tokens, use the CVQGAN encoder
-            quant_z, indices, _ = self.cvqgan.encode(x)
+            quant_z, indices, _, _, _ = self.cvqgan.encode(x)
         else:
-            quant_z, indices, _ = self.vqgan.encode(x)
+            quant_z, indices, _, _, _ = self.vqgan.encode(x)
         indices = indices.view(quant_z.shape[0], -1)
         return quant_z, indices
 
@@ -1468,7 +1466,7 @@ class VQGANTransformer(nn.Module):
                     logits = self.top_k_logits(logits, effective_top_k)
                 else:
                     # Fallback if all logits are -inf (shouldn't happen, but just in case)
-                    print("Warning: No finite logits found for sampling")
+                    warnings.warn("Warning: No finite logits found for sampling", stacklevel=2)
                     # Make all logits equal (uniform distribution)
                     logits = th.zeros_like(logits)
 
@@ -1510,3 +1508,249 @@ class VQGANTransformer(nn.Module):
         log["full_sample"] = full_sample
 
         return log, th.concat((x, x_rec, half_sample, full_sample))
+
+
+if __name__ == "__main__":
+    args = tyro.cli(Args)
+
+    # Seeding
+    th.manual_seed(args.seed)
+    rng = np.random.default_rng(args.seed)
+    random.seed(args.seed)
+    th.backends.cudnn.deterministic = True
+
+    os.makedirs("images", exist_ok=True)
+
+    if th.backends.mps.is_available():
+        device = th.device("mps")
+    elif th.cuda.is_available():
+        device = th.device("cuda")
+    else:
+        device = th.device("cpu")
+
+    problem = BUILTIN_PROBLEMS[args.problem_id]()
+    problem.reset(seed=args.seed)
+
+    # Configure data loader (keep on CPU for preprocessing)
+    training_ds = problem.dataset.with_format("torch")["train"]
+
+    # Add in the upsampled optimal design column and remove the original optimal design column
+    training_ds = training_ds.map(
+        lambda batch: {
+            "optimal_upsampled": upsample_nearest(batch["optimal_design"]).cpu().numpy()
+        },
+        batched=True,
+    )
+    training_ds = training_ds.remove_columns("optimal_design")
+
+    args.image_size = training_ds["optimal_upsampled"].shape[-1]
+    args.latent_size = args.image_size // (2 ** (len(args.encoder_channels) - 2))
+    conditions = problem.conditions_keys
+
+    # Optionally normalize condition columns
+    if args.normalize_conditions:
+        training_ds, mean, std = normalize(training_ds, conditions)
+
+    # Optionally drop condition columns that are constant like overhang_constraint in beams2d
+    if args.drop_constant_conditions:
+        training_ds, conditions = drop_constant(training_ds, conditions)
+
+    args.cond_dim = len(conditions)
+
+    # Move to device only here
+    th_training_ds = th.utils.data.TensorDataset(
+        th.as_tensor(training_ds["optimal_upsampled"]).to(device),
+        *[th.as_tensor(training_ds[key]).to(device) for key in conditions],
+    )
+    dataloader_0 = th.utils.data.DataLoader(
+        th_training_ds,
+        batch_size=args.batch_size_0,
+        shuffle=True,
+    )
+    dataloader_1 = th.utils.data.DataLoader(
+        th_training_ds,
+        batch_size=args.batch_size_1,
+        shuffle=True,
+    )
+    dataloader_2 = th.utils.data.DataLoader(
+        th_training_ds,
+        batch_size=args.batch_size_2,
+        shuffle=True,
+    )
+        # Logging
+    run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
+    if args.track:
+        wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args), save_code=True, name=run_name)
+
+    vqgan = VQGAN(
+        device=device,
+        is_c=False,
+        encoder_channels=args.encoder_channels,
+        encoder_start_resolution=args.image_size,
+        encoder_attn_resolutions=args.encoder_attn_resolutions,
+        encoder_num_res_blocks=args.encoder_num_res_blocks,
+        decoder_channels=args.decoder_channels,
+        decoder_start_resolution=args.latent_size,
+        decoder_attn_resolutions=args.decoder_attn_resolutions,
+        decoder_num_res_blocks=args.decoder_num_res_blocks,
+        image_channels=args.image_channels,
+        latent_dim=args.latent_dim,
+        num_codebook_vectors=args.num_codebook_vectors
+    ).to(device=device)
+
+    discriminator = Discriminator(image_channels=args.image_channels).to(device=device)
+
+    cvqgan = VQGAN(
+        device=device,
+        is_c=True,
+        cond_feature_map_dim=args.cond_feature_map_dim,
+        cond_dim=args.cond_dim,
+        cond_hidden_dim=args.cond_hidden_dim,
+        cond_latent_dim=args.cond_latent_dim,
+        cond_codebook_vectors=args.cond_codebook_vectors
+    ).to(device=device)
+
+    transformer = VQGANTransformer(
+        conditional=args.conditional,
+        vqgan=vqgan,
+        cvqgan=cvqgan,
+        image_size=args.image_size,
+        decoder_channels=args.decoder_channels,
+        cond_feature_map_dim=args.cond_feature_map_dim,
+        num_codebook_vectors=args.num_codebook_vectors,
+        n_layer=args.n_layer,
+        n_head=args.n_head,
+        n_embd=args.n_embd,
+        dropout=args.dropout
+    ).to(device=device)
+
+    # CVQGAN Stage 0 optimizer
+    opt_cvq = th.optim.Adam(
+            list(cvqgan.encoder.parameters()) +
+            list(cvqgan.decoder.parameters()) +
+            list(cvqgan.codebook.parameters()) +
+            list(cvqgan.quant_conv.parameters()) +
+            list(cvqgan.post_quant_conv.parameters()),
+            lr=args.cond_lr, eps=1e-08, betas=(args.b1, args.b2)
+        )
+
+    # VQGAN Stage 1 optimizer
+    opt_vq = th.optim.Adam(
+            list(vqgan.encoder.parameters()) +
+            list(vqgan.decoder.parameters()) +
+            list(vqgan.codebook.parameters()) +
+            list(vqgan.quant_conv.parameters()) +
+            list(vqgan.post_quant_conv.parameters()),
+            lr=args.lr_1, eps=1e-08, betas=(args.b1, args.b2)
+        )
+    # VQGAN Stage 1 discriminator optimizer
+    opt_disc = th.optim.Adam(discriminator.parameters(),
+                              lr=args.lr_1, eps=1e-08, betas=(args.b1, args.b2))
+
+    # Transformer Stage 2 optimizer
+    decay, no_decay = set(), set()
+    whitelist_weight_modules = (nn.Linear, )
+    blacklist_weight_modules = (nn.LayerNorm, nn.Embedding)
+
+    for mn, m in transformer.transformer.named_modules():
+        for pn, _ in m.named_parameters():
+            fpn = f"{mn}.{pn}" if mn else pn
+
+            if pn.endswith("bias"):
+                no_decay.add(fpn)
+
+            elif pn.endswith("weight") and isinstance(m, whitelist_weight_modules):
+                decay.add(fpn)
+
+            elif pn.endswith("weight") and isinstance(m, blacklist_weight_modules):
+                no_decay.add(fpn)
+
+    no_decay.add("pos_emb")
+
+    param_dict = dict(transformer.transformer.named_parameters())
+    decay = {pn for pn in decay if pn in param_dict}
+    no_decay = {pn for pn in no_decay if pn in param_dict}
+
+    optim_groups = [
+        {"params": [param_dict[pn] for pn in sorted(decay)], "weight_decay": 0.01},
+        {"params": [param_dict[pn] for pn in sorted(no_decay)], "weight_decay": 0.0},
+    ]
+
+    opt_transformer = th.optim.AdamW(optim_groups, lr=args.lr_2, betas=(0.9, 0.95))
+
+    perceptual_loss_fcn = GreyscaleLPIPS().eval().to(device)
+
+    if args.conditional:
+        print("Stage 0: Training CVQGAN")
+        cvqgan.train()
+        for _ in tqdm.trange(args.n_epochs_0):
+            for _, data in enumerate(dataloader_0):
+                # THIS IS PROBLEM DEPENDENT
+                conds = th.stack((data[1:]), dim=1).to(dtype=th.float32, device=device)
+                decoded_images, codebook_indices, q_loss = cvqgan(conds)
+
+                opt_cvq.zero_grad()
+                rec_loss = th.abs(conds - decoded_images).mean()
+                cvq_loss = rec_loss + q_loss
+                cvq_loss.backward()
+                opt_cvq.step()
+
+        # Freeze CVQGAN for later use in Stage 2 Transformer
+        for p in cvqgan.parameters():
+            p.requires_grad_(requires_grad=False)
+        cvqgan.eval()
+
+    print("Stage 1: Training VQGAN")
+    vqgan.train()
+    discriminator.train()
+    for epoch in tqdm.trange(args.n_epochs_1):
+        for _, data in enumerate(dataloader_1):
+            # THIS IS PROBLEM DEPENDENT
+            designs = data[0].to(dtype=th.float32, device=device)
+            decoded_images, codebook_indices, q_loss = vqgan(designs)
+
+            disc_real = discriminator(designs)
+            disc_fake = discriminator(decoded_images)
+
+            disc_factor = vqgan.adopt_weight(args.disc_factor, epoch, threshold=args.disc_start)
+
+            perceptual_loss = perceptual_loss_fcn(designs, decoded_images)
+            rec_loss = th.abs(designs - decoded_images)
+            perceptual_rec_loss = args.perceptual_loss_factor * perceptual_loss + args.rec_loss_factor * rec_loss
+            perceptual_rec_loss = perceptual_rec_loss.mean()
+            g_loss = -th.mean(disc_fake)
+
+            lamb = vqgan.calculate_lambda(perceptual_rec_loss, g_loss)
+            vq_loss = perceptual_rec_loss + q_loss + disc_factor * lamb * g_loss
+
+            d_loss_real = th.mean(f.relu(1. - disc_real))
+            d_loss_fake = th.mean(f.relu(1. + disc_fake))
+            gan_loss = disc_factor * 0.5*(d_loss_real + d_loss_fake)
+
+            opt_vq.zero_grad()
+            vq_loss.backward(retain_graph=True)
+
+            opt_disc.zero_grad()
+            gan_loss.backward()
+
+            opt_vq.step()
+            opt_disc.step()
+
+    # Freeze VQGAN for later use in Stage 2 Transformer
+    for p in vqgan.parameters():
+        p.requires_grad_(requires_grad=False)
+    vqgan.eval()
+
+    print("Stage 2: Training Transformer")
+    transformer.train()
+    for _ in tqdm.trange(args.n_epochs_2):
+        for _, data in enumerate(dataloader_2):
+            # THIS IS PROBLEM DEPENDENT
+            designs = data[0].to(dtype=th.float32, device=device)
+            conds = th.stack((data[1:]), dim=1).to(dtype=th.float32, device=device)
+
+            opt_transformer.zero_grad()
+            logits, targets = transformer(designs, conds)
+            loss = f.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+            loss.backward()
+            opt_transformer.step()

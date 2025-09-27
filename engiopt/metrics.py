@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import multiprocessing
 import os
+import sys
 import traceback
 from typing import Any, TYPE_CHECKING
 
@@ -21,7 +22,11 @@ if TYPE_CHECKING:
     from engibench import OptiStep
     from engibench.core import Problem
 
-multiprocessing.set_start_method("fork")
+
+if sys.platform != "win32":  #  only set fork on non-Windows
+    multiprocessing.set_start_method("fork", force=True)
+else:
+    multiprocessing.set_start_method("spawn", force=True)
 
 
 def mmd(x: np.ndarray, y: np.ndarray, sigma: float = 1.0) -> float:
