@@ -66,7 +66,7 @@ def prepare_data(problem: Problem, padding_size: int, device: th.device) -> tupl
         transform = flatten_dict_factory(problem, device)
 
     # Add padding to the transformed data
-    transformed_data = transform(training_ds["optimal_design"])
+    transformed_data = transform(training_ds["optimal_design"][:])
     if padding_size > 0:
         padded_data = th.nn.functional.pad(transformed_data, (0, padding_size), mode="constant", value=0)
     else:

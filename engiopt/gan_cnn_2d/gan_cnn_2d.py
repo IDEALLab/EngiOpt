@@ -205,7 +205,7 @@ if __name__ == "__main__":
 
     # Configure data loader
     training_ds = problem.dataset.with_format("torch", device=device)["train"]
-    training_ds = th.utils.data.TensorDataset(training_ds["optimal_design"].flatten(1))
+    training_ds = th.utils.data.TensorDataset(training_ds["optimal_design"][:].flatten(1))
     dataloader = th.utils.data.DataLoader(
         training_ds,
         batch_size=args.batch_size,
