@@ -67,7 +67,7 @@ class Args:
     """The name of this algorithm."""
 
     # Tracking
-    track: bool = False
+    track: bool = True
     """Track the experiment with wandb."""
     wandb_project: str = "engiopt"
     """Wandb project name."""
@@ -75,7 +75,7 @@ class Args:
     """Wandb entity name."""
     seed: int = 1
     """Random seed."""
-    save_model: bool = False
+    save_model: bool = True
     """Saves the model to disk."""
 
     # Algorithm-specific: General
@@ -1530,6 +1530,7 @@ if __name__ == "__main__":
 
     problem = BUILTIN_PROBLEMS[args.problem_id]()
     problem.reset(seed=args.seed)
+    design_shape = problem.design_space.shape
 
     # Configure data loader (keep on CPU for preprocessing)
     training_ds = problem.dataset.with_format("torch")["train"]
@@ -1537,13 +1538,14 @@ if __name__ == "__main__":
     # Add in the upsampled optimal design column and remove the original optimal design column
     training_ds = training_ds.map(
         lambda batch: {
-            "optimal_upsampled": upsample_nearest(batch["optimal_design"]).cpu().numpy()
+            "optimal_upsampled": upsample_nearest(batch["optimal_design"][:]).cpu().numpy()
         },
         batched=True,
     )
     training_ds = training_ds.remove_columns("optimal_design")
+    design_shape = training_ds["optimal_upsampled"][:].shape[-2:]
 
-    args.image_size = training_ds["optimal_upsampled"].shape[-1]
+    args.image_size = training_ds["optimal_upsampled"][:].shape[-1]
     args.latent_size = args.image_size // (2 ** (len(args.encoder_channels) - 2))
     conditions = problem.conditions_keys
 
@@ -1555,12 +1557,13 @@ if __name__ == "__main__":
     if args.drop_constant_conditions:
         training_ds, conditions = drop_constant(training_ds, conditions)
 
-    args.cond_dim = len(conditions)
+    n_conds = len(conditions)
+    args.cond_dim = n_conds
 
     # Move to device only here
     th_training_ds = th.utils.data.TensorDataset(
-        th.as_tensor(training_ds["optimal_upsampled"]).to(device),
-        *[th.as_tensor(training_ds[key]).to(device) for key in conditions],
+        th.as_tensor(training_ds["optimal_upsampled"][:]).to(device),
+        *[th.as_tensor(training_ds[key][:]).to(device) for key in conditions],
     )
     dataloader_0 = th.utils.data.DataLoader(
         th_training_ds,
@@ -1580,7 +1583,7 @@ if __name__ == "__main__":
         # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
     if args.track:
-        wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args), save_code=True, name=run_name)
+        wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args), save_code=True, name=run_name, dir="./logs/wandb")
 
     vqgan = VQGAN(
         device=device,
@@ -1680,11 +1683,14 @@ if __name__ == "__main__":
 
     perceptual_loss_fcn = GreyscaleLPIPS().eval().to(device)
 
+    # ---------------------------
+    #  Stage 0: Training CVQGAN
+    # ---------------------------
     if args.conditional:
         print("Stage 0: Training CVQGAN")
         cvqgan.train()
-        for _ in tqdm.trange(args.n_epochs_0):
-            for _, data in enumerate(dataloader_0):
+        for epoch in tqdm.trange(args.n_epochs_0):
+            for i, data in enumerate(dataloader_0):
                 # THIS IS PROBLEM DEPENDENT
                 conds = th.stack((data[1:]), dim=1).to(dtype=th.float32, device=device)
                 decoded_images, codebook_indices, q_loss = cvqgan(conds)
@@ -1695,16 +1701,53 @@ if __name__ == "__main__":
                 cvq_loss.backward()
                 opt_cvq.step()
 
+                # ----------
+                #  Logging
+                # ----------
+                if args.track:
+                    batches_done = epoch * len(dataloader_0) + i
+                    wandb.log(
+                        {
+                            "cvq_loss": cvq_loss.item(),
+                            "epoch": epoch,
+                            "batch": batches_done,
+                        }
+                    )
+                    print(
+                        f"[Epoch {epoch}/{args.n_epochs_0}] [Batch {i}/{len(dataloader_0)}] [CVQ loss: {cvq_loss.item()}]"
+                    )
+
+                    # --------------
+                    #  Save model
+                    # --------------
+                    if args.save_model and epoch == args.n_epochs_0 - 1 and i == len(dataloader_0) - 1:
+                        ckpt_cvq = {
+                            "epoch": epoch,
+                            "batches_done": batches_done,
+                            "cvqgan": cvqgan.state_dict(),
+                            "optimizer_cvqgan": opt_cvq.state_dict(),
+                            "loss": cvq_loss.item(),
+                        }
+
+                        th.save(ckpt_cvq, "cvqgan.pth")
+                        if args.track:
+                            artifact_cvq = wandb.Artifact(f"{args.problem_id}_{args.algo}_cvqgan", type="model")
+                            artifact_cvq.add_file("cvqgan.pth")
+                            wandb.log_artifact(artifact_cvq, aliases=[f"seed_{args.seed}"])
+
         # Freeze CVQGAN for later use in Stage 2 Transformer
         for p in cvqgan.parameters():
             p.requires_grad_(requires_grad=False)
         cvqgan.eval()
 
+    # --------------------------
+    #  Stage 1: Training VQGAN
+    # --------------------------
     print("Stage 1: Training VQGAN")
     vqgan.train()
     discriminator.train()
     for epoch in tqdm.trange(args.n_epochs_1):
-        for _, data in enumerate(dataloader_1):
+        for i, data in enumerate(dataloader_1):
             # THIS IS PROBLEM DEPENDENT
             designs = data[0].to(dtype=th.float32, device=device)
             decoded_images, codebook_indices, q_loss = vqgan(designs)
@@ -1736,15 +1779,65 @@ if __name__ == "__main__":
             opt_vq.step()
             opt_disc.step()
 
+            # ----------
+            #  Logging
+            # ----------
+            if args.track:
+                batches_done = epoch * len(dataloader_1) + i
+                wandb.log(
+                    {
+                        "vq_loss": vq_loss.item(),
+                        "d_loss": gan_loss.item(),
+                        "epoch": epoch,
+                        "batch": batches_done,
+                    }
+                )
+                print(
+                    f"[Epoch {epoch}/{args.n_epochs_1}] [Batch {i}/{len(dataloader_1)}] [D loss: {gan_loss.item()}] [VQ loss: {vq_loss.item()}]"
+                )
+
+                # --------------
+                #  Save models
+                # --------------
+                if args.save_model and epoch == args.n_epochs_1 - 1 and i == len(dataloader_1) - 1:
+                    ckpt_vq = {
+                        "epoch": epoch,
+                        "batches_done": batches_done,
+                        "vqgan": vqgan.state_dict(),
+                        "optimizer_vqgan": opt_vq.state_dict(),
+                        "loss": vq_loss.item(),
+                    }
+                    ckpt_disc = {
+                        "epoch": epoch,
+                        "batches_done": batches_done,
+                        "discriminator": discriminator.state_dict(),
+                        "optimizer_discriminator": opt_disc.state_dict(),
+                        "loss": gan_loss.item(),
+                    }
+
+                    th.save(ckpt_vq, "vqgan.pth")
+                    th.save(ckpt_disc, "discriminator.pth")
+                    if args.track:
+                        artifact_vq = wandb.Artifact(f"{args.problem_id}_{args.algo}_vqgan", type="model")
+                        artifact_vq.add_file("vqgan.pth")
+                        artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
+                        artifact_disc.add_file("discriminator.pth")
+
+                        wandb.log_artifact(artifact_vq, aliases=[f"seed_{args.seed}"])
+                        wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
+
     # Freeze VQGAN for later use in Stage 2 Transformer
     for p in vqgan.parameters():
         p.requires_grad_(requires_grad=False)
     vqgan.eval()
 
+    # --------------------------------
+    #  Stage 2: Training Transformer
+    # --------------------------------
     print("Stage 2: Training Transformer")
     transformer.train()
-    for _ in tqdm.trange(args.n_epochs_2):
-        for _, data in enumerate(dataloader_2):
+    for epoch in tqdm.trange(args.n_epochs_2):
+        for i, data in enumerate(dataloader_2):
             # THIS IS PROBLEM DEPENDENT
             designs = data[0].to(dtype=th.float32, device=device)
             conds = th.stack((data[1:]), dim=1).to(dtype=th.float32, device=device)
@@ -1754,3 +1847,39 @@ if __name__ == "__main__":
             loss = f.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
             loss.backward()
             opt_transformer.step()
+
+            # ----------
+            #  Logging
+            # ----------
+            if args.track:
+                batches_done = epoch * len(dataloader_2) + i
+                wandb.log(
+                    {
+                        "tr_loss": loss.item(),
+                        "epoch": epoch,
+                        "batch": batches_done,
+                    }
+                )
+                print(
+                    f"[Epoch {epoch}/{args.n_epochs_2}] [Batch {i}/{len(dataloader_2)}] [Transformer loss: {loss.item()}]"
+                )
+
+                # --------------
+                #  Save model
+                # --------------
+                if args.save_model and epoch == args.n_epochs_2 - 1 and i == len(dataloader_2) - 1:
+                    ckpt_transformer = {
+                        "epoch": epoch,
+                        "batches_done": batches_done,
+                        "transformer": transformer.state_dict(),
+                        "optimizer_transformer": opt_transformer.state_dict(),
+                        "loss": loss.item(),
+                    }
+
+                    th.save(ckpt_transformer, "transformer.pth")
+                    if args.track:
+                        artifact_cvq = wandb.Artifact(f"{args.problem_id}_{args.algo}_transformer", type="model")
+                        artifact_cvq.add_file("transformer.pth")
+                        wandb.log_artifact(artifact_cvq, aliases=[f"seed_{args.seed}"])
+
+    wandb.finish()

@@ -79,14 +79,14 @@ def normalize(
 ) -> tuple[Dataset, th.Tensor, th.Tensor]:
     """Normalize specified condition columns with global mean/std (torch version, CPU)."""
     # stack condition columns into a single tensor (N, C) on CPU
-    conds = th.stack([th.as_tensor(ds[c]).float() for c in condition_names], dim=1)
+    conds = th.stack([th.as_tensor(ds[c][:]).float() for c in condition_names], dim=1)
     mean = conds.mean(dim=0)
     std = conds.std(dim=0).clamp(min=1e-8)
 
     # normalize each condition column (HF expects numpy back)
     ds = ds.map(
         lambda batch: {
-            c: ((th.as_tensor(batch[c]).float() - mean[i]) / std[i]).numpy()
+            c: ((th.as_tensor(batch[c][:]).float() - mean[i]) / std[i]).numpy()
             for i, c in enumerate(condition_names)
         },
         batched=True,
@@ -99,7 +99,7 @@ def drop_constant(
     ds: Dataset, condition_names: list[str]
 ) -> tuple[Dataset, list[str]]:
     """Drop constant condition columns (std=0) from dataset."""
-    conds = th.stack([th.as_tensor(ds[c]).float() for c in condition_names], dim=1)
+    conds = th.stack([th.as_tensor(ds[c][:]).float() for c in condition_names], dim=1)
     std = conds.std(dim=0)
 
     kept = [c for i, c in enumerate(condition_names) if std[i] > 0]

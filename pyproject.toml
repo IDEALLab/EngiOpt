@@ -255,7 +255,7 @@ exclude = [
   ".*/templates/.*",
   "^engibench_studies/problems/airfoil/study_[^/]*/",
   "^docs/",
-  "^wandb/",
+  "wandb/.*",
 ]
 [[tool.mypy.overrides]]
 module = [
@@ -296,6 +296,5 @@ module = [
     "torchvision.*",
     "requests",
     "transformers",
-    "wandb",
 ]
 ignore_missing_imports = true

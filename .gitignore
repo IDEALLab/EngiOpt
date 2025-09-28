@@ -160,6 +160,7 @@ cython_debug/
 
 wandb/*
 images/*
+logs/*
 # Editors
 .idea/
 .vscode/
