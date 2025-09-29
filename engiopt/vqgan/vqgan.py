@@ -23,11 +23,11 @@ import math
 import os
 import random
 import time
-from typing import TYPE_CHECKING
 import warnings
 
 from einops import rearrange
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
+import matplotlib.pyplot as plt
 import numpy as np
 import requests
 import torch as th
@@ -43,9 +43,6 @@ import wandb
 from engiopt.transforms import drop_constant
 from engiopt.transforms import normalize
 from engiopt.transforms import upsample_nearest
-
-if TYPE_CHECKING:
-    import logging
 
 # URL and checkpoint for LPIPS model
 URL_MAP = {
@@ -108,10 +105,8 @@ class Args:
     """size of the batches for CVQGAN"""
     n_epochs_0: int = 1000  # Default: 1000
     """number of epochs of CVQGAN training"""
-    cond_lr: float = 2e-4
+    cond_lr: float = 2e-4  # Default: 2e-4
     """learning rate for CVQGAN"""
-    cond_sample_interval: int = 1600
-    """interval between CVQGAN image samples"""
 
     # Algorithm-specific: Stage 1 (AE)
     # From original implementation: assume image_channels=1, use greyscale LPIPS only, use_Online=True, determine image_size automatically, calculate decoder_start_resolution automatically
@@ -119,7 +114,7 @@ class Args:
     """number of epochs of training"""
     batch_size_1: int = 16
     """size of the batches for Stage 1"""
-    lr_1: float = 2e-4
+    lr_1: float = 2e-4  # Default: 2e-4
     """learning rate for Stage 1"""
     beta: float = 0.25
     """beta hyperparameter for the codebook commitment loss"""
@@ -135,7 +130,7 @@ class Args:
     """number of vectors in the codebook"""
     disc_start: int = 0
     """epoch to start discriminator training"""
-    disc_factor: float = 1.0
+    disc_factor: float = 0.1
     """weighting factor for the adversarial loss from the discriminator"""
     rec_loss_factor: float = 1.0
     """weighting factor for the reconstruction loss"""
@@ -153,8 +148,8 @@ class Args:
     """tuple of resolutions at which to apply attention in the decoder"""
     decoder_num_res_blocks: int = 3
     """number of residual blocks per decoder layer"""
-    sample_interval: int = 1600
-    """interval between image samples"""
+    sample_interval_1: int = 100
+    """interval between Stage 1 image samples"""
 
     # Algorithm-specific: Stage 2 (Transformer)
     # From original implementation: assume pkeep=1.0, sos_token=0, bias=True
@@ -162,7 +157,7 @@ class Args:
     """number of epochs of training"""
     batch_size_2: int = 16
     """size of the batches for Stage 2"""
-    lr_2: float = 6e-4
+    lr_2: float = 6e-4  # Default: 6e-4
     """learning rate for Stage 2"""
     n_layer: int = 12
     """number of layers in the transformer"""
@@ -172,6 +167,8 @@ class Args:
     """transformer embedding dimension"""
     dropout: float = 0.3
     """dropout rate in the transformer"""
+    sample_interval_2: int = 100
+    """interval between Stage 2 image samples"""
 
 
 class Codebook(nn.Module):
@@ -783,7 +780,6 @@ class GreyscaleLPIPS(nn.Module):
         warn_on_clamp: If True, log warnings when inputs fall outside [0, 1].
         freeze: If True, disables grads on all params.
         ckpt_name: Key in URL_MAP/CKPT_MAP for loading LPIPS heads.
-        logger: Optional logger for non-intrusive messages/warnings.
     """
 
     def __init__(  # noqa: PLR0913
@@ -795,14 +791,12 @@ class GreyscaleLPIPS(nn.Module):
         warn_on_clamp: bool = False,
         freeze: bool = True,
         ckpt_name: str = "vgg_lpips",
-        logger: logging.Logger | None = None,
     ):
         super().__init__()
         self.use_raw = use_raw
         self.clamp_output = clamp_output
         self.robust_clamp = robust_clamp
         self.warn_on_clamp = warn_on_clamp
-        self._logger = logger
 
         self.scaling_layer = ScalingLayer()
         self.channels = (64, 128, 256, 512, 512)
@@ -816,19 +810,6 @@ class GreyscaleLPIPS(nn.Module):
 
     def forward(self, real_x: th.Tensor, fake_x: th.Tensor) -> th.Tensor:
         """Compute greyscale-aware LPIPS distance between two batches."""
-        if self.warn_on_clamp and self._logger is not None:
-            with th.no_grad():
-                if (fake_x < 0).any() or (fake_x > 1).any():
-                    self._logger.warning(
-                        "GreyscaleLPIPS: generated input outside [0,1]: [%.4f, %.4f]",
-                        float(fake_x.min().item()), float(fake_x.max().item()),
-                    )
-                if (real_x < 0).any() or (real_x > 1).any():
-                    self._logger.warning(
-                        "GreyscaleLPIPS: reference input outside [0,1]: [%.4f, %.4f]",
-                        float(real_x.min().item()), float(real_x.max().item()),
-                    )
-
         if self.robust_clamp:
             real_x = th.clamp(real_x, 0.0, 1.0)
             fake_x = th.clamp(fake_x, 0.0, 1.0)
@@ -888,8 +869,6 @@ class GreyscaleLPIPS(nn.Module):
         assert name in URL_MAP, f"Unknown LPIPS checkpoint name: {name!r}"
         path = os.path.join(root, CKPT_MAP[name])
         if not os.path.exists(path):
-            if self._logger is not None:
-                self._logger.info("Downloading LPIPS weights '%s' from %s to %s", name, URL_MAP[name], path)
             self._download(URL_MAP[name], path)
         return path
 
@@ -1519,7 +1498,8 @@ if __name__ == "__main__":
     random.seed(args.seed)
     th.backends.cudnn.deterministic = True
 
-    os.makedirs("images", exist_ok=True)
+    os.makedirs("images/vqgan_1", exist_ok=True)
+    os.makedirs("images/vqgan_2", exist_ok=True)
 
     if th.backends.mps.is_available():
         device = th.device("mps")
@@ -1534,6 +1514,7 @@ if __name__ == "__main__":
 
     # Configure data loader (keep on CPU for preprocessing)
     training_ds = problem.dataset.with_format("torch")["train"]
+    len_dataset = len(training_ds)
 
     # Add in the upsampled optimal design column and remove the original optimal design column
     training_ds = training_ds.map(
@@ -1559,6 +1540,7 @@ if __name__ == "__main__":
 
     n_conds = len(conditions)
     args.cond_dim = n_conds
+    condition_tensors = [training_ds[key][:] for key in conditions]
 
     # Move to device only here
     th_training_ds = th.utils.data.TensorDataset(
@@ -1580,10 +1562,30 @@ if __name__ == "__main__":
         batch_size=args.batch_size_2,
         shuffle=True,
     )
-        # Logging
+    # For logging a fixed set of designs in Stage 1
+    n_logged_designs = 25
+    fixed_indices = random.sample(range(len_dataset), n_logged_designs)
+    log_subset = th.utils.data.Subset(th_training_ds, fixed_indices)
+    log_dataloader = th.utils.data.DataLoader(
+        log_subset,
+        batch_size=n_logged_designs,
+        shuffle=False,
+    )
+
+    # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
     if args.track:
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args), save_code=True, name=run_name, dir="./logs/wandb")
+        wandb.define_metric("0_step", summary="max")
+        wandb.define_metric("cvq_loss", step_metric="0_step")
+        wandb.define_metric("epoch_0", step_metric="0_step")
+        wandb.define_metric("1_step", summary="max")
+        wandb.define_metric("vq_loss", step_metric="1_step")
+        wandb.define_metric("d_loss", step_metric="1_step")
+        wandb.define_metric("epoch_1", step_metric="1_step")
+        wandb.define_metric("2_step", summary="max")
+        wandb.define_metric("tr_loss", step_metric="2_step")
+        wandb.define_metric("epoch_2", step_metric="2_step")
 
     vqgan = VQGAN(
         device=device,
@@ -1683,6 +1685,46 @@ if __name__ == "__main__":
 
     perceptual_loss_fcn = GreyscaleLPIPS().eval().to(device)
 
+    @th.no_grad()
+    def sample_designs_1(n_designs: int) -> list[th.Tensor]:
+        """Sample reconstructions from trained VQGAN Stage 1."""
+        vqgan.eval()
+
+        designs, *_ = next(iter(log_dataloader))
+        designs = designs[:n_designs].to(device)
+        reconstructions, _, _ = vqgan(designs)
+
+        vqgan.train()
+        return reconstructions
+
+    @th.no_grad()
+    def sample_designs_2(n_designs: int) -> tuple[th.Tensor, th.Tensor]:
+        """Sample generated designs from trained VQGAN Stage 2."""
+        transformer.eval()
+
+        # Create condition grid
+        all_conditions = th.stack(condition_tensors, dim=1)
+        linspaces = [
+            th.linspace(all_conditions[:, i].min(), all_conditions[:, i].max(), n_designs, device=device)
+            for i in range(all_conditions.shape[1])
+        ]
+        desired_conds = th.stack(linspaces, dim=1)
+
+        if args.conditional:
+            c = transformer.encode_to_z(x=desired_conds, is_c=True)[1]
+        else:
+            c = th.ones(n_designs, 1, dtype=th.int64, device=device) * transformer.sos_token
+
+        latent_imgs = transformer.sample(
+            x=th.empty(n_designs, 0, dtype=th.int64, device=device),
+            c=c,
+            steps=(args.latent_size ** 2)
+        )
+        gen_imgs = transformer.z_to_image(latent_imgs)
+
+        transformer.train()
+        return desired_conds, gen_imgs
+
     # ---------------------------
     #  Stage 0: Training CVQGAN
     # ---------------------------
@@ -1706,13 +1748,8 @@ if __name__ == "__main__":
                 # ----------
                 if args.track:
                     batches_done = epoch * len(dataloader_0) + i
-                    wandb.log(
-                        {
-                            "cvq_loss": cvq_loss.item(),
-                            "epoch": epoch,
-                            "batch": batches_done,
-                        }
-                    )
+                    wandb.log({"cvq_loss": cvq_loss.item(), "0_step": batches_done})
+                    wandb.log({"epoch_0": epoch, "0_step": batches_done})
                     print(
                         f"[Epoch {epoch}/{args.n_epochs_0}] [Batch {i}/{len(dataloader_0)}] [CVQ loss: {cvq_loss.item()}]"
                     )
@@ -1784,17 +1821,35 @@ if __name__ == "__main__":
             # ----------
             if args.track:
                 batches_done = epoch * len(dataloader_1) + i
-                wandb.log(
-                    {
-                        "vq_loss": vq_loss.item(),
-                        "d_loss": gan_loss.item(),
-                        "epoch": epoch,
-                        "batch": batches_done,
-                    }
-                )
+                wandb.log({"vq_loss": vq_loss.item(), "1_step": batches_done})
+                wandb.log({"d_loss": gan_loss.item(), "1_step": batches_done})
+                wandb.log({"epoch_1": epoch, "1_step": batches_done})
                 print(
                     f"[Epoch {epoch}/{args.n_epochs_1}] [Batch {i}/{len(dataloader_1)}] [D loss: {gan_loss.item()}] [VQ loss: {vq_loss.item()}]"
                 )
+
+                # This saves a grid image of 25 generated designs every sample_interval
+                if batches_done % args.sample_interval_1 == 0:
+                    # Extract 25 designs
+                    designs = sample_designs_1(n_designs=n_logged_designs)
+                    fig, axes = plt.subplots(5, 5, figsize=(12, 12))
+
+                    # Flatten axes for easy indexing
+                    axes = axes.flatten()
+
+                    # Plot each tensor as a scatter plot
+                    for j, tensor in enumerate(designs):
+                        img = tensor.cpu().numpy().reshape(design_shape[-2], design_shape[-1])  # Extract x and y coordinates
+                        axes[j].imshow(img)  # Scatter plot
+                        axes[j].title.set_text(f"Design {j + 1}")  # Set title
+                        axes[j].set_xticks([])  # Hide x ticks
+                        axes[j].set_yticks([])  # Hide y ticks
+
+                    plt.tight_layout()
+                    img_fname = f"images/vqgan_1/{batches_done}.png"
+                    plt.savefig(img_fname)
+                    plt.close()
+                    wandb.log({"designs_1": wandb.Image(img_fname)})
 
                 # --------------
                 #  Save models
@@ -1853,16 +1908,37 @@ if __name__ == "__main__":
             # ----------
             if args.track:
                 batches_done = epoch * len(dataloader_2) + i
-                wandb.log(
-                    {
-                        "tr_loss": loss.item(),
-                        "epoch": epoch,
-                        "batch": batches_done,
-                    }
-                )
+                wandb.log({"tr_loss": loss.item(), "2_step": batches_done})
+                wandb.log({"epoch_2": epoch, "2_step": batches_done})
                 print(
                     f"[Epoch {epoch}/{args.n_epochs_2}] [Batch {i}/{len(dataloader_2)}] [Transformer loss: {loss.item()}]"
                 )
+
+                # This saves a grid image of 25 generated designs every sample_interval
+                if batches_done % args.sample_interval_2 == 0:
+                    # Extract 25 designs
+                    desired_conds, designs = sample_designs_2(n_designs=n_logged_designs)
+                    fig, axes = plt.subplots(5, 5, figsize=(12, 12))
+
+                    # Flatten axes for easy indexing
+                    axes = axes.flatten()
+
+                    # Plot each tensor as a scatter plot
+                    for j, tensor in enumerate(designs):
+                        img = tensor.cpu().numpy().reshape(design_shape[-2], design_shape[-1])  # Extract x and y coordinates
+                        dc = desired_conds[j].cpu()
+                        axes[j].imshow(img)  # Scatter plot
+                        title = [(conditions[i][0], f"{dc[i]:.2f}") for i in range(n_conds)]
+                        title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
+                        axes[j].title.set_text(title_string)  # Set title
+                        axes[j].set_xticks([])  # Hide x ticks
+                        axes[j].set_yticks([])  # Hide y ticks
+
+                    plt.tight_layout()
+                    img_fname = f"images/vqgan_2/{batches_done}.png"
+                    plt.savefig(img_fname)
+                    plt.close()
+                    wandb.log({"designs_2": wandb.Image(img_fname)})
 
                 # --------------
                 #  Save model
