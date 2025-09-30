@@ -295,6 +295,5 @@ module = [
     "einops.*",
     "torchvision.*",
     "requests",
-    "transformers",
 ]
 ignore_missing_imports = true

@@ -1,7 +1,6 @@
 """Transformations for the data."""
 
 from collections.abc import Callable
-import math
 
 from datasets import Dataset
 from engibench.core import Problem
@@ -26,58 +25,18 @@ def flatten_dict_factory(problem: Problem, device: th.device) -> Callable:
     return flatten_dict
 
 
-def _nearest_power_of_two(x: int) -> int:
-    """Round x to the nearest power of 2."""
-    lower = 2 ** math.floor(math.log2(x))
-    upper = 2 ** math.ceil(math.log2(x))
-    return upper if abs(x - upper) < abs(x - lower) else lower
-
-
-def upsample_nearest(data: th.Tensor, mode: str = "bicubic") -> th.Tensor:
-    """Upsample 2D data to the nearest square 2^n based on the maximum dimension.
-
-    Accepts input of shape (B, H, W) or (B, C, H, W).
-    """
-    low_dim = 3
-    if data.ndim == low_dim:
-        data = data.unsqueeze(1)  # (B, 1, H, W)
-    _, _, h, w = data.shape
-
-    max_dim = max(h, w)
-    target = _nearest_power_of_two(max_dim)
-    if target < max_dim:
-        target *= 2
-
-    return f.interpolate(data, size=(target, target), mode=mode)
-
-
-def downsample_nearest(data: th.Tensor, mode: str = "bicubic") -> th.Tensor:
-    """Downsample 2D data to the nearest square 2^n based on the maximum dimension.
-
-    Accepts input of shape (B, H, W) or (B, C, H, W).
-    """
-    low_dim = 3
-    if data.ndim == low_dim:
-        data = data.unsqueeze(1)  # (B, 1, H, W)
-    _, _, h, w = data.shape
-
-    max_dim = max(h, w)
-    target = _nearest_power_of_two(max_dim)
-    if target > max_dim:
-        target //= 2
-
-    return f.interpolate(data, size=(target, target), mode=mode)
-
-
 def resize_to(data: th.Tensor, h: int, w: int, mode: str = "bicubic") -> th.Tensor:
     """Resize 2D data back to any desired (h, w). Data should be a Tensor in the format (B, C, H, W)."""
+    low_dim = 3
+    if data.ndim == low_dim:
+        data = data.unsqueeze(1)  # (B, 1, H, W)
     return f.interpolate(data, size=(h, w), mode=mode)
 
 
 def normalize(
     ds: Dataset, condition_names: list[str]
 ) -> tuple[Dataset, th.Tensor, th.Tensor]:
-    """Normalize specified condition columns with global mean/std (torch version, CPU)."""
+    """Normalize specified condition columns with global mean/std."""
     # stack condition columns into a single tensor (N, C) on CPU
     conds = th.stack([th.as_tensor(ds[c][:]).float() for c in condition_names], dim=1)
     mean = conds.mean(dim=0)

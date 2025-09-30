@@ -18,7 +18,6 @@ We have updated the transformer architecture, converted VQGAN from a two-stage t
 from __future__ import annotations
 
 from dataclasses import dataclass
-import inspect
 import math
 import os
 import random
@@ -36,13 +35,12 @@ from torch.nn import functional as f
 from torchvision.models import vgg16
 from torchvision.models import VGG16_Weights
 import tqdm
-from transformers import GPT2LMHeadModel
 import tyro
 import wandb
 
 from engiopt.transforms import drop_constant
 from engiopt.transforms import normalize
-from engiopt.transforms import upsample_nearest
+from engiopt.transforms import resize_to
 
 # URL and checkpoint for LPIPS model
 URL_MAP = {
@@ -83,11 +81,7 @@ class Args:
     drop_constant_conditions: bool = True
     """whether to drop constant condition columns (i.e., overhang_constraint in beams2d)"""
     image_size: int = 128
-    """size of each image dimension (determined automatically later)"""
-    image_channels: int = 1
-    """number of channels in the input image (determined automatically later)"""
-    latent_size: int = 16
-    """size of each latent feature map dimension (determined automatically later)"""
+    """desired size of the square image input to the model"""
 
     # Algorithm-specific: Stage 1 Conditional AE or "CVQGAN" if the model is specified as conditional
     # Note that a Discriminator is not used for CVQGAN, as it is generally a much simpler model.
@@ -114,7 +108,7 @@ class Args:
     """number of epochs of training"""
     batch_size_1: int = 16
     """size of the batches for Stage 1"""
-    lr_1: float = 2e-4  # Default: 2e-4
+    lr_1: float = 5e-5  # Default: 2e-4
     """learning rate for Stage 1"""
     beta: float = 0.25
     """beta hyperparameter for the codebook commitment loss"""
@@ -134,7 +128,7 @@ class Args:
     """weighting factor for the adversarial loss from the discriminator"""
     rec_loss_factor: float = 1.0
     """weighting factor for the reconstruction loss"""
-    perceptual_loss_factor: float = 1.0
+    perceptual_loss_factor: float = 0.1
     """weighting factor for the perceptual loss"""
     encoder_channels: tuple[int, ...] = (64, 64, 128, 128, 256)
     """tuple of channel sizes for each encoder layer"""
@@ -1120,7 +1114,7 @@ class GPTConfig:
 
 
 class GPT(nn.Module):
-    """Minimal GPT-2 style Transformer with HF weight import."""
+    """Minimal GPT-2 style Transformer."""
 
     def __init__(self, config: GPTConfig):
         super().__init__()
@@ -1142,13 +1136,6 @@ class GPT(nn.Module):
         for pn, p in self.named_parameters():
             if pn.endswith("c_proj.weight"):
                 th.nn.init.normal_(p, mean=0.0, std=0.02 / math.sqrt(2 * config.n_layer))
-
-    def get_num_params(self, *, non_embedding: bool = True) -> int:
-        """Return total parameter count (optionally excluding position embeddings)."""
-        n_params = sum(p.numel() for p in self.parameters())
-        if non_embedding:
-            n_params -= self.transformer["wpe"].weight.numel()
-        return n_params
 
     def _init_weights(self, module: nn.Module) -> None:
         if isinstance(module, nn.Linear):
@@ -1185,126 +1172,6 @@ class GPT(nn.Module):
         else:
             loss = None
         return logits, loss
-
-    def crop_block_size(self, block_size: int) -> None:
-        """Reduce maximum context length and trim position embeddings."""
-        assert block_size <= self.config.block_size
-        self.config.block_size = block_size
-        self.transformer["wpe"].weight = nn.Parameter(self.transformer["wpe"].weight[:block_size])
-        for block in self.transformer["h"]:
-            attn = block.attn
-            if hasattr(attn, "bias"):
-                attn.bias = attn.bias[:, :, :block_size, :block_size]
-
-    @classmethod
-    def from_pretrained(
-        cls,
-        model_type: str,
-        override_args: dict[str, float] | None = None,
-    ) -> GPT:
-        """Load HF GPT-2 weights into this minimal GPT implementation."""
-        assert model_type in {"gpt2", "gpt2-medium", "gpt2-large", "gpt2-xl"}
-        override_args = override_args or {}
-        assert all(k == "dropout" for k in override_args), "Only 'dropout' can be overridden"
-
-        cfg_map: dict[str, dict[str, int]] = {
-            "gpt2": {"n_layer": 12, "n_head": 12, "n_embd": 768},
-            "gpt2-medium": {"n_layer": 24, "n_head": 16, "n_embd": 1024},
-            "gpt2-large": {"n_layer": 36, "n_head": 20, "n_embd": 1280},
-            "gpt2-xl": {"n_layer": 48, "n_head": 25, "n_embd": 1600},
-        }
-
-        # Use object so we can mix int, float, and bool
-        config_args: dict[str, object] = dict(cfg_map[model_type])
-        config_args.update({"vocab_size": 50257, "block_size": 1024, "bias": True})
-
-        if "dropout" in override_args:
-            config_args["dropout"] = float(override_args["dropout"])
-
-        config = GPTConfig(**config_args)  # type: ignore[arg-type]
-        model = GPT(config)
-
-        sd = model.state_dict()
-        sd_keys = [k for k in sd if not k.endswith(".attn.bias")]
-
-        hf: GPT2LMHeadModel = GPT2LMHeadModel.from_pretrained(model_type)
-        sd_hf = hf.state_dict()
-        sd_keys_hf = [
-            k
-            for k in sd_hf
-            if not (k.endswith((".attn.masked_bias", ".attn.bias")))
-        ]
-
-        transposed = {"attn.c_attn.weight", "attn.c_proj.weight", "mlp.c_fc.weight", "mlp.c_proj.weight"}
-        assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
-
-        for k in sd_keys_hf:
-            if any(k.endswith(w) for w in transposed):
-                assert sd_hf[k].shape[::-1] == sd[k].shape
-                with th.no_grad():
-                    sd[k].copy_(sd_hf[k].t())
-            else:
-                assert sd_hf[k].shape == sd[k].shape
-                with th.no_grad():
-                    sd[k].copy_(sd_hf[k])
-
-        return model
-
-    def configure_optimizers(
-        self,
-        weight_decay: float,
-        learning_rate: float,
-        betas: tuple[float, float],
-        device_type: str,
-    ) -> th.optim.Optimizer:
-        """Create AdamW with decoupled weight decay for matrix weights only."""
-        param_dict = {pn: p for pn, p in self.named_parameters() if p.requires_grad}
-        dim_threshold = 2
-        decay_params = [p for p in param_dict.values() if p.dim() >= dim_threshold]
-        nodecay_params = [p for p in param_dict.values() if p.dim() < dim_threshold]
-        optim_groups = [
-            {"params": decay_params, "weight_decay": weight_decay},
-            {"params": nodecay_params, "weight_decay": 0.0},
-        ]
-
-        fused_available = "fused" in inspect.signature(th.optim.AdamW).parameters
-        use_fused = bool(fused_available and device_type == "cuda")
-        extra_args: dict[str, object] = {"fused": True} if use_fused else {}
-        return th.optim.AdamW(optim_groups, lr=learning_rate, betas=betas, **extra_args)
-
-    def estimate_mfu(self, fwdbwd_per_iter: int, dt: float) -> float:
-        """Estimate model FLOPS utilization relative to A100 bf16 peak (312 TFLOPS)."""
-        n = self.get_num_params()
-        cfg = self.config
-        l, h, q, t = cfg.n_layer, cfg.n_head, cfg.n_embd // cfg.n_head, cfg.block_size
-        flops_per_token = 6 * n + 12 * l * h * q * t
-        flops_per_fwdbwd = flops_per_token * t
-        flops_per_iter = flops_per_fwdbwd * float(fwdbwd_per_iter)
-        flops_achieved = flops_per_iter * (1.0 / dt)
-        flops_peak = 312e12
-        return float(flops_achieved / flops_peak)
-
-    @th.no_grad()
-    def generate(
-        self,
-        idx: th.Tensor,
-        max_new_tokens: int,
-        *,
-        temperature: float = 1.0,
-        top_k: int | None = None,
-    ) -> th.Tensor:
-        """Autoregressively sample tokens conditioned on idx."""
-        for _ in range(max_new_tokens):
-            idx_cond = idx if idx.size(1) <= self.config.block_size else idx[:, -self.config.block_size :]
-            logits, _ = self(idx_cond)
-            logits = logits[:, -1, :] / temperature
-            if top_k is not None:
-                v, _ = th.topk(logits, min(top_k, logits.size(-1)))
-                logits[logits < v[:, [-1]]] = -float("inf")
-            probs = f.softmax(logits, dim=-1)
-            idx_next = th.multinomial(probs, num_samples=1)
-            idx = th.cat((idx, idx_next), dim=1)
-        return idx
 ###########################################
 ########## GPT-2 BASE CODE ABOVE ##########
 ###########################################
@@ -1519,15 +1386,19 @@ if __name__ == "__main__":
     # Add in the upsampled optimal design column and remove the original optimal design column
     training_ds = training_ds.map(
         lambda batch: {
-            "optimal_upsampled": upsample_nearest(batch["optimal_design"][:]).cpu().numpy()
+            "optimal_upsampled": resize_to(
+                data=batch["optimal_design"][:],
+                h=args.image_size,
+                w=args.image_size
+            ).cpu().numpy()
         },
         batched=True,
     )
     training_ds = training_ds.remove_columns("optimal_design")
-    design_shape = training_ds["optimal_upsampled"][:].shape[-2:]
 
-    args.image_size = training_ds["optimal_upsampled"][:].shape[-1]
-    args.latent_size = args.image_size // (2 ** (len(args.encoder_channels) - 2))
+    # Now we assume the dataset is of shape (N, C, H, W) and work from there
+    image_channels = training_ds["optimal_upsampled"][:].shape[1]
+    latent_size = args.image_size // (2 ** (len(args.encoder_channels) - 2))
     conditions = problem.conditions_keys
 
     # Optionally normalize condition columns
@@ -1595,15 +1466,15 @@ if __name__ == "__main__":
         encoder_attn_resolutions=args.encoder_attn_resolutions,
         encoder_num_res_blocks=args.encoder_num_res_blocks,
         decoder_channels=args.decoder_channels,
-        decoder_start_resolution=args.latent_size,
+        decoder_start_resolution=latent_size,
         decoder_attn_resolutions=args.decoder_attn_resolutions,
         decoder_num_res_blocks=args.decoder_num_res_blocks,
-        image_channels=args.image_channels,
+        image_channels=image_channels,
         latent_dim=args.latent_dim,
         num_codebook_vectors=args.num_codebook_vectors
     ).to(device=device)
 
-    discriminator = Discriminator(image_channels=args.image_channels).to(device=device)
+    discriminator = Discriminator(image_channels=image_channels).to(device=device)
 
     cvqgan = VQGAN(
         device=device,
@@ -1718,7 +1589,7 @@ if __name__ == "__main__":
         latent_imgs = transformer.sample(
             x=th.empty(n_designs, 0, dtype=th.int64, device=device),
             c=c,
-            steps=(args.latent_size ** 2)
+            steps=(latent_size ** 2)
         )
         gen_imgs = transformer.z_to_image(latent_imgs)
 
@@ -1831,7 +1702,11 @@ if __name__ == "__main__":
                 # This saves a grid image of 25 generated designs every sample_interval
                 if batches_done % args.sample_interval_1 == 0:
                     # Extract 25 designs
-                    designs = sample_designs_1(n_designs=n_logged_designs)
+                    designs = resize_to(
+                        data=sample_designs_1(n_designs=n_logged_designs),
+                        h=design_shape[0],
+                        w=design_shape[1]
+                    )
                     fig, axes = plt.subplots(5, 5, figsize=(12, 12))
 
                     # Flatten axes for easy indexing
@@ -1839,7 +1714,7 @@ if __name__ == "__main__":
 
                     # Plot each tensor as a scatter plot
                     for j, tensor in enumerate(designs):
-                        img = tensor.cpu().numpy().reshape(design_shape[-2], design_shape[-1])  # Extract x and y coordinates
+                        img = tensor.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
                         axes[j].imshow(img)  # Scatter plot
                         axes[j].title.set_text(f"Design {j + 1}")  # Set title
                         axes[j].set_xticks([])  # Hide x ticks
@@ -1918,6 +1793,11 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval_2 == 0:
                     # Extract 25 designs
                     desired_conds, designs = sample_designs_2(n_designs=n_logged_designs)
+                    designs = resize_to(
+                        data=designs,
+                        h=design_shape[0],
+                        w=design_shape[1]
+                    )
                     fig, axes = plt.subplots(5, 5, figsize=(12, 12))
 
                     # Flatten axes for easy indexing
@@ -1925,7 +1805,7 @@ if __name__ == "__main__":
 
                     # Plot each tensor as a scatter plot
                     for j, tensor in enumerate(designs):
-                        img = tensor.cpu().numpy().reshape(design_shape[-2], design_shape[-1])  # Extract x and y coordinates
+                        img = tensor.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
                         dc = desired_conds[j].cpu()
                         axes[j].imshow(img)  # Scatter plot
                         title = [(conditions[i][0], f"{dc[i]:.2f}") for i in range(n_conds)]
