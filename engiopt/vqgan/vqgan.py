@@ -1401,13 +1401,13 @@ if __name__ == "__main__":
     latent_size = args.image_size // (2 ** (len(args.encoder_channels) - 2))
     conditions = problem.conditions_keys
 
-    # Optionally normalize condition columns
-    if args.normalize_conditions:
-        training_ds, mean, std = normalize(training_ds, conditions)
-
     # Optionally drop condition columns that are constant like overhang_constraint in beams2d
     if args.drop_constant_conditions:
         training_ds, conditions = drop_constant(training_ds, conditions)
+
+    # Optionally normalize condition columns
+    if args.normalize_conditions:
+        training_ds, mean, std = normalize(training_ds, conditions)
 
     n_conds = len(conditions)
     args.cond_dim = n_conds
@@ -1716,7 +1716,7 @@ if __name__ == "__main__":
                     for j, tensor in enumerate(designs):
                         img = tensor.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
                         axes[j].imshow(img)  # Scatter plot
-                        axes[j].title.set_text(f"Design {j + 1}")  # Set title
+                        axes[j].title.set_text(f"Reconstruction {j + 1}")  # Set title
                         axes[j].set_xticks([])  # Hide x ticks
                         axes[j].set_yticks([])  # Hide y ticks
 
@@ -1793,6 +1793,8 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval_2 == 0:
                     # Extract 25 designs
                     desired_conds, designs = sample_designs_2(n_designs=n_logged_designs)
+                    if args.normalize_conditions:
+                        desired_conds = (desired_conds.cpu() * std) + mean
                     designs = resize_to(
                         data=designs,
                         h=design_shape[0],

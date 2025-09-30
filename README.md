@@ -35,6 +35,7 @@ As much as we can, we follow the [CleanRL](https://github.com/vwxyzjn/cleanrl) p
 [gan_bezier](engiopt/gan_bezier/) | Inverse Design | 1D | ❌ | GAN + Bezier layer
 [gan_cnn_2d](engiopt/gan_cnn_2d/) | Inverse Design | 2D | ❌ | GAN + CNN
 [surrogate_model](engiopt/surrogate_model/) | Surrogate Model | 1D | ❌ | MLP
+[vqgan](engiopt/vqgan) | Inverse Design | 2D | ✅ | VQVAE + Transformer
 
 ## Dashboards
 The integration with WandB allows us to access live dashboards of our runs (on the cluster or not). We also upload the trained models there. You can access some of our runs at https://wandb.ai/engibench/engiopt.
