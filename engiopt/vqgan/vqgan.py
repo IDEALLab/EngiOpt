@@ -101,6 +101,10 @@ class Args:
     """number of epochs of CVQGAN training"""
     cond_lr: float = 2e-4  # Default: 2e-4
     """learning rate for CVQGAN"""
+    latent_size: int = 16
+    """size of the latent feature map (automatically determined later)"""
+    image_channels: int = 1
+    """number of channels in the input image (automatically determined later)"""
 
     # Algorithm-specific: Stage 1 (AE)
     # From original implementation: assume image_channels=1, use greyscale LPIPS only, use_Online=True, determine image_size automatically, calculate decoder_start_resolution automatically
@@ -1397,8 +1401,8 @@ if __name__ == "__main__":
     training_ds = training_ds.remove_columns("optimal_design")
 
     # Now we assume the dataset is of shape (N, C, H, W) and work from there
-    image_channels = training_ds["optimal_upsampled"][:].shape[1]
-    latent_size = args.image_size // (2 ** (len(args.encoder_channels) - 2))
+    args.image_channels = training_ds["optimal_upsampled"][:].shape[1]
+    args.latent_size = args.image_size // (2 ** (len(args.encoder_channels) - 2))
     conditions = problem.conditions_keys
 
     # Optionally drop condition columns that are constant like overhang_constraint in beams2d
@@ -1466,15 +1470,15 @@ if __name__ == "__main__":
         encoder_attn_resolutions=args.encoder_attn_resolutions,
         encoder_num_res_blocks=args.encoder_num_res_blocks,
         decoder_channels=args.decoder_channels,
-        decoder_start_resolution=latent_size,
+        decoder_start_resolution=args.latent_size,
         decoder_attn_resolutions=args.decoder_attn_resolutions,
         decoder_num_res_blocks=args.decoder_num_res_blocks,
-        image_channels=image_channels,
+        image_channels=args.image_channels,
         latent_dim=args.latent_dim,
         num_codebook_vectors=args.num_codebook_vectors
     ).to(device=device)
 
-    discriminator = Discriminator(image_channels=image_channels).to(device=device)
+    discriminator = Discriminator(image_channels=args.image_channels).to(device=device)
 
     cvqgan = VQGAN(
         device=device,
@@ -1589,7 +1593,7 @@ if __name__ == "__main__":
         latent_imgs = transformer.sample(
             x=th.empty(n_designs, 0, dtype=th.int64, device=device),
             c=c,
-            steps=(latent_size ** 2)
+            steps=(args.latent_size ** 2)
         )
         gen_imgs = transformer.z_to_image(latent_imgs)
 
