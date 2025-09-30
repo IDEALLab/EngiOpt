@@ -150,15 +150,22 @@ if __name__ == "__main__":
     )
 
     # Clean up conditions based on model training settings and convert back to tensor
-    sampled_conditions_new = sampled_conditions
-    if run.config["drop_constant_conditions"]:
-        sampled_conditions_new, conditions = drop_constant(sampled_conditions_new, sampled_conditions_new.column_names)
+    sampled_conditions_new = sampled_conditions.select(range(len(sampled_conditions)))
+    conditions = sampled_conditions_new.column_names
 
+    # Drop constant condition columns if enabled
+    if run.config["drop_constant_conditions"]:
+        sampled_conditions_new, conditions = drop_constant(
+            sampled_conditions_new, sampled_conditions_new.column_names
+        )
+
+    # Normalize condition columns if enabled
     if run.config["normalize_conditions"]:
         sampled_conditions_new, mean, std = normalize(sampled_conditions_new, conditions)
 
+    # Convert to tensor
     conditions_tensor = th.stack(
-        [th.as_tensor(sampled_conditions_new[key][:]).float() for key in conditions],
+        [th.as_tensor(sampled_conditions_new[c][:]).float() for c in conditions],
         dim=1
     ).to(device)
 
