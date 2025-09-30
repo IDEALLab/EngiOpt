@@ -43,13 +43,9 @@ from engiopt.transforms import normalize
 from engiopt.transforms import resize_to
 
 # URL and checkpoint for LPIPS model
-URL_MAP = {
-    "vgg_lpips": "https://heibox.uni-heidelberg.de/f/607503859c864bc1b30b/?dl=1"
-}
+URL_MAP = {"vgg_lpips": "https://heibox.uni-heidelberg.de/f/607503859c864bc1b30b/?dl=1"}
 
-CKPT_MAP = {
-    "vgg_lpips": "vgg.pth"
-}
+CKPT_MAP = {"vgg_lpips": "vgg.pth"}
 
 
 @dataclass
@@ -183,8 +179,10 @@ class Codebook(nn.Module):
         contras_loss (bool): if true, use the contras_loss to further improve the performance
         init (bool): if true, the codebook has been initialized
     """
+
     def __init__(  # noqa: PLR0913
-        self, *,
+        self,
+        *,
         num_codebook_vectors: int,
         latent_dim: int,
         beta: float = 0.25,
@@ -220,9 +218,11 @@ class Codebook(nn.Module):
         # clculate the distance
         if self.distance == "l2":
             # l2 distances from z to embeddings e_j (z - e)^2 = z^2 + e^2 - 2 e * z
-            d = - th.sum(z_flattened.detach() ** 2, dim=1, keepdim=True) - \
-                th.sum(self.embedding.weight ** 2, dim=1) + \
-                2 * th.einsum("bd, dn-> bn", z_flattened.detach(), rearrange(self.embedding.weight, "n d-> d n"))
+            d = (
+                -th.sum(z_flattened.detach() ** 2, dim=1, keepdim=True)
+                - th.sum(self.embedding.weight**2, dim=1)
+                + 2 * th.einsum("bd, dn-> bn", z_flattened.detach(), rearrange(self.embedding.weight, "n d-> d n"))
+            )
         elif self.distance == "cos":
             # cosine distances from z to embeddings e_j
             normed_z_flattened = f.normalize(z_flattened, dim=1).detach()
@@ -232,14 +232,14 @@ class Codebook(nn.Module):
         # encoding
         sort_distance, indices = d.sort(dim=1)
         # look up the closest point for the indices
-        encoding_indices = indices[:,-1]
+        encoding_indices = indices[:, -1]
         encodings = th.zeros(encoding_indices.unsqueeze(1).shape[0], self.num_embed, device=z.device)
         encodings.scatter_(1, encoding_indices.unsqueeze(1), 1)
 
         # quantize and unflatten
         z_q = th.matmul(encodings, self.embedding.weight).view(z.shape)
         # compute loss for embedding
-        loss = self.beta * th.mean((z_q.detach()-z)**2) + th.mean((z_q - z.detach()) ** 2)
+        loss = self.beta * th.mean((z_q.detach() - z) ** 2) + th.mean((z_q - z.detach()) ** 2)
         # preserve gradients
         z_q = z + (z_q - z).detach()
         # reshape back to match original input shape
@@ -252,13 +252,13 @@ class Codebook(nn.Module):
         # online clustered reinitialization for unoptimized points
         if self.training:
             # calculate the average usage of code entries
-            self.embed_prob.mul_(self.decay).add_(avg_probs, alpha= 1 - self.decay)
+            self.embed_prob.mul_(self.decay).add_(avg_probs, alpha=1 - self.decay)
             # running average updates
             if self.anchor in ["closest", "random", "probrandom"] and (not self.init):
                 # closest sampling
                 if self.anchor == "closest":
                     sort_distance, indices = d.sort(dim=0)
-                    random_feat = z_flattened.detach()[indices[-1,:]]
+                    random_feat = z_flattened.detach()[indices[-1, :]]
                 # feature pool based random sampling
                 elif self.anchor == "random":
                     random_feat = self.pool.query(z_flattened.detach())
@@ -268,18 +268,22 @@ class Codebook(nn.Module):
                     prob = th.multinomial(norm_distance, num_samples=1).view(-1)
                     random_feat = z_flattened.detach()[prob]
                 # decay parameter based on the average usage
-                decay = th.exp(-(self.embed_prob*self.num_embed*10)/(1-self.decay)-1e-3).unsqueeze(1).repeat(1, self.embed_dim)
+                decay = (
+                    th.exp(-(self.embed_prob * self.num_embed * 10) / (1 - self.decay) - 1e-3)
+                    .unsqueeze(1)
+                    .repeat(1, self.embed_dim)
+                )
                 self.embedding.weight.data = self.embedding.weight.data * (1 - decay) + random_feat * decay
                 if self.first_batch:
                     self.init = True
             # contrastive loss
             if self.contras_loss:
                 sort_distance, indices = d.sort(dim=0)
-                dis_pos = sort_distance[-max(1, int(sort_distance.size(0)/self.num_embed)):,:].mean(dim=0, keepdim=True)
-                dis_neg = sort_distance[:int(sort_distance.size(0)*1/2),:]
+                dis_pos = sort_distance[-max(1, int(sort_distance.size(0) / self.num_embed)) :, :].mean(dim=0, keepdim=True)
+                dis_neg = sort_distance[: int(sort_distance.size(0) * 1 / 2), :]
                 dis = th.cat([dis_pos, dis_neg], dim=0).t() / 0.07
                 contra_loss = f.cross_entropy(dis, th.zeros((dis.size(0),), dtype=th.long, device=dis.device))
-                loss +=  contra_loss
+                loss += contra_loss
 
         return z_q, encoding_indices, loss, min_encodings, perplexity
 
@@ -293,11 +297,8 @@ class FeaturePool:
         pool_size (int): the size of feature buffer
         dim (int): the dimension of each feature
     """
-    def __init__(
-        self,
-        pool_size: int,
-        dim: int = 64
-    ):
+
+    def __init__(self, pool_size: int, dim: int = 64):
         self.pool_size = pool_size
         if self.pool_size > 0:
             self.nums_features = 0
@@ -307,21 +308,21 @@ class FeaturePool:
         """Return features from the pool."""
         self.features = self.features.to(features.device)
         if self.nums_features < self.pool_size:
-            if features.size(0) > self.pool_size: # if the batch size is large enough, directly update the whole codebook
+            if features.size(0) > self.pool_size:  # if the batch size is large enough, directly update the whole codebook
                 random_feat_id = th.randint(0, features.size(0), (int(self.pool_size),))
                 self.features = features[random_feat_id]
                 self.nums_features = self.pool_size
             else:
                 # if the mini-batch is not large nuough, just store it for the next update
                 num = self.nums_features + features.size(0)
-                self.features[self.nums_features:num] = features
+                self.features[self.nums_features : num] = features
                 self.nums_features = num
         elif features.size(0) > int(self.pool_size):
             random_feat_id = th.randint(0, features.size(0), (int(self.pool_size),))
             self.features = features[random_feat_id]
         else:
             random_id = th.randperm(self.pool_size)
-            self.features[random_id[:features.size(0)]] = features
+            self.features[random_id[: features.size(0)]] = features
 
         return self.features
 
@@ -332,10 +333,8 @@ class GroupNorm(nn.Module):
     Parameters:
         channels (int): number of channels in the input feature map
     """
-    def __init__(
-        self,
-        channels: int
-    ):
+
+    def __init__(self, channels: int):
         super().__init__()
         self.gn = nn.GroupNorm(num_groups=32, num_channels=channels, eps=1e-6, affine=True)
 
@@ -345,6 +344,7 @@ class GroupNorm(nn.Module):
 
 class Swish(nn.Module):
     """Swish activation function to be used in VQGAN Encoder and Decoder."""
+
     def forward(self, x: th.Tensor) -> th.Tensor:
         return x * th.sigmoid(x)
 
@@ -356,11 +356,8 @@ class ResidualBlock(nn.Module):
         in_channels (int): number of input channels
         out_channels (int): number of output channels
     """
-    def __init__(
-        self,
-        in_channels: int,
-        out_channels: int
-    ):
+
+    def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -370,7 +367,7 @@ class ResidualBlock(nn.Module):
             nn.Conv2d(in_channels, out_channels, 3, 1, 1),
             GroupNorm(out_channels),
             Swish(),
-            nn.Conv2d(out_channels, out_channels, 3, 1, 1)
+            nn.Conv2d(out_channels, out_channels, 3, 1, 1),
         )
 
         if in_channels != out_channels:
@@ -388,10 +385,8 @@ class UpSampleBlock(nn.Module):
     Parameters:
         channels (int): number of channels in the input feature map
     """
-    def __init__(
-        self,
-        channels: int
-    ):
+
+    def __init__(self, channels: int):
         super().__init__()
         self.conv = nn.Conv2d(channels, channels, 3, 1, 1)
 
@@ -406,10 +401,8 @@ class DownSampleBlock(nn.Module):
     Parameters:
         channels (int): number of channels in the input feature map
     """
-    def __init__(
-        self,
-        channels: int
-    ):
+
+    def __init__(self, channels: int):
         super().__init__()
         self.conv = nn.Conv2d(channels, channels, 3, 2, 0)
 
@@ -425,10 +418,8 @@ class NonLocalBlock(nn.Module):
     Parameters:
         channels (int): number of channels in the input feature map
     """
-    def __init__(
-        self,
-        channels: int
-    ):
+
+    def __init__(self, channels: int):
         super().__init__()
         self.in_channels = channels
 
@@ -446,13 +437,13 @@ class NonLocalBlock(nn.Module):
 
         b, c, h, w = q.shape
 
-        q = q.reshape(b, c, h*w)
+        q = q.reshape(b, c, h * w)
         q = q.permute(0, 2, 1)
-        k = k.reshape(b, c, h*w)
-        v = v.reshape(b, c, h*w)
+        k = k.reshape(b, c, h * w)
+        v = v.reshape(b, c, h * w)
 
         attn = th.bmm(q, k)
-        attn = attn * (int(c)**(-0.5))
+        attn = attn * (int(c) ** (-0.5))
         attn = f.softmax(attn, dim=2)
         attn = attn.permute(0, 2, 1)
 
@@ -470,17 +461,10 @@ class LinearCombo(nn.Module):
         out_features (int): number of output features
         alpha (float): negative slope for LeakyReLU
     """
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        alpha: float = 0.2
-    ):
+
+    def __init__(self, in_features: int, out_features: int, alpha: float = 0.2):
         super().__init__()
-        self.model = nn.Sequential(
-            nn.Linear(in_features, out_features),
-            nn.LeakyReLU(alpha)
-        )
+        self.model = nn.Sequential(nn.Linear(in_features, out_features), nn.LeakyReLU(alpha))
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         return self.model(x)
@@ -501,6 +485,7 @@ class Encoder(nn.Module):
         image_channels (int): number of channels in the input image
         latent_dim (int): dimensionality of the latent space
     """
+
     def __init__(  # noqa: PLR0913
         self,
         encoder_channels: tuple[int, ...],
@@ -514,7 +499,7 @@ class Encoder(nn.Module):
         channels = encoder_channels
         resolution = encoder_start_resolution
         layers = [nn.Conv2d(image_channels, channels[0], 3, 1, 1)]
-        for i in range(len(channels)-1):
+        for i in range(len(channels) - 1):
             in_channels = channels[i]
             out_channels = channels[i + 1]
             for _ in range(encoder_num_res_blocks):
@@ -522,8 +507,8 @@ class Encoder(nn.Module):
                 in_channels = out_channels
                 if resolution in encoder_attn_resolutions:
                     layers.append(NonLocalBlock(in_channels))
-            if i != len(channels)-2:
-                layers.append(DownSampleBlock(channels[i+1]))
+            if i != len(channels) - 2:
+                layers.append(DownSampleBlock(channels[i + 1]))
                 resolution //= 2
         layers.append(ResidualBlock(channels[-1], channels[-1]))
         layers.append(NonLocalBlock(channels[-1]))
@@ -546,25 +531,20 @@ class CondEncoder(nn.Module):
         cond_hidden_dim (int): hidden dimension of the CVQGAN MLP
         cond_latent_dim (int): individual code dimension for CVQGAN
     """
-    def __init__(
-        self,
-        cond_feature_map_dim: int,
-        cond_dim: int,
-        cond_hidden_dim: int,
-        cond_latent_dim: int
-    ):
+
+    def __init__(self, cond_feature_map_dim: int, cond_dim: int, cond_hidden_dim: int, cond_latent_dim: int):
         super().__init__()
         self.c_feature_map_dim = cond_feature_map_dim
         self.model = nn.Sequential(
             LinearCombo(cond_dim, cond_hidden_dim),
             LinearCombo(cond_hidden_dim, cond_hidden_dim),
-            nn.Linear(cond_hidden_dim, cond_latent_dim*cond_feature_map_dim**2)
+            nn.Linear(cond_hidden_dim, cond_latent_dim * cond_feature_map_dim**2),
         )
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         encoded = self.model(x)
         s = encoded.shape
-        return encoded.view(s[0], s[1]//self.c_feature_map_dim**2, self.c_feature_map_dim, self.c_feature_map_dim)
+        return encoded.view(s[0], s[1] // self.c_feature_map_dim**2, self.c_feature_map_dim, self.c_feature_map_dim)
 
 
 class Decoder(nn.Module):
@@ -582,6 +562,7 @@ class Decoder(nn.Module):
         image_channels (int): number of channels in the output image
         latent_dim (int): dimensionality of the latent space
     """
+
     def __init__(  # noqa: PLR0913
         self,
         decoder_channels: tuple[int, ...],
@@ -589,15 +570,17 @@ class Decoder(nn.Module):
         decoder_attn_resolutions: tuple[int, ...],
         decoder_num_res_blocks: int,
         image_channels: int,
-        latent_dim: int
+        latent_dim: int,
     ):
         super().__init__()
         in_channels = decoder_channels[0]
         resolution = decoder_start_resolution
-        layers = [nn.Conv2d(latent_dim, in_channels, 3, 1, 1),
-                  ResidualBlock(in_channels, in_channels),
-                  NonLocalBlock(in_channels),
-                  ResidualBlock(in_channels, in_channels)]
+        layers = [
+            nn.Conv2d(latent_dim, in_channels, 3, 1, 1),
+            ResidualBlock(in_channels, in_channels),
+            NonLocalBlock(in_channels),
+            ResidualBlock(in_channels, in_channels),
+        ]
 
         for i in range(len(decoder_channels)):
             out_channels = decoder_channels[i]
@@ -629,19 +612,14 @@ class CondDecoder(nn.Module):
         cond_hidden_dim (int): hidden dimension of the CVQGAN MLP
         cond_latent_dim (int): individual code dimension for CVQGAN
     """
-    def __init__(
-        self,
-        cond_latent_dim: int,
-        cond_dim: int,
-        cond_hidden_dim: int,
-        cond_feature_map_dim: int
-    ):
+
+    def __init__(self, cond_latent_dim: int, cond_dim: int, cond_hidden_dim: int, cond_feature_map_dim: int):
         super().__init__()
 
         self.model = nn.Sequential(
-            LinearCombo(cond_latent_dim*cond_feature_map_dim**2, cond_hidden_dim),
+            LinearCombo(cond_latent_dim * cond_feature_map_dim**2, cond_hidden_dim),
             LinearCombo(cond_hidden_dim, cond_hidden_dim),
-            nn.Linear(cond_hidden_dim, cond_dim)
+            nn.Linear(cond_hidden_dim, cond_dim),
         )
 
     def forward(self, x: th.Tensor) -> th.Tensor:
@@ -660,12 +638,7 @@ class Discriminator(nn.Module):
         image_channels: Number of channels in the input image.
     """
 
-    def __init__(
-        self,
-        num_filters_last: int = 64,
-        n_layers: int = 3,
-        image_channels: int = 1
-    ):
+    def __init__(self, num_filters_last: int = 64, n_layers: int = 3, image_channels: int = 1):
         super().__init__()
 
         # Convolutional backbone (PatchGAN)
@@ -691,14 +664,11 @@ class Discriminator(nn.Module):
                 nn.LeakyReLU(0.2, inplace=True),
             ]
 
-        layers.append(
-            nn.Conv2d(num_filters_last * num_filters_mult, 1, kernel_size=4, stride=1, padding=1)
-        )
+        layers.append(nn.Conv2d(num_filters_last * num_filters_mult, 1, kernel_size=4, stride=1, padding=1))
         self.model = nn.Sequential(*layers)
 
         # Initialize weights
         self.apply(self._weights_init)
-
 
     @staticmethod
     def _weights_init(m: nn.Module) -> None:
@@ -710,7 +680,6 @@ class Discriminator(nn.Module):
             nn.init.normal_(m.weight.data, mean=1.0, std=0.02)
             nn.init.constant_(m.bias.data, 0.0)
 
-
     def forward(self, x: th.Tensor) -> th.Tensor:
         """Forward pass with optional CVQGAN adapter."""
         return self.model(x)
@@ -721,8 +690,8 @@ class ScalingLayer(nn.Module):
 
     def __init__(self):
         super().__init__()
-        self.register_buffer("shift", th.tensor([-.030, -.088, -.188])[None, :, None, None])
-        self.register_buffer("scale", th.tensor([.458, .448, .450])[None, :, None, None])
+        self.register_buffer("shift", th.tensor([-0.030, -0.088, -0.188])[None, :, None, None])
+        self.register_buffer("scale", th.tensor([0.458, 0.448, 0.450])[None, :, None, None])
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         return (x - self.shift) / self.scale
@@ -749,9 +718,9 @@ class VGG16(nn.Module):
         super().__init__()
         vgg_feats = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features
         blocks = [vgg_feats[i] for i in range(30)]
-        self.slice1 = nn.Sequential(*blocks[0:4])    # relu1_2
-        self.slice2 = nn.Sequential(*blocks[4:9])    # relu2_2
-        self.slice3 = nn.Sequential(*blocks[9:16])   # relu3_3
+        self.slice1 = nn.Sequential(*blocks[0:4])  # relu1_2
+        self.slice2 = nn.Sequential(*blocks[4:9])  # relu2_2
+        self.slice3 = nn.Sequential(*blocks[9:16])  # relu3_3
         self.slice4 = nn.Sequential(*blocks[16:23])  # relu4_3
         self.slice5 = nn.Sequential(*blocks[23:30])  # relu5_3
         self.requires_grad_(requires_grad=False)
@@ -804,7 +773,6 @@ class GreyscaleLPIPS(nn.Module):
         self._load_from_pretrained(name=ckpt_name)
         if freeze:
             self.requires_grad_(requires_grad=False)
-
 
     def forward(self, real_x: th.Tensor, fake_x: th.Tensor) -> th.Tensor:
         """Compute greyscale-aware LPIPS distance between two batches."""
@@ -900,10 +868,11 @@ class VQGAN(nn.Module):
         latent_dim (int): Dimensionality of the latent space.
         num_codebook_vectors (int): Number of codebook vectors.
     """
-    def __init__(  # noqa: PLR0913
-        self, *,
-        device: th.device,
 
+    def __init__(  # noqa: PLR0913
+        self,
+        *,
+        device: th.device,
         # CVQGAN parameters
         is_c: bool = False,
         cond_feature_map_dim: int = 4,
@@ -911,7 +880,6 @@ class VQGAN(nn.Module):
         cond_hidden_dim: int = 256,
         cond_latent_dim: int = 4,
         cond_codebook_vectors: int = 64,
-
         # VQGAN + Codebook parameters
         encoder_channels: tuple[int, ...] = (64, 64, 128, 128, 256),
         encoder_start_resolution: int = 128,
@@ -923,23 +891,13 @@ class VQGAN(nn.Module):
         decoder_num_res_blocks: int = 3,
         image_channels: int = 1,
         latent_dim: int = 16,
-        num_codebook_vectors: int = 256
+        num_codebook_vectors: int = 256,
     ):
         super().__init__()
         if is_c:
-            self.encoder = CondEncoder(
-                cond_feature_map_dim,
-                cond_dim,
-                cond_hidden_dim,
-                cond_latent_dim
-            ).to(device=device)
+            self.encoder = CondEncoder(cond_feature_map_dim, cond_dim, cond_hidden_dim, cond_latent_dim).to(device=device)
 
-            self.decoder = CondDecoder(
-                cond_latent_dim,
-                cond_dim,
-                cond_hidden_dim,
-                cond_feature_map_dim
-            ).to(device=device)
+            self.decoder = CondDecoder(cond_latent_dim, cond_dim, cond_hidden_dim, cond_feature_map_dim).to(device=device)
 
             self.quant_conv = nn.Conv2d(cond_latent_dim, cond_latent_dim, 1).to(device=device)
             self.post_quant_conv = nn.Conv2d(cond_latent_dim, cond_latent_dim, 1).to(device=device)
@@ -950,7 +908,7 @@ class VQGAN(nn.Module):
                 encoder_attn_resolutions,
                 encoder_num_res_blocks,
                 image_channels,
-                latent_dim
+                latent_dim,
             ).to(device=device)
 
             self.decoder = Decoder(
@@ -959,15 +917,15 @@ class VQGAN(nn.Module):
                 decoder_attn_resolutions,
                 decoder_num_res_blocks,
                 image_channels,
-                latent_dim
+                latent_dim,
             ).to(device=device)
 
             self.quant_conv = nn.Conv2d(latent_dim, latent_dim, 1).to(device=device)
             self.post_quant_conv = nn.Conv2d(latent_dim, latent_dim, 1).to(device=device)
 
         self.codebook = Codebook(
-            num_codebook_vectors = cond_codebook_vectors if is_c else num_codebook_vectors,
-            latent_dim = cond_latent_dim if is_c else latent_dim
+            num_codebook_vectors=cond_codebook_vectors if is_c else num_codebook_vectors,
+            latent_dim=cond_latent_dim if is_c else latent_dim,
         ).to(device=device)
 
     def forward(self, designs: th.Tensor) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
@@ -1043,9 +1001,7 @@ class CausalSelfAttention(nn.Module):
             )
             self.register_buffer(
                 "bias",
-                th.tril(th.ones(config.block_size, config.block_size)).view(
-                    1, 1, config.block_size, config.block_size
-                ),
+                th.tril(th.ones(config.block_size, config.block_size)).view(1, 1, config.block_size, config.block_size),
             )
 
     def forward(self, x: th.Tensor) -> th.Tensor:
@@ -1058,7 +1014,9 @@ class CausalSelfAttention(nn.Module):
 
         if self.flash:
             y = f.scaled_dot_product_attention(
-                q, k, v,
+                q,
+                k,
+                v,
                 attn_mask=None,
                 dropout_p=self.dropout if self.training else 0.0,
                 is_causal=True,
@@ -1157,9 +1115,7 @@ class GPT(nn.Module):
         """Forward pass returning logits and optional cross-entropy loss."""
         device = idx.device
         _, t = idx.size()
-        assert t <= self.config.block_size, (
-            f"Cannot forward sequence of length {t}; block size is {self.config.block_size}"
-        )
+        assert t <= self.config.block_size, f"Cannot forward sequence of length {t}; block size is {self.config.block_size}"
         pos = th.arange(0, t, dtype=th.long, device=device)
 
         tok_emb = self.transformer["wte"](idx)
@@ -1176,6 +1132,8 @@ class GPT(nn.Module):
         else:
             loss = None
         return logits, loss
+
+
 ###########################################
 ########## GPT-2 BASE CODE ABOVE ##########
 ###########################################
@@ -1200,8 +1158,10 @@ class VQGANTransformer(nn.Module):
         dropout (float): Dropout rate in the Transformer.
         bias (bool): If True, use bias terms in the Transformer layers.
     """
+
     def __init__(  # noqa: PLR0913
-        self, *,
+        self,
+        *,
         conditional: bool = True,
         vqgan: VQGAN,
         cvqgan: VQGAN,
@@ -1213,7 +1173,7 @@ class VQGANTransformer(nn.Module):
         n_head: int,
         n_embd: int,
         dropout: int,
-        bias: bool = True
+        bias: bool = True,
     ):
         super().__init__()
         self.sos_token = 0
@@ -1223,7 +1183,7 @@ class VQGANTransformer(nn.Module):
         #  block_size is automatically set to the combined sequence length of the VQGAN and CVQGAN
         block_size = (image_size // (2 ** (len(decoder_channels) - 1))) ** 2
         if conditional:
-            block_size += cond_feature_map_dim ** 2
+            block_size += cond_feature_map_dim**2
 
         #  Create config object for NanoGPT
         transformer_config = GPTConfig(
@@ -1232,8 +1192,8 @@ class VQGANTransformer(nn.Module):
             n_layer=n_layer,
             n_head=n_head,
             n_embd=n_embd,
-            dropout=dropout,    #  Add dropout parameter (default in nanoGPT)
-            bias=bias           #  Add bias parameter (default in nanoGPT)
+            dropout=dropout,  #  Add dropout parameter (default in nanoGPT)
+            bias=bias,  #  Add bias parameter (default in nanoGPT)
         )
         self.transformer = GPT(transformer_config)
         self.conditional = conditional
@@ -1282,7 +1242,7 @@ class VQGANTransformer(nn.Module):
         # NanoGPT forward doesn't use embeddings parameter, but takes targets
         # We're ignoring the loss returned by NanoGPT
         logits, _ = self.transformer(new_indices[:, :-1], None)
-        logits = logits[:, -indices.shape[1]:]  # Always predict the last 256 tokens
+        logits = logits[:, -indices.shape[1] :]  # Always predict the last 256 tokens
 
         return logits, target
 
@@ -1294,7 +1254,9 @@ class VQGANTransformer(nn.Module):
         return out
 
     @th.no_grad()
-    def sample(self, x: th.Tensor, c: th.Tensor, steps: int, temperature: float = 1.0, top_k: int | None = None) -> th.Tensor:
+    def sample(
+        self, x: th.Tensor, c: th.Tensor, steps: int, temperature: float = 1.0, top_k: int | None = None
+    ) -> th.Tensor:
         """Autoregressively sample from the model given initial context x and conditional c."""
         x = th.cat((c, x), dim=1)
 
@@ -1327,7 +1289,7 @@ class VQGANTransformer(nn.Module):
 
             x = th.cat((x, ix), dim=1)
 
-        return x[:, c.shape[1]:]
+        return x[:, c.shape[1] :]
 
     @th.no_grad()
     def log_images(self, x: th.Tensor, c: th.Tensor, top_k: int | None = None) -> tuple[dict[str, th.Tensor], th.Tensor]:
@@ -1342,8 +1304,10 @@ class VQGANTransformer(nn.Module):
             sos_tokens = th.ones(x.shape[0], 1) * self.sos_token
             sos_tokens = sos_tokens.long().to(x.device)
 
-        start_indices = indices[:, :indices.shape[1] // 2]
-        sample_indices = self.sample(start_indices, sos_tokens, steps=indices.shape[1] - start_indices.shape[1], top_k=top_k)
+        start_indices = indices[:, : indices.shape[1] // 2]
+        sample_indices = self.sample(
+            start_indices, sos_tokens, steps=indices.shape[1] - start_indices.shape[1], top_k=top_k
+        )
         half_sample = self.z_to_image(sample_indices)
 
         start_indices = indices[:, :0]
@@ -1390,11 +1354,9 @@ if __name__ == "__main__":
     # Add in the upsampled optimal design column and remove the original optimal design column
     training_ds = training_ds.map(
         lambda batch: {
-            "optimal_upsampled": resize_to(
-                data=batch["optimal_design"][:],
-                h=args.image_size,
-                w=args.image_size
-            ).cpu().numpy()
+            "optimal_upsampled": resize_to(data=batch["optimal_design"][:], h=args.image_size, w=args.image_size)
+            .cpu()
+            .numpy()
         },
         batched=True,
     )
@@ -1450,7 +1412,14 @@ if __name__ == "__main__":
     # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
     if args.track:
-        wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args), save_code=True, name=run_name, dir="./logs/wandb")
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            config=vars(args),
+            save_code=True,
+            name=run_name,
+            dir="./logs/wandb",
+        )
         wandb.define_metric("0_step", summary="max")
         wandb.define_metric("cvq_loss", step_metric="0_step")
         wandb.define_metric("epoch_0", step_metric="0_step")
@@ -1475,7 +1444,7 @@ if __name__ == "__main__":
         decoder_num_res_blocks=args.decoder_num_res_blocks,
         image_channels=args.image_channels,
         latent_dim=args.latent_dim,
-        num_codebook_vectors=args.num_codebook_vectors
+        num_codebook_vectors=args.num_codebook_vectors,
     ).to(device=device)
 
     discriminator = Discriminator(image_channels=args.image_channels).to(device=device)
@@ -1487,7 +1456,7 @@ if __name__ == "__main__":
         cond_dim=args.cond_dim,
         cond_hidden_dim=args.cond_hidden_dim,
         cond_latent_dim=args.cond_latent_dim,
-        cond_codebook_vectors=args.cond_codebook_vectors
+        cond_codebook_vectors=args.cond_codebook_vectors,
     ).to(device=device)
 
     transformer = VQGANTransformer(
@@ -1501,35 +1470,38 @@ if __name__ == "__main__":
         n_layer=args.n_layer,
         n_head=args.n_head,
         n_embd=args.n_embd,
-        dropout=args.dropout
+        dropout=args.dropout,
     ).to(device=device)
 
     # CVQGAN Stage 0 optimizer
     opt_cvq = th.optim.Adam(
-            list(cvqgan.encoder.parameters()) +
-            list(cvqgan.decoder.parameters()) +
-            list(cvqgan.codebook.parameters()) +
-            list(cvqgan.quant_conv.parameters()) +
-            list(cvqgan.post_quant_conv.parameters()),
-            lr=args.cond_lr, eps=1e-08, betas=(args.b1, args.b2)
-        )
+        list(cvqgan.encoder.parameters())
+        + list(cvqgan.decoder.parameters())
+        + list(cvqgan.codebook.parameters())
+        + list(cvqgan.quant_conv.parameters())
+        + list(cvqgan.post_quant_conv.parameters()),
+        lr=args.cond_lr,
+        eps=1e-08,
+        betas=(args.b1, args.b2),
+    )
 
     # VQGAN Stage 1 optimizer
     opt_vq = th.optim.Adam(
-            list(vqgan.encoder.parameters()) +
-            list(vqgan.decoder.parameters()) +
-            list(vqgan.codebook.parameters()) +
-            list(vqgan.quant_conv.parameters()) +
-            list(vqgan.post_quant_conv.parameters()),
-            lr=args.lr_1, eps=1e-08, betas=(args.b1, args.b2)
-        )
+        list(vqgan.encoder.parameters())
+        + list(vqgan.decoder.parameters())
+        + list(vqgan.codebook.parameters())
+        + list(vqgan.quant_conv.parameters())
+        + list(vqgan.post_quant_conv.parameters()),
+        lr=args.lr_1,
+        eps=1e-08,
+        betas=(args.b1, args.b2),
+    )
     # VQGAN Stage 1 discriminator optimizer
-    opt_disc = th.optim.Adam(discriminator.parameters(),
-                              lr=args.lr_1, eps=1e-08, betas=(args.b1, args.b2))
+    opt_disc = th.optim.Adam(discriminator.parameters(), lr=args.lr_1, eps=1e-08, betas=(args.b1, args.b2))
 
     # Transformer Stage 2 optimizer
     decay, no_decay = set(), set()
-    whitelist_weight_modules = (nn.Linear, )
+    whitelist_weight_modules = (nn.Linear,)
     blacklist_weight_modules = (nn.LayerNorm, nn.Embedding)
 
     for mn, m in transformer.transformer.named_modules():
@@ -1591,9 +1563,7 @@ if __name__ == "__main__":
             c = th.ones(n_designs, 1, dtype=th.int64, device=device) * transformer.sos_token
 
         latent_imgs = transformer.sample(
-            x=th.empty(n_designs, 0, dtype=th.int64, device=device),
-            c=c,
-            steps=(args.latent_size ** 2)
+            x=th.empty(n_designs, 0, dtype=th.int64, device=device), c=c, steps=(args.latent_size**2)
         )
         gen_imgs = transformer.z_to_image(latent_imgs)
 
@@ -1678,9 +1648,9 @@ if __name__ == "__main__":
             lamb = vqgan.calculate_lambda(perceptual_rec_loss, g_loss)
             vq_loss = perceptual_rec_loss + q_loss + disc_factor * lamb * g_loss
 
-            d_loss_real = th.mean(f.relu(1. - disc_real))
-            d_loss_fake = th.mean(f.relu(1. + disc_fake))
-            gan_loss = disc_factor * 0.5*(d_loss_real + d_loss_fake)
+            d_loss_real = th.mean(f.relu(1.0 - disc_real))
+            d_loss_fake = th.mean(f.relu(1.0 + disc_fake))
+            gan_loss = disc_factor * 0.5 * (d_loss_real + d_loss_fake)
 
             opt_vq.zero_grad()
             vq_loss.backward(retain_graph=True)
@@ -1707,9 +1677,7 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval_1 == 0:
                     # Extract 25 designs
                     designs = resize_to(
-                        data=sample_designs_1(n_designs=n_logged_designs),
-                        h=design_shape[0],
-                        w=design_shape[1]
+                        data=sample_designs_1(n_designs=n_logged_designs), h=design_shape[0], w=design_shape[1]
                     )
                     fig, axes = plt.subplots(5, 5, figsize=(12, 12))
 
@@ -1799,11 +1767,7 @@ if __name__ == "__main__":
                     desired_conds, designs = sample_designs_2(n_designs=n_logged_designs)
                     if args.normalize_conditions:
                         desired_conds = (desired_conds.cpu() * std) + mean
-                    designs = resize_to(
-                        data=designs,
-                        h=design_shape[0],
-                        w=design_shape[1]
-                    )
+                    designs = resize_to(data=designs, h=design_shape[0], w=design_shape[1])
                     fig, axes = plt.subplots(5, 5, figsize=(12, 12))
 
                     # Flatten axes for easy indexing

@@ -33,9 +33,7 @@ def resize_to(data: th.Tensor, h: int, w: int, mode: str = "bicubic") -> th.Tens
     return f.interpolate(data, size=(h, w), mode=mode)
 
 
-def normalize(
-    ds: Dataset, condition_names: list[str]
-) -> tuple[Dataset, th.Tensor, th.Tensor]:
+def normalize(ds: Dataset, condition_names: list[str]) -> tuple[Dataset, th.Tensor, th.Tensor]:
     """Normalize specified condition columns with global mean/std."""
     # stack condition columns into a single tensor (N, C) on CPU
     conds = th.stack([th.as_tensor(ds[c][:]).float() for c in condition_names], dim=1)
@@ -45,8 +43,7 @@ def normalize(
     # normalize each condition column (HF expects numpy back)
     ds = ds.map(
         lambda batch: {
-            c: ((th.as_tensor(batch[c][:]).float() - mean[i]) / std[i]).numpy()
-            for i, c in enumerate(condition_names)
+            c: ((th.as_tensor(batch[c][:]).float() - mean[i]) / std[i]).numpy() for i, c in enumerate(condition_names)
         },
         batched=True,
     )
@@ -54,9 +51,7 @@ def normalize(
     return ds, mean, std
 
 
-def drop_constant(
-    ds: Dataset, condition_names: list[str]
-) -> tuple[Dataset, list[str]]:
+def drop_constant(ds: Dataset, condition_names: list[str]) -> tuple[Dataset, list[str]]:
     """Drop constant condition columns (std=0) from dataset."""
     conds = th.stack([th.as_tensor(ds[c][:]).float() for c in condition_names], dim=1)
     std = conds.std(dim=0)

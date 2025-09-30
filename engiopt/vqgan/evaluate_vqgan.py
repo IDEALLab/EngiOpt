@@ -108,7 +108,7 @@ if __name__ == "__main__":
         decoder_num_res_blocks=run.config["decoder_num_res_blocks"],
         image_channels=run.config["image_channels"],
         latent_dim=run.config["latent_dim"],
-        num_codebook_vectors=run.config["num_codebook_vectors"]
+        num_codebook_vectors=run.config["num_codebook_vectors"],
     )
     vqgan.load_state_dict(ckpt_1["vqgan"])
     vqgan.eval()  # Set to evaluation mode
@@ -121,7 +121,7 @@ if __name__ == "__main__":
         cond_dim=run.config["cond_dim"],
         cond_hidden_dim=run.config["cond_hidden_dim"],
         cond_latent_dim=run.config["cond_latent_dim"],
-        cond_codebook_vectors=run.config["cond_codebook_vectors"]
+        cond_codebook_vectors=run.config["cond_codebook_vectors"],
     )
     cvqgan.load_state_dict(ckpt_0["cvqgan"])
     cvqgan.eval()  # Set to evaluation mode
@@ -138,7 +138,7 @@ if __name__ == "__main__":
         n_layer=run.config["n_layer"],
         n_head=run.config["n_head"],
         n_embd=run.config["n_embd"],
-        dropout=run.config["dropout"]
+        dropout=run.config["dropout"],
     )
     model.load_state_dict(ckpt_2["transformer"])
     model.eval()  # Set to evaluation mode
@@ -155,19 +155,14 @@ if __name__ == "__main__":
 
     # Drop constant condition columns if enabled
     if run.config["drop_constant_conditions"]:
-        sampled_conditions_new, conditions = drop_constant(
-            sampled_conditions_new, sampled_conditions_new.column_names
-        )
+        sampled_conditions_new, conditions = drop_constant(sampled_conditions_new, sampled_conditions_new.column_names)
 
     # Normalize condition columns if enabled
     if run.config["normalize_conditions"]:
         sampled_conditions_new, mean, std = normalize(sampled_conditions_new, conditions)
 
     # Convert to tensor
-    conditions_tensor = th.stack(
-        [th.as_tensor(sampled_conditions_new[c][:]).float() for c in conditions],
-        dim=1
-    ).to(device)
+    conditions_tensor = th.stack([th.as_tensor(sampled_conditions_new[c][:]).float() for c in conditions], dim=1).to(device)
 
     # Set the start-of-sequence tokens for the transformer using the CVQGAN to discretize the conditions if enabled
     if run.config["conditional"]:
@@ -177,14 +172,10 @@ if __name__ == "__main__":
 
     # Generate a batch of designs
     latent_designs = model.sample(
-        x=th.empty(args.n_samples, 0, dtype=th.int64, device=device),
-        c=c,
-        steps=(run.config["latent_size"] ** 2)
+        x=th.empty(args.n_samples, 0, dtype=th.int64, device=device), c=c, steps=(run.config["latent_size"] ** 2)
     )
     gen_designs = resize_to(
-        data=model.z_to_image(latent_designs),
-        h=problem.design_space.shape[0],
-        w=problem.design_space.shape[1]
+        data=model.z_to_image(latent_designs), h=problem.design_space.shape[0], w=problem.design_space.shape[1]
     )
     gen_designs_np = gen_designs.detach().cpu().numpy()
     gen_designs_np = gen_designs_np.reshape(args.n_samples, *problem.design_space.shape)
