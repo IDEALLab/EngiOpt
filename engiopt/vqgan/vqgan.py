@@ -149,6 +149,12 @@ class Args:
     # From original implementation: assume pkeep=1.0, sos_token=0, bias=True
     n_epochs_2: int = 100  # Default: 100
     """number of epochs of training"""
+    early_stopping: bool = True
+    """whether to use early stopping for the transformer based on the held-out validation loss"""
+    early_stopping_patience: int = 3
+    """number of epochs with no improvement after which training will be stopped"""
+    early_stopping_delta: float = 1e-3
+    """minimum change in the monitored quantity to qualify as an improvement"""
     batch_size_2: int = 16
     """size of the batches for Stage 2"""
     lr_2: float = 6e-4  # Default: 6e-4
@@ -1399,6 +1405,46 @@ if __name__ == "__main__":
         batch_size=args.batch_size_2,
         shuffle=True,
     )
+
+    # If early stopping enabled, create a validation dataloader
+    if args.early_stopping:
+        val_ds = problem.dataset.with_format("torch")["val"]
+        val_ds = val_ds.map(
+            lambda batch: {
+                "optimal_upsampled": resize_to(data=batch["optimal_design"][:], h=args.image_size, w=args.image_size)
+                .cpu()
+                .numpy()
+            },
+            batched=True,
+        )
+        val_ds = val_ds.remove_columns("optimal_design")
+
+        # Optionally drop condition columns that are constant like overhang_constraint in beams2d
+        if args.drop_constant_conditions:
+            to_drop = [c for c in problem.conditions_keys if c not in conditions]
+            if to_drop:
+                val_ds = val_ds.remove_columns(to_drop)
+
+        # If enabled, normalize using training mean/std (computed above)
+        if args.normalize_conditions:
+            val_ds = val_ds.map(
+                lambda batch: {
+                    c: ((th.as_tensor(batch[c][:]).float() - mean[i]) / std[i]).numpy() for i, c in enumerate(conditions)
+                },
+                batched=True,
+            )
+
+        # Move to device only here
+        th_val_ds = th.utils.data.TensorDataset(
+            th.as_tensor(val_ds["optimal_upsampled"][:]).to(device),
+            *[th.as_tensor(val_ds[key][:]).to(device) for key in conditions],
+        )
+        dataloader_val = th.utils.data.DataLoader(
+            th_val_ds,
+            batch_size=args.batch_size_2,
+            shuffle=False,
+        )
+
     # For logging a fixed set of designs in Stage 1
     n_logged_designs = 25
     fixed_indices = random.sample(range(len_dataset), n_logged_designs)
@@ -1430,6 +1476,8 @@ if __name__ == "__main__":
         wandb.define_metric("2_step", summary="max")
         wandb.define_metric("tr_loss", step_metric="2_step")
         wandb.define_metric("epoch_2", step_metric="2_step")
+        if args.early_stopping:
+            wandb.define_metric("tr_val_loss", step_metric="2_step")
 
     vqgan = VQGAN(
         device=device,
@@ -1738,6 +1786,13 @@ if __name__ == "__main__":
     # --------------------------------
     print("Stage 2: Training Transformer")
     transformer.train()
+
+    # If early stopping enabled, initialize necessary variables
+    if args.early_stopping:
+        best_val = float("inf")
+        patience_counter = 0
+        patience = args.early_stopping_patience
+
     for epoch in tqdm.trange(args.n_epochs_2):
         for i, data in enumerate(dataloader_2):
             # THIS IS PROBLEM DEPENDENT
@@ -1807,5 +1862,30 @@ if __name__ == "__main__":
                         artifact_cvq = wandb.Artifact(f"{args.problem_id}_{args.algo}_transformer", type="model")
                         artifact_cvq.add_file("transformer.pth")
                         wandb.log_artifact(artifact_cvq, aliases=[f"seed_{args.seed}"])
+
+        # Early stopping based on held-out validation loss
+        if args.early_stopping:
+            transformer.eval()
+            val_losses = []
+            with th.no_grad():
+                for val_data in dataloader_val:
+                    val_designs = val_data[0].to(dtype=th.float32, device=device)
+                    val_conds = th.stack((val_data[1:]), dim=1).to(dtype=th.float32, device=device)
+                    val_logits, val_targets = transformer(val_designs, val_conds)
+                    val_loss = f.cross_entropy(val_logits.reshape(-1, val_logits.size(-1)), val_targets.reshape(-1))
+                    val_losses.append(val_loss.item())
+            val_loss = sum(val_losses) / len(val_losses)
+            if args.track:
+                wandb.log({"tr_val_loss": val_loss, "2_step": batches_done})
+
+            if val_loss < best_val - args.early_stopping_delta:
+                best_val = val_loss
+                patience_counter = 0
+            else:
+                patience_counter += 1
+                if patience_counter >= patience:
+                    print(f"Early stopping at epoch {epoch} | best val loss: {best_val:.6f}")
+                    break
+            transformer.train()
 
     wandb.finish()
