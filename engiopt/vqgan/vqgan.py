@@ -150,7 +150,7 @@ class Args:
     n_epochs_2: int = 100  # Default: 100
     """number of epochs of training"""
     early_stopping: bool = True
-    """whether to use early stopping for the transformer based on the held-out validation loss"""
+    """whether to use early stopping for the transformer; if True requires args.track to be True"""
     early_stopping_patience: int = 3
     """number of epochs with no improvement after which training will be stopped"""
     early_stopping_delta: float = 1e-3
@@ -1660,10 +1660,9 @@ if __name__ == "__main__":
                         }
 
                         th.save(ckpt_cvq, "cvqgan.pth")
-                        if args.track:
-                            artifact_cvq = wandb.Artifact(f"{args.problem_id}_{args.algo}_cvqgan", type="model")
-                            artifact_cvq.add_file("cvqgan.pth")
-                            wandb.log_artifact(artifact_cvq, aliases=[f"seed_{args.seed}"])
+                        artifact_cvq = wandb.Artifact(f"{args.problem_id}_{args.algo}_cvqgan", type="model")
+                        artifact_cvq.add_file("cvqgan.pth")
+                        wandb.log_artifact(artifact_cvq, aliases=[f"seed_{args.seed}"])
 
         # Freeze CVQGAN for later use in Stage 2 Transformer
         for p in cvqgan.parameters():
@@ -1767,14 +1766,13 @@ if __name__ == "__main__":
 
                     th.save(ckpt_vq, "vqgan.pth")
                     th.save(ckpt_disc, "discriminator.pth")
-                    if args.track:
-                        artifact_vq = wandb.Artifact(f"{args.problem_id}_{args.algo}_vqgan", type="model")
-                        artifact_vq.add_file("vqgan.pth")
-                        artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
-                        artifact_disc.add_file("discriminator.pth")
+                    artifact_vq = wandb.Artifact(f"{args.problem_id}_{args.algo}_vqgan", type="model")
+                    artifact_vq.add_file("vqgan.pth")
+                    artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
+                    artifact_disc.add_file("discriminator.pth")
 
-                        wandb.log_artifact(artifact_vq, aliases=[f"seed_{args.seed}"])
-                        wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
+                    wandb.log_artifact(artifact_vq, aliases=[f"seed_{args.seed}"])
+                    wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
 
     # Freeze VQGAN for later use in Stage 2 Transformer
     for p in vqgan.parameters():
@@ -1845,26 +1843,8 @@ if __name__ == "__main__":
                     plt.close()
                     wandb.log({"designs_2": wandb.Image(img_fname)})
 
-                # --------------
-                #  Save model
-                # --------------
-                if args.save_model and epoch == args.n_epochs_2 - 1 and i == len(dataloader_2) - 1:
-                    ckpt_transformer = {
-                        "epoch": epoch,
-                        "batches_done": batches_done,
-                        "transformer": transformer.state_dict(),
-                        "optimizer_transformer": opt_transformer.state_dict(),
-                        "loss": loss.item(),
-                    }
-
-                    th.save(ckpt_transformer, "transformer.pth")
-                    if args.track:
-                        artifact_cvq = wandb.Artifact(f"{args.problem_id}_{args.algo}_transformer", type="model")
-                        artifact_cvq.add_file("transformer.pth")
-                        wandb.log_artifact(artifact_cvq, aliases=[f"seed_{args.seed}"])
-
         # Early stopping based on held-out validation loss
-        if args.early_stopping:
+        if args.track and args.early_stopping:
             transformer.eval()
             val_losses = []
             with th.no_grad():
@@ -1875,17 +1855,46 @@ if __name__ == "__main__":
                     val_loss = f.cross_entropy(val_logits.reshape(-1, val_logits.size(-1)), val_targets.reshape(-1))
                     val_losses.append(val_loss.item())
             val_loss = sum(val_losses) / len(val_losses)
-            if args.track:
-                wandb.log({"tr_val_loss": val_loss, "2_step": batches_done})
+            wandb.log({"tr_val_loss": val_loss, "2_step": batches_done})
 
             if val_loss < best_val - args.early_stopping_delta:
                 best_val = val_loss
                 patience_counter = 0
+
+                # Save best model (overwrite locally)
+                if args.save_model:
+                    ckpt_tr = {
+                        "epoch": epoch,
+                        "batches_done": batches_done,
+                        "transformer": transformer.state_dict(),
+                        "optimizer_transformer": opt_transformer.state_dict(),
+                        "loss": loss.item(),
+                        "val_loss": val_loss,
+                    }
+                    th.save(ckpt_tr, "transformer.pth")
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
                     print(f"Early stopping at epoch {epoch} | best val loss: {best_val:.6f}")
                     break
             transformer.train()
+
+    # --------------
+    #  Save model
+    # --------------
+    if args.track and args.save_model:
+        if not args.early_stopping:
+            ckpt_tr = {
+                "epoch": epoch,
+                "batches_done": batches_done,
+                "transformer": transformer.state_dict(),
+                "optimizer_transformer": opt_transformer.state_dict(),
+                "loss": loss.item(),
+            }
+            th.save(ckpt_tr, "transformer.pth")
+
+        artifact_tr = wandb.Artifact(f"{args.problem_id}_{args.algo}_transformer", type="model")
+        artifact_tr.add_file("transformer.pth")
+        wandb.log_artifact(artifact_tr, aliases=[f"seed_{args.seed}"])
 
     wandb.finish()
