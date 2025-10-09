@@ -228,6 +228,9 @@ class PruningPolicy:
         self._ref_mu = None  # will hold snapshot at pruning_epoch
         self._ref_sigma = None  # will hold snapshot at pruning_epoch
 
+        self._prev_score = None
+        self.beta = self.pruning_params.get("beta", 0.9)
+
     def __call__(self, z_std):
         # Select pruning strategy and call appropriate method
         if self.strategy == "pca_cdf":
@@ -314,19 +317,12 @@ class PruningPolicy:
 
     @staticmethod
     def _plummet(z_std, plummet_threshold):
-        # Ratio-based pruning looking for sudden drops
-        # 1. Sort standard deviations
         srt, idx = torch.sort(z_std, descending=True)
-
-        # 2. Calculate log differences between consecutive values
         log = (srt + 1e-12).log()
         d = log[1:] - log[:-1]
-
-        # 3. Find largest drop point
-        pidx_sorted = torch.argmin(d)  # keep as tensor index
-        ref = srt[pidx_sorted]
-
-        # 4. Prune dimensions with std much smaller than reference
+        pidx_sorted = torch.argmin(d)
+        ref_idx = idx[pidx_sorted]
+        ref = z_std[ref_idx]
         ratio = z_std / (ref + 1e-12)
         return ratio < plummet_threshold
 

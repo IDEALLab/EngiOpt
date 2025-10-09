@@ -34,13 +34,13 @@ class Args:
     """Algorithm name for tracking purposes."""
     track: bool = True
     """Whether to track with Weights & Biases."""
-    wandb_project: str = "glvae"
+    wandb_project: str = "lvae"
     """WandB project name."""
     wandb_entity: str | None = None
     """WandB entity name. If None, uses the default entity."""
     seed: int = 1
     """Random seed for reproducibility."""
-    save_model: bool = True
+    save_model: bool = False
     """Whether to save the model after training."""
     sample_interval: int = 400  # How often to sample designs
     """Interval for sampling designs during training."""
@@ -54,7 +54,7 @@ class Args:
     """Learning rate for the optimizer."""
 
     # LVAE-specific
-    latent_dim: int = 100
+    latent_dim: int = 250
     """Dimensionality of the latent space (overestimate)."""
     w_v: float = 0.01
     """Weight for the volume loss."""
@@ -62,7 +62,7 @@ class Args:
     """Number of epochs for the polynomial schedule."""
     polynomial_schedule_p: int = 2
     """Polynomial exponent for the schedule."""
-    pruning_epoch: int = 1
+    pruning_epoch: int = 100
     """Epoch to start pruning dimensions."""
     beta: float = 0.9
     """Momentum for the pruning ratio calculation."""
@@ -88,7 +88,7 @@ class Args:
     # Safeguard parameters
     min_active_dims: int = 1
     """Never prune below this many dims."""
-    max_prune_per_epoch: int = 100
+    max_prune_per_epoch: int = 1000
     """Max dims to prune in one epoch."""
     cooldown_epochs: int = 0
     """Epochs to wait between pruning events."""
@@ -415,8 +415,8 @@ if __name__ == "__main__":
             lvae.eval()
             val_rec = val_vol = 0.0
             n = 0
-            for x_v in val_loader:
-                x_v = x_v[0].to(device)
+            for batch_v in val_loader:
+                x_v = batch_v[0].to(device)
                 vlosses = lvae.loss(x_v)
                 bsz = x_v.size(0)
                 val_rec += vlosses[0].item() * bsz
