@@ -62,7 +62,7 @@ class Args:
     """Number of epochs for the polynomial schedule."""
     polynomial_schedule_p: int = 2
     """Polynomial exponent for the schedule."""
-    pruning_epoch: int = 500
+    pruning_epoch: int = 1
     """Epoch to start pruning dimensions."""
     beta: float = 0.9
     """Momentum for the pruning ratio calculation."""
@@ -96,12 +96,6 @@ class Args:
     """Consecutive epochs a dim must be below threshold to be eligible."""
     recon_tol: float = 1.0
     """Relative tolerance to best_val_recon to allow pruning."""
-    audit_period: int = 20
-    """Periodically "test" pruned dims to see if they still help."""
-    revive_tol: float = 0.005
-    """Relative improvement threshold prct to revive pruned dims."""
-    allow_recovery: int = 0  # 0 for False, 1 for True
-    """Whether to allow pruned dims to be revived."""
 
 
 class Encoder(nn.Module):
@@ -285,9 +279,6 @@ if __name__ == "__main__":
     lvae.cfg.cooldown_epochs = args.cooldown_epochs
     lvae.cfg.K_consecutive = args.K_consecutive
     lvae.cfg.recon_tol = args.recon_tol
-    lvae.cfg.audit_period = args.audit_period
-    lvae.cfg.revive_tol = args.revive_tol
-    lvae.cfg.allow_recovery = bool(args.allow_recovery)
 
     # ---- DataLoader ----
     hf = problem.dataset.with_format("torch")
@@ -295,20 +286,20 @@ if __name__ == "__main__":
     val_ds = hf["val"]
     test_ds = hf["test"]
 
-    X = train_ds["optimal_design"][:].unsqueeze(1)
-    X_val = val_ds["optimal_design"][:].unsqueeze(1)
-    X_test = test_ds["optimal_design"][:].unsqueeze(1)
+    x_train = train_ds["optimal_design"][:].unsqueeze(1)
+    x_val = val_ds["optimal_design"][:].unsqueeze(1)
+    x_test = test_ds["optimal_design"][:].unsqueeze(1)
 
-    loader = DataLoader(TensorDataset(X), batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(TensorDataset(X_val), batch_size=args.batch_size, shuffle=False)
+    loader = DataLoader(TensorDataset(x_train), batch_size=args.batch_size, shuffle=True)
+    val_loader = DataLoader(TensorDataset(x_val), batch_size=args.batch_size, shuffle=False)
 
     # ---- Training loop ----
     for epoch in range(args.n_epochs):
-        lvae._epoch_hook(epoch=epoch)
+        lvae.epoch_hook(epoch=epoch)
 
         bar = tqdm.tqdm(loader, desc=f"Epoch {epoch}")
-        for i, x_batch in enumerate(bar):
-            x_batch = x_batch[0].to(device)
+        for i, batch in enumerate(bar):
+            x_batch = batch[0].to(device)
             lvae.optim.zero_grad()
             losses = lvae.loss(x_batch)  # [rec,prd,vol]
             loss = (losses * lvae.w).sum()  # apply weights
@@ -342,11 +333,11 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval == 0:
                     ### Saves an image of the dimensionality of the latent space ###
                     with th.no_grad():
-                        Xs = X_test.to(device)
+                        Xs = x_test.to(device)
                         z = lvae.encode(Xs)
-                    z_std, idx = th.sort(z.std(0), descending=True)
-                    z_mean = z.mean(0)
-                    N = (z_std > 0).sum().item()
+                        z_std, idx = th.sort(z.std(0), descending=True)
+                        z_mean = z.mean(0)
+                        N = (z_std > 0).sum().item()
 
                     plt.figure(figsize=(12, 6))
                     plt.subplot(211)
@@ -354,7 +345,7 @@ if __name__ == "__main__":
                     plt.yscale("log")
                     plt.xlabel("Latent dimension index")
                     plt.ylabel("Standard deviation")
-                    plt.title("Number of principal components = {}".format(N))
+                    plt.title(f"Number of principal components = {N}")
 
                     plt.subplot(212)
                     plt.bar(np.arange(N), z_std[:N].detach().cpu().numpy())
@@ -417,16 +408,16 @@ if __name__ == "__main__":
                     plt.close()
                     wandb.log({"norm_plot": wandb.Image(img_fname)})
 
-        lvae._epoch_report(epoch=epoch, callbacks=[], batch=None, loss=loss, pbar=None)
+        lvae.epoch_report(epoch=epoch, callbacks=[], batch=None, loss=loss, pbar=None)
         # ---- validation (batched, no graph) ----
-        lvae.eval()
-        val_rec = val_vol = 0.0
-        n = 0
 
         with th.no_grad():
+            lvae.eval()
+            val_rec = val_vol = 0.0
+            n = 0
             for x_v in val_loader:
                 x_v = x_v[0].to(device)
-                vlosses = lvae.loss((x_v))
+                vlosses = lvae.loss(x_v)
                 bsz = x_v.size(0)
                 val_rec += vlosses[0].item() * bsz
                 val_vol += vlosses[1].item() * bsz
@@ -434,8 +425,6 @@ if __name__ == "__main__":
         val_rec /= n
         val_vol /= n
         val_total = val_rec + args.w_v * val_vol
-
-        lvae._maybe_audit(epoch=epoch, measure_val_recon=lambda: val_rec)
 
         if args.track:
             # single commit per epoch → Hyperband “iteration” == epoch
