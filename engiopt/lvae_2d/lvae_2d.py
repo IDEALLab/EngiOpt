@@ -10,7 +10,6 @@ import time
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import matplotlib.pyplot as plt
-from model.aes import LeastVolumeAE_DynamicPruning
 import numpy as np
 import torch as th
 from torch import nn
@@ -20,8 +19,9 @@ from torch.utils.data import TensorDataset
 from torchvision import transforms
 import tqdm
 import tyro
-from utils.schedule import polynomial_schedule
 
+from engiopt.lvae_2d.aes import LeastVolumeAE_DynamicPruning
+from engiopt.lvae_2d.schedule import polynomial_schedule
 import wandb
 
 
@@ -62,7 +62,7 @@ class Args:
     """Number of epochs for the polynomial schedule."""
     polynomial_schedule_p: int = 2
     """Polynomial exponent for the schedule."""
-    pruning_epoch: int = 100
+    pruning_epoch: int = 500
     """Epoch to start pruning dimensions."""
     beta: float = 0.9
     """Momentum for the pruning ratio calculation."""
@@ -80,22 +80,22 @@ class Args:
     """(probabilistic) Sampling temperature."""
     plummet_threshold: float = 0.02
     """(plummet) Threshold for pruning dimensions."""
-    alpha: float = 0.5
-    """(lognorm) Weighting factor for blending reference and current distribution."""
+    alpha: float = 0.2
+    """(lognorm) Weighting factor for blending reference and current distribution ()."""
     percentile: float = 0.05
     """(lognorm) Percentile threshold for pruning."""
 
-    # Safeguard parameters
-    min_active_dims: int = 1
-    """Never prune below this many dims."""
-    max_prune_per_epoch: int = 1000
-    """Max dims to prune in one epoch."""
+    # Safeguard parameters (match aes.py defaults - "unsafe" by default)
+    min_active_dims: int = 0
+    """Never prune below this many dims (0 = no limit)."""
+    max_prune_per_epoch: int | None = None
+    """Max dims to prune in one epoch (None = no limit)."""
     cooldown_epochs: int = 0
-    """Epochs to wait between pruning events."""
-    K_consecutive: int = 0
-    """Consecutive epochs a dim must be below threshold to be eligible."""
-    recon_tol: float = 1.0
-    """Relative tolerance to best_val_recon to allow pruning."""
+    """Epochs to wait between pruning events (0 = no cooldown)."""
+    k_consecutive: int = 1
+    """Consecutive epochs a dim must be below threshold to be eligible (1 = immediate)."""
+    recon_tol: float = float("inf")
+    """Relative tolerance to best_val_recon to allow pruning (inf = no constraint)."""
 
 
 class Encoder(nn.Module):
@@ -109,9 +109,9 @@ class Encoder(nn.Module):
     • Conv5   [1x1]     (k=7, s=1, p=0).
     """
 
-    def __init__(self, latent_dim: int, design_shape: tuple[int, int]):
+    def __init__(self, latent_dim: int, design_shape: tuple[int, int], resize_dimensions: tuple[int, int] = (100, 100)):
         super().__init__()
-        self.resize_in = transforms.Resize(args.resize_dimensions)
+        self.resize_in = transforms.Resize(resize_dimensions)
         self.design_shape = design_shape  # Store design shape
 
         self.features = nn.Sequential(
@@ -129,14 +129,13 @@ class Encoder(nn.Module):
             nn.LeakyReLU(0.2, inplace=True),
         )
 
-        # Final 7×7 conv produces (B, latent_dim, 1, 1) → flatten to (B, latent_dim)
+        # Final 7x7 conv produces (B, latent_dim, 1, 1) -> flatten to (B, latent_dim)
         self.to_latent = nn.Conv2d(512, latent_dim, kernel_size=7, stride=1, padding=0, bias=True)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         x = self.resize_in(x)  # (B,1,100,100)
         h = self.features(x)  # (B,512,7,7)
-        z = self.to_latent(h).flatten(1)  # (B,latent_dim)
-        return z
+        return self.to_latent(h).flatten(1)  # (B,latent_dim)
 
 
 # ---------- Decoder: 7→13→25→50→100 then (optional) resize to original ----------
@@ -233,28 +232,24 @@ if __name__ == "__main__":
     else:
         device = th.device("cpu")
 
-    enc = Encoder(args.latent_dim, design_shape)
+    enc = Encoder(args.latent_dim, design_shape, args.resize_dimensions)
     dec = Decoder(args.latent_dim, design_shape)
 
-    # --- Unify pruning parameter logic ---
+    # --- Build pruning parameters (match aes.py expectations) ---
     pruning_params = {}
     if args.pruning_strategy == "plummet":
         pruning_params["threshold"] = args.plummet_threshold
-        wandb.log({"plummet_threshold": args.plummet_threshold})
     elif args.pruning_strategy == "pca_cdf":
-        pruning_params["cdf_threshold"] = args.cdf_threshold
-        wandb.log({"cdf_threshold": args.cdf_threshold})
+        pruning_params["threshold"] = args.cdf_threshold  # aes.py expects "threshold", not "cdf_threshold"
     elif args.pruning_strategy == "probabilistic":
         pruning_params["temperature"] = args.temperature
-        wandb.log({"temperature": args.temperature})
     elif args.pruning_strategy == "lognorm":
         pruning_params["alpha"] = args.alpha
-        pruning_params["threshold"] = args.percentile
-        wandb.log({"alpha": args.alpha, "lognorm_threshold": args.percentile})
+        pruning_params["threshold"] = args.percentile  # aes.py expects "threshold" for percentile
     else:
         raise ValueError(f"Unknown pruning_strategy: {args.pruning_strategy}")
 
-    # Combine into DesignLVAE_DP
+    # Initialize LVAE with dynamic pruning and safeguards
     lvae = LeastVolumeAE_DynamicPruning(
         encoder=enc,
         decoder=dec,
@@ -271,14 +266,13 @@ if __name__ == "__main__":
         eta=args.eta,
         pruning_strategy=args.pruning_strategy,
         pruning_params=pruning_params,
+        # Pass safeguards directly to constructor (not post-hoc)
+        min_active_dims=args.min_active_dims,
+        max_prune_per_epoch=args.max_prune_per_epoch,
+        cooldown_epochs=args.cooldown_epochs,
+        k_consecutive=args.k_consecutive,
+        recon_tol=args.recon_tol,
     ).to(device)
-
-    # --- Set safeguard values here ---
-    lvae.cfg.min_active_dims = args.min_active_dims
-    lvae.cfg.max_prune_per_epoch = args.max_prune_per_epoch
-    lvae.cfg.cooldown_epochs = args.cooldown_epochs
-    lvae.cfg.K_consecutive = args.K_consecutive
-    lvae.cfg.recon_tol = args.recon_tol
 
     # ---- DataLoader ----
     hf = problem.dataset.with_format("torch")
@@ -367,16 +361,16 @@ if __name__ == "__main__":
                             x_ints.append(x_int)
 
                     fig, axs = plt.subplots(25, 6, figsize=(6 * 2, 25 * 1))
-                    for i, j in product(range(25), range(5)):
+                    for i, j in product(range(25), range(5)):  # noqa: PLW2901
                         img = x_ints[j][i].reshape(design_shape[0], design_shape[1])
                         axs[i, j + 1].imshow(img)
                         axs[i, j + 1].axis("off")
                         axs[i, j + 1].set_aspect("equal")
 
                     for ax, alpha in zip(axs[0, 1:], [0, 0.25, 0.5, 0.75, 1]):
-                        ax.set_title(r"$\alpha$ = {}".format(alpha))
+                        ax.set_title(rf"$\alpha$ = {alpha}")
 
-                    for i in range(25):
+                    for i in range(25):  # noqa: PLW2901
                         axs[i, 0].imshow(Xs.detach().cpu().numpy()[i - 1].reshape(design_shape[0], design_shape[1]))
                         axs[i, 0].axis("off")
                         axs[i, 0].set_aspect("equal")
@@ -395,7 +389,7 @@ if __name__ == "__main__":
                         x_rand = lvae.decode(z_rand).detach().cpu().numpy()
 
                     fig, axs = plt.subplots(8, 8, figsize=(8 * 3, 8 * 1.5))
-                    for k, (i, j) in enumerate(product(range(8), range(8))):
+                    for k, (i, j) in enumerate(product(range(8), range(8))):  # noqa: PLW2901
                         img = x_rand[k].reshape(design_shape[0], design_shape[1])
                         axs[i, j].imshow(img)
                         axs[i, j].axis("off")
@@ -408,9 +402,7 @@ if __name__ == "__main__":
                     plt.close()
                     wandb.log({"norm_plot": wandb.Image(img_fname)})
 
-        lvae.epoch_report(epoch=epoch, callbacks=[], batch=None, loss=loss, pbar=None)
         # ---- validation (batched, no graph) ----
-
         with th.no_grad():
             lvae.eval()
             val_rec = val_vol = 0.0
@@ -425,6 +417,9 @@ if __name__ == "__main__":
         val_rec /= n
         val_vol /= n
         val_total = val_rec + args.w_v * val_vol
+
+        # Pass validation reconstruction loss to pruning logic
+        lvae.epoch_report(epoch=epoch, callbacks=[], batch=None, loss=loss, pbar=None, val_recon=val_rec)
 
         if args.track:
             # single commit per epoch → Hyperband “iteration” == epoch

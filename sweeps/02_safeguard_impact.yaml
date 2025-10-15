@@ -1,0 +1,112 @@
+program: engiopt/lvae_2d/lvae_2d.py
+method: grid
+name: 02_safeguard_impact
+description: >
+  Systematic study of safeguard effectiveness across problems.
+  Tests each safeguard individually, then combined effects.
+
+  Research Questions:
+  1. Do safeguards improve training stability?
+  2. Which safeguards are most important?
+  3. Is there a performance vs. stability trade-off?
+  4. Do safeguards prevent over-pruning?
+
+metric:
+  name: val_rec
+  goal: minimize
+
+parameters:
+  # Problem selection
+  problem_id:
+    values: ["beams2d", "heatconduction2d", "photonics2d"]
+
+  # Fixed: Use one well-performing strategy from sweep 01
+  pruning_strategy:
+    value: "plummet"
+  plummet_threshold:
+    value: 0.02
+
+  # Fixed training params
+  n_epochs:
+    value: 2500
+  batch_size:
+    value: 128
+  lr:
+    value: 0.0001
+  latent_dim:
+    value: 250
+  pruning_epoch:
+    value: 500
+
+  # Safeguard conditions (the main independent variables)
+  safeguard_profile:
+    values:
+      # Baseline: No safeguards (unsafe)
+      - name: "none"
+        min_active_dims: 0
+        max_prune_per_epoch: null  # No limit
+        cooldown_epochs: 0
+        k_consecutive: 1
+        recon_tol: .inf
+
+      # Individual safeguards (test each alone)
+      - name: "min_dims_only"
+        min_active_dims: 10
+        max_prune_per_epoch: null
+        cooldown_epochs: 0
+        k_consecutive: 1
+        recon_tol: .inf
+
+      - name: "max_prune_only"
+        min_active_dims: 0
+        max_prune_per_epoch: 20
+        cooldown_epochs: 0
+        k_consecutive: 1
+        recon_tol: .inf
+
+      - name: "cooldown_only"
+        min_active_dims: 0
+        max_prune_per_epoch: null
+        cooldown_epochs: 20
+        k_consecutive: 1
+        recon_tol: .inf
+
+      - name: "consecutive_only"
+        min_active_dims: 0
+        max_prune_per_epoch: null
+        cooldown_epochs: 0
+        k_consecutive: 5
+        recon_tol: .inf
+
+      - name: "recon_tol_only"
+        min_active_dims: 0
+        max_prune_per_epoch: null
+        cooldown_epochs: 0
+        k_consecutive: 1
+        recon_tol: 0.05
+
+      # Combined: Conservative (all safeguards active)
+      - name: "all_conservative"
+        min_active_dims: 10
+        max_prune_per_epoch: 10
+        cooldown_epochs: 20
+        k_consecutive: 5
+        recon_tol: 0.05
+
+      # Combined: Moderate
+      - name: "all_moderate"
+        min_active_dims: 5
+        max_prune_per_epoch: 20
+        cooldown_epochs: 10
+        k_consecutive: 3
+        recon_tol: 0.10
+
+  # Reproducibility
+  seed:
+    values: [1, 2, 3, 4, 5]
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args_no_hyphens}

@@ -1,0 +1,75 @@
+program: engiopt/lvae_2d/lvae_2d.py
+method: grid
+name: 01_pruning_strategies
+description: >
+  Scientific comparison of pruning strategies across problems.
+  Fixed safeguards, varying only strategy and its specific hyperparameters.
+
+  Research Questions:
+  1. Which pruning strategy is most effective for each problem type?
+  2. How sensitive is each strategy to its hyperparameters?
+  3. Do strategies converge to similar dimensionality?
+
+  Total Grid Size Calculation (each strategy uses different params):
+  - Plummet:       3 problems x 3 seeds x 4 thresholds = 36 runs
+  - PCA-CDF:       3 problems x 3 seeds x 5 thresholds = 45 runs
+  - Lognorm:       3 problems x 3 seeds x 4 percentiles x 3 alphas = 108 runs
+  - Probabilistic: 3 problems x 3 seeds x 4 temperatures = 36 runs
+  TOTAL: 225 runs
+
+  For HPC: sbatch --array=0-224 sweep_job.sh
+
+metric:
+  name: val_rec
+  goal: minimize
+
+parameters:
+  # Problem selection - one at a time for interpretability
+  problem_id:
+    values: ["beams2d", "heatconduction2d", "photonics2d"]
+
+  # Pruning strategy - the main independent variable
+  pruning_strategy:
+    values: ["plummet", "pca_cdf", "lognorm", "probabilistic"]
+
+  # Fixed training hyperparameters (not the focus)
+  n_epochs:
+    value: 2500
+  batch_size:
+    value: 128
+  lr:
+    value: 0.0001
+  latent_dim:
+    value: 250
+  pruning_epoch:
+    value: 500
+
+  # Strategy-specific hyperparameters (discretized for pure grid search)
+  # plummet - test low to moderate thresholds
+  plummet_threshold:
+    values: [0.01, 0.02, 0.05, 0.1]
+
+  # pca_cdf - test high variance retention thresholds
+  cdf_threshold:
+    values: [0.90, 0.93, 0.95, 0.97, 0.99]
+
+  # lognorm - test low percentiles (prune bottom X%) with pure reference
+  percentile:
+    values: [0.01, 0.02, 0.05, 0.10]
+  alpha:
+    values: [0.0, 0.05, 0.10]  # Simplified: focus on low alpha (reference-based)
+
+  # probabilistic - test temperature range
+  temperature:
+    values: [0.5, 1.0, 1.5, 2.0]
+
+  # Reproducibility
+  seed:
+    values: [1, 2, 3]
+
+# Run configuration
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args_no_hyphens}

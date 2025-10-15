@@ -1,0 +1,77 @@
+program: engiopt/lvae_2d/lvae_2d.py
+method: grid
+name: 04_beams2d_deep_dive
+description: >
+  Deep dive into beams2d problem with fine-grained parameter exploration.
+  Uses insights from sweeps 01-03 to focus on promising regions.
+
+  Research Questions:
+  1. What is the optimal dimensionality for beams2d structures?
+  2. How does pruning timing affect final performance?
+  3. What is the interplay between pruning aggressiveness and reconstruction?
+
+metric:
+  name: val_rec
+  goal: minimize
+
+parameters:
+  # Fixed problem
+  problem_id:
+    value: "beams2d"
+
+  # Test multiple strategies (if sweep 01 shows multiple winners)
+  pruning_strategy:
+    values: ["plummet", "pca_cdf"]
+
+  # Fine-grained strategy params
+  plummet_threshold:
+    values: [0.01, 0.02, 0.03, 0.05]
+
+  cdf_threshold:
+    values: [0.90, 0.93, 0.95, 0.97, 0.99]
+
+  # Architecture sweep
+  latent_dim:
+    values: [150, 200, 250, 300, 350]
+
+  # Pruning timing (fine-grained)
+  pruning_epoch:
+    values: [300, 400, 500, 600, 700]
+
+  # Volume weight (critical for beams - typically sparser)
+  w_v:
+    values: [0.005, 0.01, 0.02, 0.03, 0.05]
+
+  # Conservative safeguards for interpretability
+  min_active_dims:
+    value: 5
+  max_prune_per_epoch:
+    value: 15
+  cooldown_epochs:
+    value: 10
+  k_consecutive:
+    value: 3
+  recon_tol:
+    value: 0.08
+
+  # Fixed training params
+  n_epochs:
+    value: 3000  # Longer for deep dive
+  batch_size:
+    value: 128
+  lr:
+    value: 0.0001
+  beta:
+    value: 0.9
+  eta:
+    value: 0.0001
+
+  # More seeds for robustness
+  seed:
+    values: [1, 2, 3, 4, 5]
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args_no_hyphens}

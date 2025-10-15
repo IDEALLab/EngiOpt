@@ -1,0 +1,75 @@
+program: engiopt/lvae_2d/lvae_2d.py
+method: grid
+name: 05_heatconduction2d_deep_dive
+description: >
+  Deep dive into heatconduction2d problem.
+  Heat conduction patterns may benefit from smoother, less aggressive pruning.
+
+  Research Questions:
+  1. Does heat conduction benefit from higher dimensionality (smoother fields)?
+  2. Should pruning be more conservative for physics problems?
+  3. What is the role of volume regularization strength?
+
+metric:
+  name: val_rec
+  goal: minimize
+
+parameters:
+  # Fixed problem
+  problem_id:
+    value: "heatconduction2d"
+
+  # Test strategies
+  pruning_strategy:
+    values: ["plummet", "pca_cdf"]
+
+  plummet_threshold:
+    values: [0.02, 0.03, 0.05, 0.08]
+
+  cdf_threshold:
+    values: [0.95, 0.97, 0.98, 0.99]
+
+  # Higher dimensional hypothesis (smoother fields need more dims)
+  latent_dim:
+    values: [200, 250, 300, 350, 400]
+
+  # Later pruning (let model stabilize)
+  pruning_epoch:
+    values: [500, 700, 900, 1100]
+
+  # Lower volume weight (preserve more information)
+  w_v:
+    values: [0.001, 0.005, 0.01, 0.02]
+
+  # More conservative safeguards (physics = complex)
+  min_active_dims:
+    value: 10
+  max_prune_per_epoch:
+    value: 10
+  cooldown_epochs:
+    value: 15
+  k_consecutive:
+    value: 5
+  recon_tol:
+    value: 0.05
+
+  # Fixed training
+  n_epochs:
+    value: 3000
+  batch_size:
+    value: 128
+  lr:
+    value: 0.0001
+  beta:
+    value: 0.95  # Higher momentum for stability
+  eta:
+    value: 0.0001
+
+  seed:
+    values: [1, 2, 3, 4, 5]
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args_no_hyphens}

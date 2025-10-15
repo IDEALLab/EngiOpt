@@ -1,0 +1,76 @@
+program: engiopt/lvae_2d/lvae_2d.py
+method: grid
+name: 07_pruning_dynamics
+description: >
+  Study the temporal dynamics of pruning across training.
+  How does dimensionality evolve? When does pruning happen?
+
+  Research Questions:
+  1. How quickly do dimensions get pruned after pruning_epoch?
+  2. Does pruning happen in bursts or gradually?
+  3. Is there a "critical period" for pruning?
+  4. How do safeguards affect pruning dynamics?
+
+  Analysis: Use time-series plots of active_dims over epochs.
+
+metric:
+  name: val_rec
+  goal: minimize
+
+parameters:
+  # Fixed problem for comparability
+  problem_id:
+    value: "beams2d"
+
+  # Test one strategy with multiple timing conditions
+  pruning_strategy:
+    value: "plummet"
+  plummet_threshold:
+    value: 0.02
+
+  # Main independent variable: When does pruning start?
+  pruning_epoch:
+    values: [100, 300, 500, 700, 900, 1100, 1500]
+
+  # Secondary: How aggressive is pruning?
+  w_v:
+    values: [0.005, 0.01, 0.02, 0.05]
+
+  # Test with and without safeguards
+  safeguard_condition:
+    values:
+      - name: "unsafe"
+        min_active_dims: 0
+        max_prune_per_epoch: null
+        cooldown_epochs: 0
+        k_consecutive: 1
+
+      - name: "moderate"
+        min_active_dims: 5
+        max_prune_per_epoch: 20
+        cooldown_epochs: 10
+        k_consecutive: 3
+
+  # Fixed architecture and training
+  latent_dim:
+    value: 250
+  n_epochs:
+    value: 2000
+  batch_size:
+    value: 128
+  lr:
+    value: 0.0001
+  beta:
+    value: 0.9
+  eta:
+    value: 0.0001
+
+  # More seeds for time-series analysis
+  seed:
+    values: [1, 2, 3, 4, 5, 6, 7, 8]
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args_no_hyphens}

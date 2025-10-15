@@ -1,0 +1,78 @@
+program: engiopt/lvae_2d/lvae_2d.py
+method: grid
+name: 06_photonics2d_deep_dive
+description: >
+  Deep dive into photonics2d problem.
+  Photonics designs often have sharp features and may benefit from aggressive pruning.
+
+  Research Questions:
+  1. Can aggressive pruning capture sharp photonic features?
+  2. Does photonics benefit from early pruning (simpler structures)?
+  3. What is the optimal sparsity level?
+
+metric:
+  name: val_rec
+  goal: minimize
+
+parameters:
+  # Fixed problem
+  problem_id:
+    value: "photonics2d"
+
+  # Test strategies
+  pruning_strategy:
+    values: ["plummet", "pca_cdf", "probabilistic"]
+
+  plummet_threshold:
+    values: [0.01, 0.015, 0.02, 0.03]
+
+  cdf_threshold:
+    values: [0.85, 0.90, 0.93, 0.95]
+
+  temperature:
+    values: [0.5, 1.0, 1.5, 2.0]
+
+  # Moderate dimensionality (sharp features = lower intrinsic dim?)
+  latent_dim:
+    values: [150, 200, 250, 300]
+
+  # Earlier pruning (simpler structures)
+  pruning_epoch:
+    values: [300, 400, 500, 600]
+
+  # Higher volume weight (encourage sparsity)
+  w_v:
+    values: [0.01, 0.02, 0.03, 0.05, 0.08]
+
+  # Moderate safeguards
+  min_active_dims:
+    value: 5
+  max_prune_per_epoch:
+    value: 20
+  cooldown_epochs:
+    value: 8
+  k_consecutive:
+    value: 3
+  recon_tol:
+    value: 0.10
+
+  # Fixed training
+  n_epochs:
+    value: 3000
+  batch_size:
+    value: 128
+  lr:
+    value: 0.0001
+  beta:
+    value: 0.9
+  eta:
+    value: 0.0001
+
+  seed:
+    values: [1, 2, 3, 4, 5]
+
+command:
+  - ${env}
+  - python
+  - ${program}
+  - ${args_no_hyphens}
