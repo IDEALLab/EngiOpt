@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch as th
 from torch import nn
+from torch.nn.utils.parametrizations import spectral_norm
 from torch.optim import Adam
 from torch.utils.data import DataLoader
 from torch.utils.data import TensorDataset
@@ -21,7 +22,9 @@ import tqdm
 import tyro
 
 from engiopt.lvae_2d.aes import LeastVolumeAE_DynamicPruning
-from engiopt.lvae_2d.schedule import polynomial_schedule
+from engiopt.lvae_2d.utils import polynomial_schedule
+from engiopt.lvae_2d.utils import spectral_norm_conv
+from engiopt.lvae_2d.utils import TrueSNDeconv2DCombo
 import wandb
 
 
@@ -70,6 +73,8 @@ class Args:
     """Scaling factor for the volume loss."""
     resize_dimensions: tuple[int, int] = (100, 100)
     """Dimensions to resize input images to before encoding/decoding."""
+    use_spectral_norm: bool = False
+    """Whether to use spectral normalization in the decoder (1-Lipschitz bound)."""
 
     # Dynamic pruning
     pruning_strategy: str = "plummet"
@@ -140,6 +145,17 @@ class Encoder(nn.Module):
 
 # ---------- Decoder: 7→13→25→50→100 then (optional) resize to original ----------
 class Decoder(nn.Module):
+    """Latent vector --> binary pixel image.
+
+    • Latent   [latent_dim]
+    • Linear   [512*7*7]
+    • Reshape  [512x7x7]
+    • Deconv1  [256x13x13]  (k=3, s=2, p=1)
+    • Deconv2  [128x25x25]  (k=3, s=2, p=1)
+    • Deconv3  [64x50x50]   (k=4, s=2, p=1)
+    • Deconv4  [1x100x100]  (k=4, s=2, p=1)
+    """
+
     def __init__(self, latent_dim: int, design_shape: tuple[int, int]):
         super().__init__()
         self.design_shape = design_shape  # Store design shape
@@ -196,6 +212,89 @@ class Decoder(nn.Module):
         return self.resize_out(x)  # (B,1,H_orig,W_orig)
 
 
+# ---------- TrueSNDecoder: Same architecture as Decoder but with spectral normalization ----------
+class TrueSNDecoder(nn.Module):
+    """Decoder with spectral normalization for 1-Lipschitz bound.
+
+    Same architecture as Decoder (7→13→25→50→100) but with spectral normalization
+    applied to all linear and convolutional layers.
+
+    • Latent   [latent_dim]
+    • Linear   [512*7*7]
+    • Reshape  [512x7x7]
+    • Deconv1  [256x13x13]  (k=3, s=2, p=1)
+    • Deconv2  [128x25x25]  (k=3, s=2, p=1)
+    • Deconv3  [64x50x50]   (k=4, s=2, p=1)
+    • Deconv4  [1x100x100]  (k=4, s=2, p=1)
+    """
+
+    def __init__(self, latent_dim: int, design_shape: tuple[int, int]):
+        super().__init__()
+        self.design_shape = design_shape
+        self.resize_out = transforms.Resize(self.design_shape)
+
+        # Spectral normalized linear projection
+        self.proj = nn.Sequential(
+            spectral_norm(nn.Linear(latent_dim, 512 * 7 * 7)),
+            nn.ReLU(inplace=True),
+        )
+
+        # Build deconvolutional layers with spectral normalization
+        # Input shapes for each layer (needed for TrueSNDeconv2DCombo)
+        self.deconv = nn.Sequential(
+            # 7→13 (input shape: 7x7)
+            TrueSNDeconv2DCombo(
+                input_shape=(7, 7),
+                in_channels=512,
+                out_channels=256,
+                kernel_size=3,
+                stride=2,
+                padding=1,
+                output_padding=0,
+            ),
+            # 13→25 (input shape: 13x13)
+            TrueSNDeconv2DCombo(
+                input_shape=(13, 13),
+                in_channels=256,
+                out_channels=128,
+                kernel_size=3,
+                stride=2,
+                padding=1,
+                output_padding=0,
+            ),
+            # 25→50 (input shape: 25x25)
+            TrueSNDeconv2DCombo(
+                input_shape=(25, 25),
+                in_channels=128,
+                out_channels=64,
+                kernel_size=4,
+                stride=2,
+                padding=1,
+                output_padding=0,
+            ),
+            # 50→100 (input shape: 50x50) - final layer with sigmoid
+            spectral_norm_conv(
+                nn.ConvTranspose2d(
+                    64,
+                    1,
+                    kernel_size=4,
+                    stride=2,
+                    padding=1,
+                    output_padding=0,
+                    bias=False,
+                ),
+                (50, 50),
+            ),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, z: th.Tensor) -> th.Tensor:
+        """Forward pass through the spectral normalized decoder."""
+        x = self.proj(z).view(z.size(0), 512, 7, 7)  # (B,512,7,7)
+        x = self.deconv(x)  # (B,1,100,100)
+        return self.resize_out(x)  # (B,1,H_orig,W_orig)
+
+
 if __name__ == "__main__":
     args = tyro.cli(Args)
 
@@ -233,7 +332,12 @@ if __name__ == "__main__":
         device = th.device("cpu")
 
     enc = Encoder(args.latent_dim, design_shape, args.resize_dimensions)
-    dec = Decoder(args.latent_dim, design_shape)
+    if args.use_spectral_norm:
+        dec = TrueSNDecoder(args.latent_dim, design_shape)
+        print("Using TrueSNDecoder with spectral normalization (1-Lipschitz bound)")
+    else:
+        dec = Decoder(args.latent_dim, design_shape)
+        print("Using standard Decoder")
 
     # --- Build pruning parameters (match aes.py expectations) ---
     pruning_params = {}
