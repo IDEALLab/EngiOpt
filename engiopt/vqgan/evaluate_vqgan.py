@@ -64,36 +64,38 @@ if __name__ == "__main__":
 
     # Restores the pytorch model from wandb
     if args.wandb_entity is not None:
-        artifact_path_0 = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_vqgan_cvqgan:seed_{seed}"
-        artifact_path_1 = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_vqgan_vqgan:seed_{seed}"
-        artifact_path_2 = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_vqgan_transformer:seed_{seed}"
+        artifact_path_cvqgan = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_vqgan_cvqgan:seed_{seed}"
+        artifact_path_vqgan = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_vqgan_vqgan:seed_{seed}"
+        artifact_path_transformer = (
+            f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_vqgan_transformer:seed_{seed}"
+        )
     else:
-        artifact_path_0 = f"{args.wandb_project}/{args.problem_id}_vqgan_cvqgan:seed_{seed}"
-        artifact_path_1 = f"{args.wandb_project}/{args.problem_id}_vqgan_vqgan:seed_{seed}"
-        artifact_path_2 = f"{args.wandb_project}/{args.problem_id}_vqgan_transformer:seed_{seed}"
+        artifact_path_cvqgan = f"{args.wandb_project}/{args.problem_id}_vqgan_cvqgan:seed_{seed}"
+        artifact_path_vqgan = f"{args.wandb_project}/{args.problem_id}_vqgan_vqgan:seed_{seed}"
+        artifact_path_transformer = f"{args.wandb_project}/{args.problem_id}_vqgan_transformer:seed_{seed}"
 
     api = wandb.Api()
-    artifact_0 = api.artifact(artifact_path_0, type="model")
-    artifact_1 = api.artifact(artifact_path_1, type="model")
-    artifact_2 = api.artifact(artifact_path_2, type="model")
+    artifact_cvqgan = api.artifact(artifact_path_cvqgan, type="model")
+    artifact_vqgan = api.artifact(artifact_path_vqgan, type="model")
+    artifact_transformer = api.artifact(artifact_path_transformer, type="model")
 
     class RunRetrievalError(ValueError):
         def __init__(self):
             super().__init__("Failed to retrieve the run")
 
-    run = artifact_2.logged_by()
+    run = artifact_transformer.logged_by()
     if run is None or not hasattr(run, "config"):
         raise RunRetrievalError
-    artifact_dir_0 = artifact_0.download()
-    artifact_dir_1 = artifact_1.download()
-    artifact_dir_2 = artifact_2.download()
+    artifact_dir_cvqgan = artifact_cvqgan.download()
+    artifact_dir_vqgan = artifact_vqgan.download()
+    artifact_dir_transformer = artifact_transformer.download()
 
-    ckpt_path_0 = os.path.join(artifact_dir_0, "cvqgan.pth")
-    ckpt_path_1 = os.path.join(artifact_dir_1, "vqgan.pth")
-    ckpt_path_2 = os.path.join(artifact_dir_2, "transformer.pth")
-    ckpt_0 = th.load(ckpt_path_0, map_location=th.device(device), weights_only=False)
-    ckpt_1 = th.load(ckpt_path_1, map_location=th.device(device), weights_only=False)
-    ckpt_2 = th.load(ckpt_path_2, map_location=th.device(device), weights_only=False)
+    ckpt_path_cvqgan = os.path.join(artifact_dir_cvqgan, "cvqgan.pth")
+    ckpt_path_vqgan = os.path.join(artifact_dir_vqgan, "vqgan.pth")
+    ckpt_path_transformer = os.path.join(artifact_dir_transformer, "transformer.pth")
+    ckpt_cvqgan = th.load(ckpt_path_cvqgan, map_location=th.device(device), weights_only=False)
+    ckpt_vqgan = th.load(ckpt_path_vqgan, map_location=th.device(device), weights_only=False)
+    ckpt_transformer = th.load(ckpt_path_transformer, map_location=th.device(device), weights_only=False)
 
     vqgan = VQGAN(
         device=device,
@@ -110,7 +112,7 @@ if __name__ == "__main__":
         latent_dim=run.config["latent_dim"],
         num_codebook_vectors=run.config["num_codebook_vectors"],
     )
-    vqgan.load_state_dict(ckpt_1["vqgan"])
+    vqgan.load_state_dict(ckpt_vqgan["vqgan"])
     vqgan.eval()  # Set to evaluation mode
     vqgan.to(device)
 
@@ -123,7 +125,7 @@ if __name__ == "__main__":
         cond_latent_dim=run.config["cond_latent_dim"],
         cond_codebook_vectors=run.config["cond_codebook_vectors"],
     )
-    cvqgan.load_state_dict(ckpt_0["cvqgan"])
+    cvqgan.load_state_dict(ckpt_cvqgan["cvqgan"])
     cvqgan.eval()  # Set to evaluation mode
     cvqgan.to(device)
 
@@ -140,7 +142,7 @@ if __name__ == "__main__":
         n_embd=run.config["n_embd"],
         dropout=run.config["dropout"],
     )
-    model.load_state_dict(ckpt_2["transformer"])
+    model.load_state_dict(ckpt_transformer["transformer"])
     model.eval()  # Set to evaluation mode
     model.to(device)
 

@@ -31,7 +31,7 @@ repos:
         name: pyright
         entry: pyright
         language: node
-        pass_filenames: true
+        pass_filenames: false
         types: [python]
         additional_dependencies: ["pyright@1.1.347"]
         args:

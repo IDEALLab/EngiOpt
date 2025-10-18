@@ -91,9 +91,9 @@ class Args:
     """number of vectors in the CVQGAN codebook"""
     cond_feature_map_dim: int = 4
     """feature map dimension for the CVQGAN encoder output"""
-    batch_size_0: int = 16
+    batch_size_cvqgan: int = 16
     """size of the batches for CVQGAN"""
-    n_epochs_0: int = 1000  # Default: 1000
+    n_epochs_cvqgan: int = 1000  # Default: 1000
     """number of epochs of CVQGAN training"""
     cond_lr: float = 2e-4  # Default: 2e-4
     """learning rate for CVQGAN"""
@@ -104,11 +104,11 @@ class Args:
 
     # Algorithm-specific: Stage 1 (AE)
     # From original implementation: assume image_channels=1, use greyscale LPIPS only, use_Online=True, determine image_size automatically, calculate decoder_start_resolution automatically
-    n_epochs_1: int = 100  # Default: 100
+    n_epochs_vqgan: int = 100  # Default: 100
     """number of epochs of training"""
-    batch_size_1: int = 16
+    batch_size_vqgan: int = 16
     """size of the batches for Stage 1"""
-    lr_1: float = 5e-5  # Default: 2e-4
+    lr_vqgan: float = 5e-5  # Default: 2e-4
     """learning rate for Stage 1"""
     beta: float = 0.25
     """beta hyperparameter for the codebook commitment loss"""
@@ -142,12 +142,12 @@ class Args:
     """tuple of resolutions at which to apply attention in the decoder"""
     decoder_num_res_blocks: int = 3
     """number of residual blocks per decoder layer"""
-    sample_interval_1: int = 100
+    sample_interval_vqgan: int = 100
     """interval between Stage 1 image samples"""
 
     # Algorithm-specific: Stage 2 (Transformer)
     # From original implementation: assume pkeep=1.0, sos_token=0, bias=True
-    n_epochs_2: int = 100  # Default: 100
+    n_epochs_transformer: int = 100  # Default: 100
     """number of epochs of training"""
     early_stopping: bool = True
     """whether to use early stopping for the transformer; if True requires args.track to be True"""
@@ -155,9 +155,9 @@ class Args:
     """number of epochs with no improvement after which training will be stopped"""
     early_stopping_delta: float = 1e-3
     """minimum change in the monitored quantity to qualify as an improvement"""
-    batch_size_2: int = 16
+    batch_size_transformer: int = 16
     """size of the batches for Stage 2"""
-    lr_2: float = 6e-4  # Default: 6e-4
+    lr_transformer: float = 6e-4  # Default: 6e-4
     """learning rate for Stage 2"""
     n_layer: int = 12
     """number of layers in the transformer"""
@@ -167,7 +167,7 @@ class Args:
     """transformer embedding dimension"""
     dropout: float = 0.3
     """dropout rate in the transformer"""
-    sample_interval_2: int = 100
+    sample_interval_transformer: int = 100
     """interval between Stage 2 image samples"""
 
 
@@ -370,14 +370,14 @@ class ResidualBlock(nn.Module):
         self.block = nn.Sequential(
             GroupNorm(in_channels),
             Swish(),
-            nn.Conv2d(in_channels, out_channels, 3, 1, 1),
+            nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=1, padding=1),
             GroupNorm(out_channels),
             Swish(),
-            nn.Conv2d(out_channels, out_channels, 3, 1, 1),
+            nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1),
         )
 
         if in_channels != out_channels:
-            self.channel_up = nn.Conv2d(in_channels, out_channels, 1, 1, 0)
+            self.channel_up = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         if self.in_channels != self.out_channels:
@@ -394,7 +394,7 @@ class UpSampleBlock(nn.Module):
 
     def __init__(self, channels: int):
         super().__init__()
-        self.conv = nn.Conv2d(channels, channels, 3, 1, 1)
+        self.conv = nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         x = f.interpolate(x, scale_factor=2.0)
@@ -410,7 +410,7 @@ class DownSampleBlock(nn.Module):
 
     def __init__(self, channels: int):
         super().__init__()
-        self.conv = nn.Conv2d(channels, channels, 3, 2, 0)
+        self.conv = nn.Conv2d(channels, channels, kernel_size=3, stride=2, padding=0)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         pad = (0, 1, 0, 1)
@@ -430,10 +430,10 @@ class NonLocalBlock(nn.Module):
         self.in_channels = channels
 
         self.gn = GroupNorm(channels)
-        self.q = nn.Conv2d(channels, channels, 1, 1, 0)
-        self.k = nn.Conv2d(channels, channels, 1, 1, 0)
-        self.v = nn.Conv2d(channels, channels, 1, 1, 0)
-        self.proj_out = nn.Conv2d(channels, channels, 1, 1, 0)
+        self.q = nn.Conv2d(channels, channels, kernel_size=1, stride=1, padding=0)
+        self.k = nn.Conv2d(channels, channels, kernel_size=1, stride=1, padding=0)
+        self.v = nn.Conv2d(channels, channels, kernel_size=1, stride=1, padding=0)
+        self.proj_out = nn.Conv2d(channels, channels, kernel_size=1, stride=1, padding=0)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         h_ = self.gn(x)
@@ -479,6 +479,9 @@ class LinearCombo(nn.Module):
 class Encoder(nn.Module):
     """Encoder module for VQGAN Stage 1.
 
+    # Simplified architecture: image -> conv -> [resblock -> attn? -> downsample]* -> norm -> swish -> final conv -> latent image
+    Where `?` indicates a block that is only included at certain resolutions and `*` indicates a block that is repeated.
+
     Consists of a series of convolutional, residual, and attention blocks arranged using the provided arguments.
     The number of downsample blocks is determined by the length of the encoder channels tuple minus two.
     For example, if encoder_channels=(128, 128, 128, 128) and the starting resolution is 128, the encoder will downsample the input image twice, from 128x128 to 32x32.
@@ -504,7 +507,7 @@ class Encoder(nn.Module):
         super().__init__()
         channels = encoder_channels
         resolution = encoder_start_resolution
-        layers = [nn.Conv2d(image_channels, channels[0], 3, 1, 1)]
+        layers = [nn.Conv2d(image_channels, channels[0], kernel_size=3, stride=1, padding=1)]
         for i in range(len(channels) - 1):
             in_channels = channels[i]
             out_channels = channels[i + 1]
@@ -521,7 +524,7 @@ class Encoder(nn.Module):
         layers.append(ResidualBlock(channels[-1], channels[-1]))
         layers.append(GroupNorm(channels[-1]))
         layers.append(Swish())
-        layers.append(nn.Conv2d(channels[-1], latent_dim, 3, 1, 1))
+        layers.append(nn.Conv2d(channels[-1], latent_dim, kernel_size=3, stride=1, padding=1))
         self.model = nn.Sequential(*layers)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
@@ -556,6 +559,9 @@ class CondEncoder(nn.Module):
 class Decoder(nn.Module):
     """Decoder module for VQGAN Stage 1.
 
+    Simplified architecture: latent image -> conv -> [resblock -> attn? -> upsample]* -> norm -> swish -> final conv -> image
+    Where `?` indicates a block that is only included at certain resolutions and `*` indicates a block that is repeated.
+
     Consists of a series of convolutional, residual, and attention blocks arranged using the provided arguments.
     The number of upsample blocks is determined by the length of the decoder channels tuple minus one.
     For example, if decoder_channels=(128, 128, 128) and the starting resolution is 32, the decoder will upsample the input image twice, from 32x32 to 128x128.
@@ -582,7 +588,7 @@ class Decoder(nn.Module):
         in_channels = decoder_channels[0]
         resolution = decoder_start_resolution
         layers = [
-            nn.Conv2d(latent_dim, in_channels, 3, 1, 1),
+            nn.Conv2d(latent_dim, in_channels, kernel_size=3, stride=1, padding=1),
             ResidualBlock(in_channels, in_channels),
             NonLocalBlock(in_channels),
             ResidualBlock(in_channels, in_channels),
@@ -602,7 +608,7 @@ class Decoder(nn.Module):
 
         layers.append(GroupNorm(in_channels))
         layers.append(Swish())
-        layers.append(nn.Conv2d(in_channels, image_channels, 3, 1, 1))
+        layers.append(nn.Conv2d(in_channels, image_channels, kernel_size=3, stride=1, padding=1))
         self.model = nn.Sequential(*layers)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
@@ -905,8 +911,8 @@ class VQGAN(nn.Module):
 
             self.decoder = CondDecoder(cond_latent_dim, cond_dim, cond_hidden_dim, cond_feature_map_dim).to(device=device)
 
-            self.quant_conv = nn.Conv2d(cond_latent_dim, cond_latent_dim, 1).to(device=device)
-            self.post_quant_conv = nn.Conv2d(cond_latent_dim, cond_latent_dim, 1).to(device=device)
+            self.quant_conv = nn.Conv2d(cond_latent_dim, cond_latent_dim, kernel_size=1).to(device=device)
+            self.post_quant_conv = nn.Conv2d(cond_latent_dim, cond_latent_dim, kernel_size=1).to(device=device)
         else:
             self.encoder = Encoder(
                 encoder_channels,
@@ -926,8 +932,8 @@ class VQGAN(nn.Module):
                 latent_dim,
             ).to(device=device)
 
-            self.quant_conv = nn.Conv2d(latent_dim, latent_dim, 1).to(device=device)
-            self.post_quant_conv = nn.Conv2d(latent_dim, latent_dim, 1).to(device=device)
+            self.quant_conv = nn.Conv2d(latent_dim, latent_dim, kernel_size=1).to(device=device)
+            self.post_quant_conv = nn.Conv2d(latent_dim, latent_dim, kernel_size=1).to(device=device)
 
         self.codebook = Codebook(
             num_codebook_vectors=cond_codebook_vectors if is_c else num_codebook_vectors,
@@ -1339,8 +1345,8 @@ if __name__ == "__main__":
     random.seed(args.seed)
     th.backends.cudnn.deterministic = True
 
-    os.makedirs("images/vqgan_1", exist_ok=True)
-    os.makedirs("images/vqgan_2", exist_ok=True)
+    os.makedirs("images/vqgan", exist_ok=True)
+    os.makedirs("images/transformer", exist_ok=True)
 
     if th.backends.mps.is_available():
         device = th.device("mps")
@@ -1390,19 +1396,19 @@ if __name__ == "__main__":
         th.as_tensor(training_ds["optimal_upsampled"][:]).to(device),
         *[th.as_tensor(training_ds[key][:]).to(device) for key in conditions],
     )
-    dataloader_0 = th.utils.data.DataLoader(
+    dataloader_cvqgan = th.utils.data.DataLoader(
         th_training_ds,
-        batch_size=args.batch_size_0,
+        batch_size=args.batch_size_cvqgan,
         shuffle=True,
     )
-    dataloader_1 = th.utils.data.DataLoader(
+    dataloader_vqgan = th.utils.data.DataLoader(
         th_training_ds,
-        batch_size=args.batch_size_1,
+        batch_size=args.batch_size_vqgan,
         shuffle=True,
     )
-    dataloader_2 = th.utils.data.DataLoader(
+    dataloader_transformer = th.utils.data.DataLoader(
         th_training_ds,
-        batch_size=args.batch_size_2,
+        batch_size=args.batch_size_transformer,
         shuffle=True,
     )
 
@@ -1441,7 +1447,7 @@ if __name__ == "__main__":
         )
         dataloader_val = th.utils.data.DataLoader(
             th_val_ds,
-            batch_size=args.batch_size_2,
+            batch_size=args.batch_size_transformer,
             shuffle=False,
         )
 
@@ -1466,18 +1472,18 @@ if __name__ == "__main__":
             name=run_name,
             dir="./logs/wandb",
         )
-        wandb.define_metric("0_step", summary="max")
-        wandb.define_metric("cvq_loss", step_metric="0_step")
-        wandb.define_metric("epoch_0", step_metric="0_step")
-        wandb.define_metric("1_step", summary="max")
-        wandb.define_metric("vq_loss", step_metric="1_step")
-        wandb.define_metric("d_loss", step_metric="1_step")
-        wandb.define_metric("epoch_1", step_metric="1_step")
-        wandb.define_metric("2_step", summary="max")
-        wandb.define_metric("tr_loss", step_metric="2_step")
-        wandb.define_metric("epoch_2", step_metric="2_step")
+        wandb.define_metric("cvqgan_step", summary="max")
+        wandb.define_metric("cvqgan_loss", step_metric="cvqgan_step")
+        wandb.define_metric("epoch_cvqgan", step_metric="cvqgan_step")
+        wandb.define_metric("vqgan_step", summary="max")
+        wandb.define_metric("vqgan_loss", step_metric="vqgan_step")
+        wandb.define_metric("discriminator_loss", step_metric="vqgan_step")
+        wandb.define_metric("epoch_vqgan", step_metric="vqgan_step")
+        wandb.define_metric("transformer_step", summary="max")
+        wandb.define_metric("transformer_loss", step_metric="transformer_step")
+        wandb.define_metric("epoch_transformer", step_metric="transformer_step")
         if args.early_stopping:
-            wandb.define_metric("tr_val_loss", step_metric="2_step")
+            wandb.define_metric("transformer_val_loss", step_metric="transformer_step")
 
     vqgan = VQGAN(
         device=device,
@@ -1540,12 +1546,12 @@ if __name__ == "__main__":
         + list(vqgan.codebook.parameters())
         + list(vqgan.quant_conv.parameters())
         + list(vqgan.post_quant_conv.parameters()),
-        lr=args.lr_1,
+        lr=args.lr_vqgan,
         eps=1e-08,
         betas=(args.b1, args.b2),
     )
     # VQGAN Stage 1 discriminator optimizer
-    opt_disc = th.optim.Adam(discriminator.parameters(), lr=args.lr_1, eps=1e-08, betas=(args.b1, args.b2))
+    opt_disc = th.optim.Adam(discriminator.parameters(), lr=args.lr_vqgan, eps=1e-08, betas=(args.b1, args.b2))
 
     # Transformer Stage 2 optimizer
     decay, no_decay = set(), set()
@@ -1576,12 +1582,12 @@ if __name__ == "__main__":
         {"params": [param_dict[pn] for pn in sorted(no_decay)], "weight_decay": 0.0},
     ]
 
-    opt_transformer = th.optim.AdamW(optim_groups, lr=args.lr_2, betas=(0.9, 0.95))
+    opt_transformer = th.optim.AdamW(optim_groups, lr=args.lr_transformer, betas=(0.9, 0.95))
 
     perceptual_loss_fcn = GreyscaleLPIPS().eval().to(device)
 
     @th.no_grad()
-    def sample_designs_1(n_designs: int) -> list[th.Tensor]:
+    def sample_designs_vqgan(n_designs: int) -> list[th.Tensor]:
         """Sample reconstructions from trained VQGAN Stage 1."""
         vqgan.eval()
 
@@ -1593,7 +1599,7 @@ if __name__ == "__main__":
         return reconstructions
 
     @th.no_grad()
-    def sample_designs_2(n_designs: int) -> tuple[th.Tensor, th.Tensor]:
+    def sample_designs_transformer(n_designs: int) -> tuple[th.Tensor, th.Tensor]:
         """Sample generated designs from trained VQGAN Stage 2."""
         transformer.eval()
 
@@ -1624,8 +1630,8 @@ if __name__ == "__main__":
     if args.conditional:
         print("Stage 0: Training CVQGAN")
         cvqgan.train()
-        for epoch in tqdm.trange(args.n_epochs_0):
-            for i, data in enumerate(dataloader_0):
+        for epoch in tqdm.trange(args.n_epochs_cvqgan):
+            for i, data in enumerate(dataloader_cvqgan):
                 # THIS IS PROBLEM DEPENDENT
                 conds = th.stack((data[1:]), dim=1).to(dtype=th.float32, device=device)
                 decoded_images, codebook_indices, q_loss = cvqgan(conds)
@@ -1640,17 +1646,17 @@ if __name__ == "__main__":
                 #  Logging
                 # ----------
                 if args.track:
-                    batches_done = epoch * len(dataloader_0) + i
-                    wandb.log({"cvq_loss": cvq_loss.item(), "0_step": batches_done})
-                    wandb.log({"epoch_0": epoch, "0_step": batches_done})
+                    batches_done = epoch * len(dataloader_cvqgan) + i
+                    wandb.log({"cvqgan_loss": cvq_loss.item(), "cvqgan_step": batches_done})
+                    wandb.log({"epoch_cvqgan": epoch, "cvqgan_step": batches_done})
                     print(
-                        f"[Epoch {epoch}/{args.n_epochs_0}] [Batch {i}/{len(dataloader_0)}] [CVQ loss: {cvq_loss.item()}]"
+                        f"[Epoch {epoch}/{args.n_epochs_cvqgan}] [Batch {i}/{len(dataloader_cvqgan)}] [CVQ loss: {cvq_loss.item()}]"
                     )
 
                     # --------------
                     #  Save model
                     # --------------
-                    if args.save_model and epoch == args.n_epochs_0 - 1 and i == len(dataloader_0) - 1:
+                    if args.save_model and epoch == args.n_epochs_cvqgan - 1 and i == len(dataloader_cvqgan) - 1:
                         ckpt_cvq = {
                             "epoch": epoch,
                             "batches_done": batches_done,
@@ -1675,8 +1681,8 @@ if __name__ == "__main__":
     print("Stage 1: Training VQGAN")
     vqgan.train()
     discriminator.train()
-    for epoch in tqdm.trange(args.n_epochs_1):
-        for i, data in enumerate(dataloader_1):
+    for epoch in tqdm.trange(args.n_epochs_vqgan):
+        for i, data in enumerate(dataloader_vqgan):
             # THIS IS PROBLEM DEPENDENT
             designs = data[0].to(dtype=th.float32, device=device)
             decoded_images, codebook_indices, q_loss = vqgan(designs)
@@ -1712,19 +1718,19 @@ if __name__ == "__main__":
             #  Logging
             # ----------
             if args.track:
-                batches_done = epoch * len(dataloader_1) + i
-                wandb.log({"vq_loss": vq_loss.item(), "1_step": batches_done})
-                wandb.log({"d_loss": gan_loss.item(), "1_step": batches_done})
-                wandb.log({"epoch_1": epoch, "1_step": batches_done})
+                batches_done = epoch * len(dataloader_vqgan) + i
+                wandb.log({"vqgan_loss": vq_loss.item(), "vqgan_step": batches_done})
+                wandb.log({"discriminator_loss": gan_loss.item(), "vqgan_step": batches_done})
+                wandb.log({"epoch_vqgan": epoch, "vqgan_step": batches_done})
                 print(
-                    f"[Epoch {epoch}/{args.n_epochs_1}] [Batch {i}/{len(dataloader_1)}] [D loss: {gan_loss.item()}] [VQ loss: {vq_loss.item()}]"
+                    f"[Epoch {epoch}/{args.n_epochs_vqgan}] [Batch {i}/{len(dataloader_vqgan)}] [D loss: {gan_loss.item()}] [VQ loss: {vq_loss.item()}]"
                 )
 
                 # This saves a grid image of 25 generated designs every sample_interval
-                if batches_done % args.sample_interval_1 == 0:
+                if batches_done % args.sample_interval_vqgan == 0:
                     # Extract 25 designs
                     designs = resize_to(
-                        data=sample_designs_1(n_designs=n_logged_designs), h=design_shape[0], w=design_shape[1]
+                        data=sample_designs_vqgan(n_designs=n_logged_designs), h=design_shape[0], w=design_shape[1]
                     )
                     fig, axes = plt.subplots(5, 5, figsize=(12, 12))
 
@@ -1740,15 +1746,15 @@ if __name__ == "__main__":
                         axes[j].set_yticks([])  # Hide y ticks
 
                     plt.tight_layout()
-                    img_fname = f"images/vqgan_1/{batches_done}.png"
+                    img_fname = f"images/vqgan/{batches_done}.png"
                     plt.savefig(img_fname)
                     plt.close()
-                    wandb.log({"designs_1": wandb.Image(img_fname)})
+                    wandb.log({"designs_vqgan": wandb.Image(img_fname)})
 
                 # --------------
                 #  Save models
                 # --------------
-                if args.save_model and epoch == args.n_epochs_1 - 1 and i == len(dataloader_1) - 1:
+                if args.save_model and epoch == args.n_epochs_vqgan - 1 and i == len(dataloader_vqgan) - 1:
                     ckpt_vq = {
                         "epoch": epoch,
                         "batches_done": batches_done,
@@ -1791,8 +1797,8 @@ if __name__ == "__main__":
         patience_counter = 0
         patience = args.early_stopping_patience
 
-    for epoch in tqdm.trange(args.n_epochs_2):
-        for i, data in enumerate(dataloader_2):
+    for epoch in tqdm.trange(args.n_epochs_transformer):
+        for i, data in enumerate(dataloader_transformer):
             # THIS IS PROBLEM DEPENDENT
             designs = data[0].to(dtype=th.float32, device=device)
             conds = th.stack((data[1:]), dim=1).to(dtype=th.float32, device=device)
@@ -1807,17 +1813,17 @@ if __name__ == "__main__":
             #  Logging
             # ----------
             if args.track:
-                batches_done = epoch * len(dataloader_2) + i
-                wandb.log({"tr_loss": loss.item(), "2_step": batches_done})
-                wandb.log({"epoch_2": epoch, "2_step": batches_done})
+                batches_done = epoch * len(dataloader_transformer) + i
+                wandb.log({"transformer_loss": loss.item(), "transformer_step": batches_done})
+                wandb.log({"epoch_transformer": epoch, "transformer_step": batches_done})
                 print(
-                    f"[Epoch {epoch}/{args.n_epochs_2}] [Batch {i}/{len(dataloader_2)}] [Transformer loss: {loss.item()}]"
+                    f"[Epoch {epoch}/{args.n_epochs_transformer}] [Batch {i}/{len(dataloader_transformer)}] [Transformer loss: {loss.item()}]"
                 )
 
                 # This saves a grid image of 25 generated designs every sample_interval
-                if batches_done % args.sample_interval_2 == 0:
+                if batches_done % args.sample_interval_transformer == 0:
                     # Extract 25 designs
-                    desired_conds, designs = sample_designs_2(n_designs=n_logged_designs)
+                    desired_conds, designs = sample_designs_transformer(n_designs=n_logged_designs)
                     if args.normalize_conditions:
                         desired_conds = (desired_conds.cpu() * std) + mean
                     designs = resize_to(data=designs, h=design_shape[0], w=design_shape[1])
@@ -1838,10 +1844,10 @@ if __name__ == "__main__":
                         axes[j].set_yticks([])  # Hide y ticks
 
                     plt.tight_layout()
-                    img_fname = f"images/vqgan_2/{batches_done}.png"
+                    img_fname = f"images/transformer/{batches_done}.png"
                     plt.savefig(img_fname)
                     plt.close()
-                    wandb.log({"designs_2": wandb.Image(img_fname)})
+                    wandb.log({"designs_transformer": wandb.Image(img_fname)})
 
         # Early stopping based on held-out validation loss
         if args.track and args.early_stopping:
@@ -1855,7 +1861,7 @@ if __name__ == "__main__":
                     val_loss = f.cross_entropy(val_logits.reshape(-1, val_logits.size(-1)), val_targets.reshape(-1))
                     val_losses.append(val_loss.item())
             val_loss = sum(val_losses) / len(val_losses)
-            wandb.log({"tr_val_loss": val_loss, "2_step": batches_done})
+            wandb.log({"transformer_val_loss": val_loss, "transformer_step": batches_done})
 
             if val_loss < best_val - args.early_stopping_delta:
                 best_val = val_loss
