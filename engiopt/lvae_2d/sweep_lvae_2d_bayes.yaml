@@ -1,0 +1,115 @@
+# Bayesian LVAE Sweep: Efficient exploration of pruning hyperparameters
+# Use this after initial grid search to fine-tune promising regions
+# Still no safeguards - focused on understanding pruning behavior
+
+method: bayes
+metric:
+  name: val_rec
+  goal: minimize
+
+early_terminate:
+  type: hyperband
+  max_iter: 2500
+  eta: 3
+  s: 2
+
+parameters:
+  # Problem - override via command line
+  problem_id:
+    value: heatconduction2d
+
+  # Fixed training parameters
+  n_epochs:
+    value: 2500
+  batch_size:
+    value: 128
+  lr:
+    distribution: log_uniform_values
+    min: 0.00005
+    max: 0.0005
+
+  # LVAE volume loss - explore sensitivity
+  latent_dim:
+    distribution: categorical
+    values: [150, 200, 250, 300]
+  w_v:
+    distribution: log_uniform_values
+    min: 0.005
+    max: 0.05
+  eta:
+    distribution: log_uniform_values
+    min: 0.00005
+    max: 0.0005
+
+  # Pruning timing
+  pruning_epoch:
+    distribution: int_uniform
+    min: 300
+    max: 700
+  beta:
+    distribution: uniform
+    min: 0.85
+    max: 0.95
+
+  # PRIMARY: Pruning strategy (one at a time for cleaner analysis)
+  pruning_strategy:
+    value: plummet  # Change to 'lognorm' for separate sweep
+
+  # Plummet hyperparameters (active when pruning_strategy=plummet)
+  plummet_threshold:
+    distribution: log_uniform_values
+    min: 0.003
+    max: 0.3
+
+  # Lognorm hyperparameters (active when pruning_strategy=lognorm)
+  alpha:
+    distribution: uniform
+    min: 0.0
+    max: 0.6
+  percentile:
+    distribution: log_uniform_values
+    min: 0.005
+    max: 0.25
+
+  # SECONDARY: Spectral normalization
+  use_spectral_norm:
+    distribution: categorical
+    values: [false, true]
+
+  # Safeguards: DISABLED
+  min_active_dims:
+    value: 0
+  # max_prune_per_epoch: omit to use code default (None)
+  cooldown_epochs:
+    value: 0
+  k_consecutive:
+    value: 1
+  # recon_tol: omit to use code default (float('inf'))
+
+  # Fixed unused params
+  cdf_threshold:
+    value: 0.95
+  temperature:
+    value: 1.0
+  polynomial_schedule_n:
+    value: 100
+  polynomial_schedule_p:
+    value: 2
+  resize_dimensions:
+    value: [100, 100]
+
+  # Tracking
+  track:
+    value: true
+  save_model:
+    value: false
+  wandb_project:
+    value: lvae
+  wandb_entity:
+    value: null
+
+  seed:
+    distribution: categorical
+    values: [1, 2, 3]
+
+program: engiopt/lvae_2d/lvae_2d.py
