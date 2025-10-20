@@ -46,16 +46,10 @@ echo "=========================================="
 echo ""
 
 #-------------------------------------------------------------------------------
-# Check if we're on Euler or local machine
+# Assume always running on HPC
 #-------------------------------------------------------------------------------
-# Check for Euler: hostname contains "euler", or sbatch/squeue commands exist
-if [[ $(hostname) == *"euler"* ]] || command -v sbatch &> /dev/null; then
-    ON_EULER=true
-    echo "Running on Euler HPC"
-else
-    ON_EULER=false
-    echo "Running on local machine (will create sweep only, not submit jobs)"
-fi
+ON_EULER=true
+echo "Running on Euler HPC"
 
 #-------------------------------------------------------------------------------
 # Create temporary sweep config with problem_id set
@@ -125,75 +119,56 @@ echo "Sweep info saved to: $SWEEP_INFO_FILE"
 echo ""
 
 #-------------------------------------------------------------------------------
-# Launch on Euler if we're on Euler
+# Launch on Euler (always true now)
 #-------------------------------------------------------------------------------
-if [ "$ON_EULER" = true ]; then
-    echo "Submitting SLURM job array..."
+echo "Submitting SLURM job array..."
+echo ""
+
+# Create logs directory if it doesn't exist
+mkdir -p logs
+
+# Determine max concurrent jobs (50% of total for safety)
+MAX_CONCURRENT=$((N_AGENTS / 2))
+if [ $MAX_CONCURRENT -lt 10 ]; then
+    MAX_CONCURRENT=10
+fi
+if [ $MAX_CONCURRENT -gt 100 ]; then
+    MAX_CONCURRENT=100
+fi
+
+# Submit the job array
+JOB_ID=$(sbatch \
+    --export=SWEEP_ID=$SWEEP_ID,WANDB_PROJECT=$WANDB_PROJECT,WANDB_ENTITY=$WANDB_ENTITY \
+    --array=1-${N_AGENTS}%${MAX_CONCURRENT} \
+    engiopt/lvae_2d/euler_sweep.slurm 2>&1 | grep -oP 'Submitted batch job \K[0-9]+')
+
+if [ -n "$JOB_ID" ]; then
+    echo "=========================================="
+    echo "SLURM Job Submitted!"
+    echo "=========================================="
+    echo "Job ID: $JOB_ID"
+    echo "Array size: $N_AGENTS"
+    echo "Max concurrent: $MAX_CONCURRENT"
     echo ""
+    echo "Monitor with:"
+    echo "  squeue -u \$USER"
+    echo "  squeue -j $JOB_ID"
+    echo ""
+    echo "Check logs:"
+    echo "  tail -f logs/sweep_${JOB_ID}_*.out"
+    echo ""
+    echo "Cancel if needed:"
+    echo "  scancel $JOB_ID"
+    echo "=========================================="
 
-    # Create logs directory if it doesn't exist
-    mkdir -p logs
-
-    # Determine max concurrent jobs (50% of total for safety)
-    MAX_CONCURRENT=$((N_AGENTS / 2))
-    if [ $MAX_CONCURRENT -lt 10 ]; then
-        MAX_CONCURRENT=10
-    fi
-    if [ $MAX_CONCURRENT -gt 100 ]; then
-        MAX_CONCURRENT=100
-    fi
-
-    # Submit the job array
-    JOB_ID=$(sbatch \
-        --export=SWEEP_ID=$SWEEP_ID,WANDB_PROJECT=$WANDB_PROJECT,WANDB_ENTITY=$WANDB_ENTITY \
-        --array=1-${N_AGENTS}%${MAX_CONCURRENT} \
-        engiopt/lvae_2d/euler_sweep.slurm 2>&1 | grep -oP 'Submitted batch job \K[0-9]+')
-
-    if [ -n "$JOB_ID" ]; then
-        echo "=========================================="
-        echo "SLURM Job Submitted!"
-        echo "=========================================="
-        echo "Job ID: $JOB_ID"
-        echo "Array size: $N_AGENTS"
-        echo "Max concurrent: $MAX_CONCURRENT"
-        echo ""
-        echo "Monitor with:"
-        echo "  squeue -u \$USER"
-        echo "  squeue -j $JOB_ID"
-        echo ""
-        echo "Check logs:"
-        echo "  tail -f logs/sweep_${JOB_ID}_*.out"
-        echo ""
-        echo "Cancel if needed:"
-        echo "  scancel $JOB_ID"
-        echo "=========================================="
-
-        # Append job info to sweep info file
-        cat >> "$SWEEP_INFO_FILE" <<EOF
+    # Append job info to sweep info file
+    cat >> "$SWEEP_INFO_FILE" <<EOF
 
 SLURM Job: $JOB_ID
 Submitted: $(date)
 Command: sbatch --export=SWEEP_ID=$SWEEP_ID --array=1-${N_AGENTS}%${MAX_CONCURRENT} engiopt/lvae_2d/euler_sweep.slurm
 EOF
-    else
-        echo "ERROR: Failed to submit SLURM job"
-        exit 1
-    fi
 else
-    echo "=========================================="
-    echo "Next Steps (Run on Euler)"
-    echo "=========================================="
-    echo "1. SSH to Euler:"
-    echo "   ssh euler.ethz.ch"
-    echo ""
-    echo "2. Navigate to project:"
-    echo "   cd projects/EngiOpt"
-    echo ""
-    echo "3. Submit jobs:"
-    echo "   mkdir -p logs"
-    echo "   sbatch --export=SWEEP_ID=$SWEEP_ID --array=1-$N_AGENTS%50 engiopt/lvae_2d/euler_sweep.slurm"
-    echo ""
-    echo "Or use the saved info:"
-    echo "   cat $SWEEP_INFO_FILE"
-    echo "=========================================="
+    echo "ERROR: Failed to submit SLURM job"
+    exit 1
 fi
