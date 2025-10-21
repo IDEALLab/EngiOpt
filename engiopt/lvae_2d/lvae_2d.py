@@ -45,7 +45,7 @@ class Args:
     """Random seed for reproducibility."""
     save_model: bool = False
     """Whether to save the model after training."""
-    sample_interval: int = 400  # How often to sample designs
+    sample_interval: int = 1000  # How often to sample designs
     """Interval for sampling designs during training."""
 
     # Training dp
@@ -73,7 +73,7 @@ class Args:
     """Scaling factor for the volume loss."""
     resize_dimensions: tuple[int, int] = (100, 100)
     """Dimensions to resize input images to before encoding/decoding."""
-    use_spectral_norm: bool = False
+    use_spectral_norm: bool = True
     """Whether to use spectral normalization in the decoder (1-Lipschitz bound)."""
 
     # Dynamic pruning
@@ -488,12 +488,12 @@ if __name__ == "__main__":
                     wandb.log({"interp_plot": wandb.Image(img_fname)})
 
                     with th.no_grad():
-                        z_rand = z.mean(0).unsqueeze(0).repeat([64, 1])
+                        z_rand = z.mean(0).unsqueeze(0).repeat([25, 1])
                         z_rand[:, idx[:N]] += z_std[:N] * th.randn_like(z_rand[:, idx[:N]]) * 1
                         x_rand = lvae.decode(z_rand).detach().cpu().numpy()
 
-                    fig, axs = plt.subplots(8, 8, figsize=(8 * 3, 8 * 1.5))
-                    for k, (i, j) in enumerate(product(range(8), range(8))):  # noqa: PLW2901
+                    fig, axs = plt.subplots(5, 5, figsize=(5 * 3, 5 * 1.5))
+                    for k, (i, j) in enumerate(product(range(5), range(5))):  # noqa: PLW2901
                         img = x_rand[k].reshape(design_shape[0], design_shape[1])
                         axs[i, j].imshow(img)
                         axs[i, j].axis("off")

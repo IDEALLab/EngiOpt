@@ -1,0 +1,54 @@
+# LVAE Sweep: Plummet Pruning Strategy
+# Focus: Systematic exploration of plummet threshold sensitivity
+# Fixed: use_spectral_norm=True (default), save_model=False (default)
+# No safeguards initially - we want to see failures to understand behavior
+
+method: grid  # Use grid for complete coverage
+metric:
+  name: val_rec
+  goal: minimize
+
+parameters:
+  # Problem - override via command line for each problem sweep
+  problem_id:
+    value: heatconduction2d  # Change per problem: beams2d, heatconduction2d, etc.
+
+  # Fixed training parameters (keep constant to isolate pruning effects)
+  n_epochs:
+    value: 2500
+  batch_size:
+    value: 128
+  lr:
+    value: 0.0001
+
+  # Fixed LVAE parameters
+  latent_dim:
+    value: 250
+  w_v:
+    value: 0.01
+  eta:
+    value: 0.0001
+  polynomial_schedule_n:
+    value: 100
+  polynomial_schedule_p:
+    value: 2
+  pruning_epoch:
+    value: 500
+  beta:
+    value: 0.9
+
+  # Pruning strategy: PLUMMET only
+  pruning_strategy:
+    value: plummet
+
+  # PLUMMET-specific: threshold parameter
+  # Test wide range to find sensitivity
+  plummet_threshold:
+    values: [0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5]
+
+
+  # Multiple seeds for statistical significance
+  seed:
+    values: [1, 2, 3]
+
+program: engiopt/lvae_2d/lvae_2d.py

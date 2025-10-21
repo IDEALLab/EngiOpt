@@ -3,8 +3,8 @@
 #SBATCH --output=logs/sweep_%A_%a.out
 #SBATCH --error=logs/sweep_%A_%a.err
 #SBATCH --time=24:00:00
-#SBATCH --cpus-per-task=8
-#SBATCH --mem-per-cpu=7G
+#SBATCH --cpus-per-task=2
+#SBATCH --mem-per-cpu=4G
 #SBATCH --gpus=rtx_4090:1
 #SBATCH --array=1-200%50
 # Resource notes:
