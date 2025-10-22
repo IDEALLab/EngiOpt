@@ -3,8 +3,13 @@
 This script provides a configurable interpretable design autoencoder with performance prediction:
 - Encoder: Extracts latent codes from designs
 - TrueSNDecoder: Reconstructs designs from latent codes (with spectral normalization)
-- MLP Predictor: Predicts performance from first perf_dim latent codes (optionally + conditions)
+- SNMLPPredictor: Spectrally normalized MLP that predicts performance from first perf_dim latent codes
 - Dynamic Pruning: Prunes low-variance latent dimensions during training
+
+All components use spectral normalization to ensure 1-Lipschitz continuity, enabling:
+- Smooth optimization in latent space
+- Interpretable performance gradients
+- Stable surrogate-based design search
 
 Configuration:
 - perf_dim: Number of latent dimensions dedicated to performance (default: all latent_dim dimensions)
@@ -38,6 +43,7 @@ import wandb
 
 from engiopt.lvae_2d.aes import InterpretableDesignLeastVolumeAE_DP
 from engiopt.lvae_2d.utils import polynomial_schedule
+from engiopt.lvae_2d.utils import SNLinearCombo
 from engiopt.lvae_2d.utils import spectral_norm_conv
 from engiopt.lvae_2d.utils import TrueSNDeconv2DCombo
 
@@ -89,8 +95,6 @@ class Args:
     """Scaling factor for the volume loss."""
     resize_dimensions: tuple[int, int] = (100, 100)
     """Dimensions to resize input images to before encoding/decoding."""
-    use_spectral_norm: bool = True
-    """Whether to use spectral normalization in the decoder (1-Lipschitz bound)."""
 
     # MLP predictor parameters
     predictor_hidden_dims: tuple[int, ...] = (256, 128)
@@ -101,9 +105,9 @@ class Args:
     """Number of latent dimensions dedicated to performance prediction. If -1 (default), uses all latent_dim dimensions."""
 
     # Dynamic pruning
-    pruning_strategy: str = "plummet"
+    pruning_strategy: str = "lognorm"
     """Which pruning strategy to use: [plummet, pca_cdf, lognorm, probabilistic]."""
-    cdf_threshold: float = 0.95
+    cdf_threshold: float = 0.99
     """(pca_cdf) Cumulative variance threshold."""
     temperature: float = 1.0
     """(probabilistic) Sampling temperature."""
@@ -111,7 +115,7 @@ class Args:
     """(plummet) Threshold for pruning dimensions."""
     alpha: float = 0.2
     """(lognorm) Weighting factor for blending reference and current distribution."""
-    percentile: float = 0.05
+    percentile: float = 0.01
     """(lognorm) Percentile threshold for pruning."""
 
     # Safeguard parameters
@@ -248,11 +252,17 @@ class TrueSNDecoder(nn.Module):
         return self.resize_out(x)  # (B,1,H_orig,W_orig)
 
 
-class MLPPredictor(nn.Module):
-    """MLP that predicts performance from latent codes and conditions.
+class SNMLPPredictor(nn.Module):
+    """Spectral normalized MLP that predicts performance from latent codes.
 
-    Takes concatenated [latent_code, conditions] as input and predicts
-    performance values through a series of fully connected layers.
+    Enforces 1-Lipschitz continuity to ensure small steps in latent space
+    correspond to small steps in performance space. Critical for:
+    - Smooth optimization in latent space
+    - Interpretable performance gradients
+    - Stable surrogate-based design search
+
+    Uses SNLinearCombo (spectral normalized Linear + ReLU) for hidden layers
+    and spectral normalized Linear for the output layer.
     """
 
     def __init__(self, input_dim: int, output_dim: int, hidden_dims: tuple[int, ...] = (256, 128)):
@@ -260,10 +270,10 @@ class MLPPredictor(nn.Module):
         layers = []
         prev_dim = input_dim
         for hidden_dim in hidden_dims:
-            layers.append(nn.Linear(prev_dim, hidden_dim))
-            layers.append(nn.ReLU(inplace=True))
+            layers.append(SNLinearCombo(prev_dim, hidden_dim))
             prev_dim = hidden_dim
-        layers.append(nn.Linear(prev_dim, output_dim))
+        # Final layer: spectral normalized Linear (no activation)
+        layers.append(spectral_norm(nn.Linear(prev_dim, output_dim)))
         self.net = nn.Sequential(*layers)
 
     def forward(self, x: th.Tensor) -> th.Tensor:
@@ -353,10 +363,11 @@ if __name__ == "__main__":
     else:
         device = th.device("cpu")
 
-    # Build encoder and decoder
+    # Build encoder and decoder (always use spectral normalization)
     enc = Encoder(args.latent_dim, design_shape, args.resize_dimensions)
     dec = TrueSNDecoder(args.latent_dim, design_shape)
     print("Using TrueSNDecoder with spectral normalization (1-Lipschitz bound)")
+    print("Using SNMLPPredictor with spectral normalization for performance prediction")
 
     # Build MLP predictor
     # Determine perf_dim: if -1 (default), use all latent dimensions
@@ -364,7 +375,7 @@ if __name__ == "__main__":
     n_perf = 1  # Can be adjusted based on problem
 
     predictor_input_dim = perf_dim + (n_conds if args.conditional_predictor else 0)
-    predictor = MLPPredictor(
+    predictor = SNMLPPredictor(
         input_dim=predictor_input_dim,
         output_dim=n_perf,
         hidden_dims=args.predictor_hidden_dims,

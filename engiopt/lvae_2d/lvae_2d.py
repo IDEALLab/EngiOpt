@@ -73,8 +73,6 @@ class Args:
     """Scaling factor for the volume loss."""
     resize_dimensions: tuple[int, int] = (100, 100)
     """Dimensions to resize input images to before encoding/decoding."""
-    use_spectral_norm: bool = True
-    """Whether to use spectral normalization in the decoder (1-Lipschitz bound)."""
 
     # Dynamic pruning
     pruning_strategy: str = "lognorm"
@@ -332,12 +330,8 @@ if __name__ == "__main__":
         device = th.device("cpu")
 
     enc = Encoder(args.latent_dim, design_shape, args.resize_dimensions)
-    if args.use_spectral_norm:
-        dec = TrueSNDecoder(args.latent_dim, design_shape)
-        print("Using TrueSNDecoder with spectral normalization (1-Lipschitz bound)")
-    else:
-        dec = Decoder(args.latent_dim, design_shape)
-        print("Using standard Decoder")
+    dec = TrueSNDecoder(args.latent_dim, design_shape)
+    print("Using TrueSNDecoder with spectral normalization (1-Lipschitz bound)")
 
     # --- Build pruning parameters (match aes.py expectations) ---
     pruning_params = {}
