@@ -281,7 +281,7 @@ class SNMLPPredictor(nn.Module):
         return self.net(x)
 
 
-class ConfigurableInterpretableDesignLVAE(InterpretableDesignLeastVolumeAE_DP):
+class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
     """Wrapper around InterpretableDesignLeastVolumeAE_DP with conditional/unconditional prediction.
 
     This variant uses only the first perf_dim latent dimensions for performance prediction,
@@ -403,7 +403,7 @@ if __name__ == "__main__":
 
     # Initialize DesignLVAE with dynamic pruning
     # Always use interpretable version (generalizes to regular when perf_dim = latent_dim)
-    d_lvae = ConfigurableInterpretableDesignLVAE(
+    d_lvae = ConfigIDLVAE(
         encoder=enc,
         decoder=dec,
         predictor=predictor,
@@ -441,15 +441,15 @@ if __name__ == "__main__":
     # Extract designs, conditions, and performance
     x_train = train_ds["optimal_design"][:].unsqueeze(1)
     c_train = th.stack([train_ds[key][:] for key in problem.conditions_keys], dim=-1)
-    p_train = train_ds["optimal_value"][:].unsqueeze(-1)  # (N, 1)
+    p_train = train_ds[problem.objectives_keys[0]][:].unsqueeze(-1)  # (N, 1)
 
     x_val = val_ds["optimal_design"][:].unsqueeze(1)
     c_val = th.stack([val_ds[key][:] for key in problem.conditions_keys], dim=-1)
-    p_val = val_ds["optimal_value"][:].unsqueeze(-1)
+    p_val = val_ds[problem.objectives_keys[0]][:].unsqueeze(-1)
 
     x_test = test_ds["optimal_design"][:].unsqueeze(1)
     c_test = th.stack([test_ds[key][:] for key in problem.conditions_keys], dim=-1)
-    p_test = test_ds["optimal_value"][:].unsqueeze(-1)
+    p_test = test_ds[problem.objectives_keys[0]][:].unsqueeze(-1)
 
     loader = DataLoader(
         TensorDataset(x_train, c_train, p_train),
