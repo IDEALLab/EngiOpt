@@ -1,4 +1,18 @@
-"""LVAE_DP for 2D designs (no performance or conditioning)."""
+"""DesignLVAE_DP for 2D designs with performance prediction.
+
+This script provides a configurable interpretable design autoencoder with performance prediction:
+- Encoder: Extracts latent codes from designs
+- TrueSNDecoder: Reconstructs designs from latent codes (with spectral normalization)
+- MLP Predictor: Predicts performance from first perf_dim latent codes (optionally + conditions)
+- Dynamic Pruning: Prunes low-variance latent dimensions during training
+
+Configuration:
+- perf_dim: Number of latent dimensions dedicated to performance (default: all latent_dim dimensions)
+  - Use perf_dim < latent_dim for interpretable mode (e.g., --perf-dim 10)
+  - Use perf_dim = latent_dim (default) for regular mode
+- Conditional (--conditional-predictor, default): Predictor uses [latent[:perf_dim], conditions]
+- Unconditional (--no-conditional-predictor): Predictor uses only [latent[:perf_dim]]
+"""
 
 from __future__ import annotations
 
@@ -22,7 +36,7 @@ import tqdm
 import tyro
 import wandb
 
-from engiopt.lvae_2d.aes import LeastVolumeAE_DynamicPruning
+from engiopt.lvae_2d.aes import InterpretableDesignLeastVolumeAE_DP
 from engiopt.lvae_2d.utils import polynomial_schedule
 from engiopt.lvae_2d.utils import spectral_norm_conv
 from engiopt.lvae_2d.utils import TrueSNDeconv2DCombo
@@ -37,7 +51,7 @@ class Args:
     """Algorithm name for tracking purposes."""
     track: bool = True
     """Whether to track with Weights & Biases."""
-    wandb_project: str = "lvae"
+    wandb_project: str = "d_lvae"
     """WandB project name."""
     wandb_entity: str | None = None
     """WandB entity name. If None, uses the default entity."""
@@ -45,10 +59,10 @@ class Args:
     """Random seed for reproducibility."""
     save_model: bool = False
     """Whether to save the model after training."""
-    sample_interval: int = 500  # How often to sample designs
+    sample_interval: int = 500
     """Interval for sampling designs during training."""
 
-    # Training dp
+    # Training parameters
     n_epochs: int = 2500
     """Number of training epochs."""
     batch_size: int = 128
@@ -61,6 +75,8 @@ class Args:
     """Dimensionality of the latent space (overestimate)."""
     w_v: float = 0.01
     """Weight for the volume loss."""
+    w_p: float = 1.0
+    """Weight for the performance prediction loss."""
     polynomial_schedule_n: int = 100
     """Number of epochs for the polynomial schedule."""
     polynomial_schedule_p: int = 2
@@ -76,21 +92,29 @@ class Args:
     use_spectral_norm: bool = True
     """Whether to use spectral normalization in the decoder (1-Lipschitz bound)."""
 
+    # MLP predictor parameters
+    predictor_hidden_dims: tuple[int, ...] = (256, 128)
+    """Hidden dimensions for the MLP predictor."""
+    conditional_predictor: bool = True
+    """Whether to include conditions in performance prediction (True) or use only latent codes (False)."""
+    perf_dim: int = -1
+    """Number of latent dimensions dedicated to performance prediction. If -1 (default), uses all latent_dim dimensions."""
+
     # Dynamic pruning
-    pruning_strategy: str = "lognorm"
+    pruning_strategy: str = "plummet"
     """Which pruning strategy to use: [plummet, pca_cdf, lognorm, probabilistic]."""
-    cdf_threshold: float = 0.99
+    cdf_threshold: float = 0.95
     """(pca_cdf) Cumulative variance threshold."""
     temperature: float = 1.0
     """(probabilistic) Sampling temperature."""
     plummet_threshold: float = 0.02
     """(plummet) Threshold for pruning dimensions."""
-    alpha: float = 0
-    """(lognorm) Weighting factor for blending reference and current distribution ()."""
-    percentile: float = 0.01
+    alpha: float = 0.2
+    """(lognorm) Weighting factor for blending reference and current distribution."""
+    percentile: float = 0.05
     """(lognorm) Percentile threshold for pruning."""
 
-    # Safeguard parameters (match aes.py defaults - "unsafe" by default)
+    # Safeguard parameters
     min_active_dims: int = 0
     """Never prune below this many dims (0 = no limit)."""
     max_prune_per_epoch: int | None = None
@@ -117,7 +141,7 @@ class Encoder(nn.Module):
     def __init__(self, latent_dim: int, design_shape: tuple[int, int], resize_dimensions: tuple[int, int] = (100, 100)):
         super().__init__()
         self.resize_in = transforms.Resize(resize_dimensions)
-        self.design_shape = design_shape  # Store design shape
+        self.design_shape = design_shape
 
         self.features = nn.Sequential(
             nn.Conv2d(1, 64, kernel_size=4, stride=2, padding=1, bias=False),  # 100→50
@@ -143,81 +167,11 @@ class Encoder(nn.Module):
         return self.to_latent(h).flatten(1)  # (B,latent_dim)
 
 
-# ---------- Decoder: 7→13→25→50→100 then (optional) resize to original ----------
-class Decoder(nn.Module):
-    """Latent vector --> binary pixel image.
-
-    • Latent   [latent_dim]
-    • Linear   [512*7*7]
-    • Reshape  [512x7x7]
-    • Deconv1  [256x13x13]  (k=3, s=2, p=1)
-    • Deconv2  [128x25x25]  (k=3, s=2, p=1)
-    • Deconv3  [64x50x50]   (k=4, s=2, p=1)
-    • Deconv4  [1x100x100]  (k=4, s=2, p=1)
-    """
-
-    def __init__(self, latent_dim: int, design_shape: tuple[int, int]):
-        super().__init__()
-        self.design_shape = design_shape  # Store design shape
-        self.resize_out = transforms.Resize(self.design_shape)
-        self.proj = nn.Sequential(
-            nn.Linear(latent_dim, 512 * 7 * 7),
-            nn.ReLU(inplace=True),
-        )
-        self.deconv = nn.Sequential(
-            # 7→13
-            nn.ConvTranspose2d(
-                512,
-                256,
-                kernel_size=3,
-                stride=2,
-                padding=1,
-                output_padding=0,
-                bias=False,
-            ),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            # 13→25
-            nn.ConvTranspose2d(
-                256,
-                128,
-                kernel_size=3,
-                stride=2,
-                padding=1,
-                output_padding=0,
-                bias=False,
-            ),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            # 25→50
-            nn.ConvTranspose2d(
-                128,
-                64,
-                kernel_size=4,
-                stride=2,
-                padding=1,
-                output_padding=0,
-                bias=False,
-            ),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            # 50→100
-            nn.ConvTranspose2d(64, 1, kernel_size=4, stride=2, padding=1, output_padding=0, bias=False),
-            nn.Sigmoid(),  # use Sigmoid for [0,1] images; use Tanh if you normalize to [-1,1]
-        )
-
-    def forward(self, z: th.Tensor) -> th.Tensor:
-        x = self.proj(z).view(z.size(0), 512, 7, 7)  # (B,512,7,7)
-        x = self.deconv(x)  # (B,1,100,100)
-        return self.resize_out(x)  # (B,1,H_orig,W_orig)
-
-
-# ---------- TrueSNDecoder: Same architecture as Decoder but with spectral normalization ----------
 class TrueSNDecoder(nn.Module):
     """Decoder with spectral normalization for 1-Lipschitz bound.
 
-    Same architecture as Decoder (7→13→25→50→100) but with spectral normalization
-    applied to all linear and convolutional layers.
+    Same architecture as standard decoder (7→13→25→50→100) but with spectral
+    normalization applied to all linear and convolutional layers.
 
     • Latent   [latent_dim]
     • Linear   [512*7*7]
@@ -240,7 +194,6 @@ class TrueSNDecoder(nn.Module):
         )
 
         # Build deconvolutional layers with spectral normalization
-        # Input shapes for each layer (needed for TrueSNDeconv2DCombo)
         self.deconv = nn.Sequential(
             # 7→13 (input shape: 7x7)
             TrueSNDeconv2DCombo(
@@ -295,6 +248,75 @@ class TrueSNDecoder(nn.Module):
         return self.resize_out(x)  # (B,1,H_orig,W_orig)
 
 
+class MLPPredictor(nn.Module):
+    """MLP that predicts performance from latent codes and conditions.
+
+    Takes concatenated [latent_code, conditions] as input and predicts
+    performance values through a series of fully connected layers.
+    """
+
+    def __init__(self, input_dim: int, output_dim: int, hidden_dims: tuple[int, ...] = (256, 128)):
+        super().__init__()
+        layers = []
+        prev_dim = input_dim
+        for hidden_dim in hidden_dims:
+            layers.append(nn.Linear(prev_dim, hidden_dim))
+            layers.append(nn.ReLU(inplace=True))
+            prev_dim = hidden_dim
+        layers.append(nn.Linear(prev_dim, output_dim))
+        self.net = nn.Sequential(*layers)
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        """Predict performance from latent codes + conditions."""
+        return self.net(x)
+
+
+class ConfigurableInterpretableDesignLVAE(InterpretableDesignLeastVolumeAE_DP):
+    """Wrapper around InterpretableDesignLeastVolumeAE_DP with conditional/unconditional prediction.
+
+    This variant uses only the first perf_dim latent dimensions for performance prediction,
+    making those dimensions interpretable as performance-relevant features.
+    """
+
+    def __init__(self, *args, conditional_predictor: bool = True, **kwargs):
+        """Initialize with conditional flag.
+
+        Args:
+            conditional_predictor: If True, predictor uses [z[:perf_dim], c]. If False, uses only [z[:perf_dim]].
+            *args, **kwargs: Passed to parent InterpretableDesignLeastVolumeAE_DP
+        """
+        super().__init__(*args, **kwargs)
+        self.conditional_predictor = conditional_predictor
+
+    def loss(self, batch, **kwargs):
+        """Compute losses using only first perf_dim latents for performance prediction."""
+        x, c, p = batch
+        z = self.encode(x)
+        x_hat = self.decode(z)
+
+        # Only the first pdim dimensions are used for performance prediction
+        pz = z[:, : self.pdim]
+
+        # Conditional: predictor uses first perf_dim latent codes + conditions,
+        # otherwise uses only the first perf_dim latent codes
+        p_hat = self.predictor(th.cat([pz, c], dim=-1)) if self.conditional_predictor else self.predictor(pz)
+
+        # Normalize targets and predictions
+        p_n = self._norm_perf(p)
+        p_hat_n = self._norm_perf(p_hat)
+
+        # Note: _update_moving_mean and pruning logic handled by parent class
+        active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
+
+        return th.stack(
+            [
+                self.loss_rec(x, x_hat),
+                self.loss_rec(p_n, p_hat_n),  # normalized prediction loss
+                active_ratio * self.loss_vol(z[:, ~self._p]),
+            ]
+        )
+
+
 if __name__ == "__main__":
     args = tyro.cli(Args)
 
@@ -331,46 +353,67 @@ if __name__ == "__main__":
     else:
         device = th.device("cpu")
 
+    # Build encoder and decoder
     enc = Encoder(args.latent_dim, design_shape, args.resize_dimensions)
-    if args.use_spectral_norm:
-        dec = TrueSNDecoder(args.latent_dim, design_shape)
-        print("Using TrueSNDecoder with spectral normalization (1-Lipschitz bound)")
-    else:
-        dec = Decoder(args.latent_dim, design_shape)
-        print("Using standard Decoder")
+    dec = TrueSNDecoder(args.latent_dim, design_shape)
+    print("Using TrueSNDecoder with spectral normalization (1-Lipschitz bound)")
 
-    # --- Build pruning parameters (match aes.py expectations) ---
+    # Build MLP predictor
+    # Determine perf_dim: if -1 (default), use all latent dimensions
+    perf_dim = args.latent_dim if args.perf_dim == -1 else args.perf_dim
+    n_perf = 1  # Can be adjusted based on problem
+
+    predictor_input_dim = perf_dim + (n_conds if args.conditional_predictor else 0)
+    predictor = MLPPredictor(
+        input_dim=predictor_input_dim,
+        output_dim=n_perf,
+        hidden_dims=args.predictor_hidden_dims,
+    )
+
+    print(f"Performance dimensions: {perf_dim}/{args.latent_dim} latent dimensions")
+    print(f"Predictor mode: {'Conditional' if args.conditional_predictor else 'Unconditional'}")
+    print(
+        f"Predictor input dimension: {predictor_input_dim} (perf_dim={perf_dim}, n_conds={n_conds if args.conditional_predictor else 0})"
+    )
+
+    # Build pruning parameters
     pruning_params = {}
     if args.pruning_strategy == "plummet":
         pruning_params["threshold"] = args.plummet_threshold
     elif args.pruning_strategy == "pca_cdf":
-        pruning_params["threshold"] = args.cdf_threshold  # aes.py expects "threshold", not "cdf_threshold"
+        pruning_params["threshold"] = args.cdf_threshold
     elif args.pruning_strategy == "probabilistic":
         pruning_params["temperature"] = args.temperature
     elif args.pruning_strategy == "lognorm":
         pruning_params["alpha"] = args.alpha
-        pruning_params["threshold"] = args.percentile  # aes.py expects "threshold" for percentile
+        pruning_params["threshold"] = args.percentile
     else:
         raise ValueError(f"Unknown pruning_strategy: {args.pruning_strategy}")
 
-    # Initialize LVAE with dynamic pruning and safeguards
-    lvae = LeastVolumeAE_DynamicPruning(
+    # Initialize DesignLVAE with dynamic pruning
+    # Always use interpretable version (generalizes to regular when perf_dim = latent_dim)
+    d_lvae = ConfigurableInterpretableDesignLVAE(
         encoder=enc,
         decoder=dec,
-        optimizer=Adam(list(enc.parameters()) + list(dec.parameters()), lr=args.lr),
+        predictor=predictor,
+        optimizer=Adam(
+            list(enc.parameters()) + list(dec.parameters()) + list(predictor.parameters()),
+            lr=args.lr,
+        ),
         latent_dim=args.latent_dim,
+        perf_dim=perf_dim,
         weights=polynomial_schedule(
-            [1.0, args.w_v],
+            [1.0, args.w_p, args.w_v],
             N=args.polynomial_schedule_n,
             p=args.polynomial_schedule_p,
-            w_init=[1.0, 0],
+            w_init=[1.0, 0, 0],
         ),
         pruning_epoch=args.pruning_epoch,
         beta=args.beta,
         eta=args.eta,
         pruning_strategy=args.pruning_strategy,
         pruning_params=pruning_params,
-        # Pass safeguards directly to constructor (not post-hoc)
+        conditional_predictor=args.conditional_predictor,
         min_active_dims=args.min_active_dims,
         max_prune_per_epoch=args.max_prune_per_epoch,
         cooldown_epochs=args.cooldown_epochs,
@@ -384,55 +427,85 @@ if __name__ == "__main__":
     val_ds = hf["val"]
     test_ds = hf["test"]
 
+    # Extract designs, conditions, and performance
     x_train = train_ds["optimal_design"][:].unsqueeze(1)
-    x_val = val_ds["optimal_design"][:].unsqueeze(1)
-    x_test = test_ds["optimal_design"][:].unsqueeze(1)
+    c_train = th.stack([train_ds[key][:] for key in problem.conditions_keys], dim=-1)
+    p_train = train_ds["optimal_value"][:].unsqueeze(-1)  # (N, 1)
 
-    loader = DataLoader(TensorDataset(x_train), batch_size=args.batch_size, shuffle=True)
-    val_loader = DataLoader(TensorDataset(x_val), batch_size=args.batch_size, shuffle=False)
+    x_val = val_ds["optimal_design"][:].unsqueeze(1)
+    c_val = th.stack([val_ds[key][:] for key in problem.conditions_keys], dim=-1)
+    p_val = val_ds["optimal_value"][:].unsqueeze(-1)
+
+    x_test = test_ds["optimal_design"][:].unsqueeze(1)
+    c_test = th.stack([test_ds[key][:] for key in problem.conditions_keys], dim=-1)
+    p_test = test_ds["optimal_value"][:].unsqueeze(-1)
+
+    loader = DataLoader(
+        TensorDataset(x_train, c_train, p_train),
+        batch_size=args.batch_size,
+        shuffle=True,
+    )
+    val_loader = DataLoader(
+        TensorDataset(x_val, c_val, p_val),
+        batch_size=args.batch_size,
+        shuffle=False,
+    )
+
+    # Track performance loss separately for plotting
+    perf_loss_history = []
 
     # ---- Training loop ----
     for epoch in range(args.n_epochs):
-        lvae.epoch_hook(epoch=epoch)
+        d_lvae.epoch_hook(epoch=epoch)
 
         bar = tqdm.tqdm(loader, desc=f"Epoch {epoch}")
         for i, batch in enumerate(bar):
             x_batch = batch[0].to(device)
-            lvae.optim.zero_grad()
-            losses = lvae.loss(x_batch)  # [rec,prd,vol]
-            loss = (losses * lvae.w).sum()  # apply weights
+            c_batch = batch[1].to(device)
+            p_batch = batch[2].to(device)
+
+            d_lvae.optim.zero_grad()
+            losses = d_lvae.loss((x_batch, c_batch, p_batch))  # [rec, perf, vol]
+            loss = (losses * d_lvae.w).sum()  # apply weights
             loss.backward()
-            lvae.optim.step()
+            d_lvae.optim.step()
 
             bar.set_postfix(
                 {
                     "rec": f"{losses[0].item():.3f}",
-                    "vol": f"{losses[1].item():.3f}",
-                    "dim": lvae.dim,
+                    "perf": f"{losses[1].item():.3f}",
+                    "vol": f"{losses[2].item():.3f}",
+                    "dim": d_lvae.dim,
                 }
             )
 
             # Log to wandb
             if args.track:
                 batches_done = epoch * len(bar) + i
+                perf_loss_history.append(losses[1].item())
+
                 wandb.log(
                     {
                         "rec_loss": losses[0].item(),
-                        "vol_loss": losses[1].item(),
+                        "perf_loss": losses[1].item(),
+                        "vol_loss": losses[2].item(),
                         "total_loss": loss.item(),
-                        "active_dims": lvae.dim,
+                        "active_dims": d_lvae.dim,
                         "epoch": epoch,
                     }
                 )
                 print(
-                    f"[Epoch {epoch}/{args.n_epochs}] [Batch {i}/{len(bar)}] [rec loss: {losses[0].item()}] [vol loss: {losses[1].item()}] [active dims: {lvae.dim}]"
+                    f"[Epoch {epoch}/{args.n_epochs}] [Batch {i}/{len(bar)}] "
+                    f"[rec loss: {losses[0].item():.4f}] [perf loss: {losses[1].item():.4f}] "
+                    f"[vol loss: {losses[2].item():.4f}] [active dims: {d_lvae.dim}]"
                 )
+
                 # Sample and visualize at regular intervals
                 if batches_done % args.sample_interval == 0:
                     with th.no_grad():
                         # Encode test designs
                         Xs = x_test.to(device)
-                        z = lvae.encode(Xs)
+                        z = d_lvae.encode(Xs)
                         z_std, idx = th.sort(z.std(0), descending=True)
                         z_mean = z.mean(0)
                         N = (z_std > 0).sum().item()
@@ -441,18 +514,38 @@ if __name__ == "__main__":
                         x_ints = []
                         for alpha in [0, 0.25, 0.5, 0.75, 1]:
                             z_ = alpha * z[:25] + (1 - alpha) * th.roll(z, 1, 0)[:25]
-                            x_ints.append(lvae.decode(z_).cpu().numpy())
+                            x_ints.append(d_lvae.decode(z_).cpu().numpy())
 
                         # Generate random designs
                         z_rand = z_mean.unsqueeze(0).repeat([25, 1])
                         z_rand[:, idx[:N]] += z_std[:N] * th.randn_like(z_rand[:, idx[:N]])
-                        x_rand = lvae.decode(z_rand).cpu().numpy()
+                        x_rand = d_lvae.decode(z_rand).cpu().numpy()
+
+                        # Get performance predictions
+                        pz_test = z[:, :perf_dim]
+                        if args.conditional_predictor:
+                            p_pred = d_lvae.predictor(th.cat([pz_test, c_test.to(device)], dim=-1))
+                        else:
+                            p_pred = d_lvae.predictor(pz_test)
+                        p_actual = p_test.cpu().numpy().flatten()
+                        p_predicted = p_pred.cpu().numpy().flatten()
 
                         # Move tensors to CPU for plotting
                         z_std_cpu = z_std.cpu().numpy()
                         Xs_cpu = Xs.cpu().numpy()
 
-                    # Plot 1: Latent dimension statistics
+                    # Plot 1: Performance loss history
+                    plt.figure(figsize=(10, 6))
+                    plt.plot(perf_loss_history)
+                    plt.xlabel("Training Step")
+                    plt.ylabel("Performance Loss")
+                    plt.title("Performance Prediction Loss over Training")
+                    plt.yscale("log")
+                    plt.grid(True, alpha=0.3)
+                    plt.savefig(f"images/perf_loss_{batches_done}.png")
+                    plt.close()
+
+                    # Plot 2: Latent dimension statistics
                     plt.figure(figsize=(12, 6))
                     plt.subplot(211)
                     plt.bar(np.arange(len(z_std_cpu)), z_std_cpu)
@@ -468,15 +561,15 @@ if __name__ == "__main__":
                     plt.savefig(f"images/dim_{batches_done}.png")
                     plt.close()
 
-                    # Plot 2: Interpolated designs
+                    # Plot 3: Interpolated designs
                     fig, axs = plt.subplots(25, 6, figsize=(12, 25))
-                    for i, j in product(range(25), range(5)):  # noqa: PLW2901
+                    for i, j in product(range(25), range(5)):
                         axs[i, j + 1].imshow(x_ints[j][i].reshape(design_shape))
                         axs[i, j + 1].axis("off")
                         axs[i, j + 1].set_aspect("equal")
                     for ax, alpha in zip(axs[0, 1:], [0, 0.25, 0.5, 0.75, 1]):
                         ax.set_title(rf"$\alpha$ = {alpha}")
-                    for i in range(25):  # noqa: PLW2901
+                    for i in range(25):
                         axs[i, 0].imshow(Xs_cpu[i].reshape(design_shape))
                         axs[i, 0].axis("off")
                         axs[i, 0].set_aspect("equal")
@@ -485,9 +578,9 @@ if __name__ == "__main__":
                     plt.savefig(f"images/interp_{batches_done}.png")
                     plt.close()
 
-                    # Plot 3: Random designs from latent space
+                    # Plot 4: Random designs from latent space
                     fig, axs = plt.subplots(5, 5, figsize=(15, 7.5))
-                    for k, (i, j) in enumerate(product(range(5), range(5))):  # noqa: PLW2901
+                    for k, (i, j) in enumerate(product(range(5), range(5))):
                         axs[i, j].imshow(x_rand[k].reshape(design_shape))
                         axs[i, j].axis("off")
                         axs[i, j].set_aspect("equal")
@@ -496,40 +589,62 @@ if __name__ == "__main__":
                     plt.savefig(f"images/norm_{batches_done}.png")
                     plt.close()
 
+                    # Plot 5: Predicted vs actual performance
+                    plt.figure(figsize=(8, 8))
+                    plt.scatter(p_actual, p_predicted, alpha=0.5, s=20)
+                    min_val = min(p_actual.min(), p_predicted.min())
+                    max_val = max(p_actual.max(), p_predicted.max())
+                    plt.plot([min_val, max_val], [min_val, max_val], "r--", linewidth=2, label="1:1 line")
+                    plt.xlabel("Actual Performance")
+                    plt.ylabel("Predicted Performance")
+                    plt.title(f"Predicted vs Actual Performance (Step {batches_done})")
+                    plt.grid(True, alpha=0.3)
+                    plt.legend()
+                    plt.axis("equal")
+                    plt.tight_layout()
+                    plt.savefig(f"images/perf_pred_vs_actual_{batches_done}.png")
+                    plt.close()
+
                     # Log all plots to wandb
                     wandb.log(
                         {
+                            "perf_loss_plot": wandb.Image(f"images/perf_loss_{batches_done}.png"),
                             "dim_plot": wandb.Image(f"images/dim_{batches_done}.png"),
                             "interp_plot": wandb.Image(f"images/interp_{batches_done}.png"),
                             "norm_plot": wandb.Image(f"images/norm_{batches_done}.png"),
+                            "perf_pred_vs_actual": wandb.Image(f"images/perf_pred_vs_actual_{batches_done}.png"),
                         }
                     )
 
-        # ---- validation (batched, no graph) ----
+        # ---- Validation (batched, no graph) ----
         with th.no_grad():
-            lvae.eval()
-            val_rec = val_vol = 0.0
+            d_lvae.eval()
+            val_rec = val_perf = val_vol = 0.0
             n = 0
             for batch_v in val_loader:
                 x_v = batch_v[0].to(device)
-                vlosses = lvae.loss(x_v)
+                c_v = batch_v[1].to(device)
+                p_v = batch_v[2].to(device)
+                vlosses = d_lvae.loss((x_v, c_v, p_v))
                 bsz = x_v.size(0)
                 val_rec += vlosses[0].item() * bsz
-                val_vol += vlosses[1].item() * bsz
+                val_perf += vlosses[1].item() * bsz
+                val_vol += vlosses[2].item() * bsz
                 n += bsz
         val_rec /= n
+        val_perf /= n
         val_vol /= n
-        val_total = val_rec + args.w_v * val_vol
+        val_total = val_rec + args.w_p * val_perf + args.w_v * val_vol
 
         # Pass validation reconstruction loss to pruning logic
-        lvae.epoch_report(epoch=epoch, callbacks=[], batch=None, loss=loss, pbar=None, val_recon=val_rec)
+        d_lvae.epoch_report(epoch=epoch, callbacks=[], batch=None, loss=loss, pbar=None, val_recon=val_rec)
 
         if args.track:
-            # single commit per epoch → Hyperband “iteration” == epoch
             wandb.log(
                 {
                     "epoch": epoch,
                     "val_rec": val_rec,
+                    "val_perf": val_perf,
                     "val_vol_loss": val_vol,
                     "val_total_loss": val_total,
                 },
@@ -537,23 +652,22 @@ if __name__ == "__main__":
             )
 
         th.cuda.empty_cache()
-        lvae.train()
+        d_lvae.train()
 
-        # --------------
-        #  Save models
-        # --------------
+        # Save models at end of training
         if args.save_model and epoch == args.n_epochs - 1:
-            ckpt_lvae = {
+            ckpt_d_lvae = {
                 "epoch": epoch,
                 "batches_done": batches_done,
-                "encoder": lvae.encoder.state_dict(),
-                "decoder": lvae.decoder.state_dict(),
-                "optimizer": lvae.optim.state_dict(),
+                "encoder": d_lvae.encoder.state_dict(),
+                "decoder": d_lvae.decoder.state_dict(),
+                "predictor": d_lvae.predictor.state_dict(),
+                "optimizer": d_lvae.optim.state_dict(),
                 "losses": losses.tolist(),
             }
-            th.save(ckpt_lvae, "lvae.pth")
+            th.save(ckpt_d_lvae, "d_lvae.pth")
             artifact = wandb.Artifact(f"{args.problem_id}_{args.algo}", type="model")
-            artifact.add_file("lvae.pth")
+            artifact.add_file("d_lvae.pth")
             wandb.log_artifact(artifact, aliases=[f"seed_{args.seed}"])
 
     wandb.finish()
