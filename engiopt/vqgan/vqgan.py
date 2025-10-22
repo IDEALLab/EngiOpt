@@ -95,9 +95,9 @@ class Args:
     """feature map dimension for the CVQGAN encoder output"""
     batch_size_cvqgan: int = 16
     """size of the batches for CVQGAN"""
-    n_epochs_cvqgan: int = 1000  # Default: 1000
+    n_epochs_cvqgan: int = 1000
     """number of epochs of CVQGAN training"""
-    cond_lr: float = 2e-4  # Default: 2e-4
+    cond_lr: float = 2e-4
     """learning rate for CVQGAN"""
     latent_size: int = 16
     """size of the latent feature map (automatically determined later)"""
@@ -106,11 +106,11 @@ class Args:
 
     # Algorithm-specific: Stage 1 (AE)
     # From original implementation: assume image_channels=1, use greyscale LPIPS only, use_Online=True, determine image_size automatically, calculate decoder_start_resolution automatically
-    n_epochs_vqgan: int = 100  # Default: 100
+    n_epochs_vqgan: int = 100
     """number of epochs of training"""
     batch_size_vqgan: int = 16
     """size of the batches for Stage 1"""
-    lr_vqgan: float = 5e-5  # Default: 2e-4
+    lr_vqgan: float = 5e-5
     """learning rate for Stage 1"""
     beta: float = 0.25
     """beta hyperparameter for the codebook commitment loss"""
@@ -149,7 +149,7 @@ class Args:
 
     # Algorithm-specific: Stage 2 (Transformer)
     # From original implementation: assume pkeep=1.0, sos_token=0, bias=True
-    n_epochs_transformer: int = 100  # Default: 100
+    n_epochs_transformer: int = 100
     """number of epochs of training"""
     early_stopping: bool = True
     """whether to use early stopping for the transformer; if True requires args.track to be True"""
@@ -159,7 +159,7 @@ class Args:
     """minimum change in the monitored quantity to qualify as an improvement"""
     batch_size_transformer: int = 16
     """size of the batches for Stage 2"""
-    lr_transformer: float = 6e-4  # Default: 6e-4
+    lr_transformer: float = 6e-4
     """learning rate for Stage 2"""
     n_layer: int = 12
     """number of layers in the transformer"""
