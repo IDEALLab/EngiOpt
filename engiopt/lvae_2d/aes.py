@@ -158,37 +158,35 @@ class VAE(AutoEncoder):
 class LeastVolumeAE(AutoEncoder):
     """Autoencoder with volume-regularization loss.
 
-    Minimizes the volume of the latent space (product of standard deviations)
+    Minimizes the volume of the latent space (geometric mean of standard deviations)
     in addition to reconstruction error, promoting a compact representation.
+
+    Volume loss is computed as: exp(mean(log(std_i + eta)))
+    where std_i is the standard deviation of each latent dimension and eta is a small
+    constant for numerical stability.
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         encoder,
         decoder,
         optimizer,
         weights=None,
-        eta=1,
-        vol_ref_warmup_epochs: int = 5,
-        vol_ref_momentum: float = 0.9,
-        *,
-        normalize_vol: bool = True,
-        per_dim_ref: bool = True,
+        eta=1e-4,
     ):
+        """Initialize the least-volume autoencoder.
+
+        Args:
+            encoder: Encoder network
+            decoder: Decoder network
+            optimizer: Optimizer instance
+            weights: Loss weights [reconstruction, volume]. Default: [1.0, 0.001]
+            eta: Smoothing constant for volume loss computation. Default: 1e-4
+        """
         if weights is None:
             weights = [1.0, 0.001]
         super().__init__(encoder, decoder, optimizer, weights)
         self.eta = eta
-        self.normalize_vol = normalize_vol
-        self.vol_ref_warmup_epochs = vol_ref_warmup_epochs
-        self.vol_ref_momentum = vol_ref_momentum
-        self.per_dim_ref = per_dim_ref
-        self.register_buffer("_sigma_ref", None)  # shape matches latent dims
-        self.register_buffer("_epoch_buf", torch.zeros((), dtype=torch.long))
-
-    def epoch_hook(self, epoch, *args, **kwargs):
-        super().epoch_hook(epoch, *args, **kwargs)
-        self._epoch_buf.fill_(epoch)
 
     def loss(self, x, **kwargs):  # noqa: ARG002
         """Compute reconstruction and volume losses."""
@@ -197,36 +195,21 @@ class LeastVolumeAE(AutoEncoder):
         return torch.stack([self.loss_rec(x, x_hat), self.loss_vol(z)])
 
     def loss_vol(self, z):
-        """Compute volume loss with optional normalization.
+        """Compute volume loss as geometric mean of latent standard deviations.
 
-        Volume is the geometric mean of standard deviations (in log space).
-        Normalization makes the loss dimensionless and ~ 1.0 at initialization.
+        Volume loss = exp(mean(log(std_i + eta)))
+
+        This measures the "volume" of the latent space distribution. Lower values
+        indicate more compressed/compact representations.
+
+        Args:
+            z: Latent codes of shape (batch_size, latent_dim)
+
+        Returns:
+            Scalar volume loss (geometric mean of standard deviations)
         """
-        s = z.std(0)
-
-        if not self.normalize_vol:
-            return torch.exp(torch.log(s + self.eta).mean())
-
-        # Initialize reference on first call
-        if self._sigma_ref is None or self._sigma_ref.shape != s.shape:
-            if self.per_dim_ref:
-                self._sigma_ref = s.detach().clone()
-            else:
-                scal = s.median().detach()
-                self._sigma_ref = scal.expand_as(s)
-
-        # EMA update only during warmup and only in training mode
-        if self.training and (self._epoch_buf.item() < self.vol_ref_warmup_epochs):
-            with torch.no_grad():
-                alpha = self.vol_ref_momentum
-                if self.per_dim_ref:
-                    self._sigma_ref = alpha * self._sigma_ref + (1 - alpha) * s
-                else:
-                    scal = s.median()
-                    self._sigma_ref = alpha * self._sigma_ref + (1 - alpha) * scal.expand_as(s)
-
-        # Compute dimensionless normalized volume (≈1 initially)
-        return torch.exp(torch.log((s + self.eta) / (self._sigma_ref + self.eta)).mean())
+        s = z.std(0)  # Standard deviation per dimension
+        return torch.exp(torch.log(s + self.eta).mean())
 
 
 class PruningPolicy:
@@ -752,11 +735,10 @@ class InterpretableDesignLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa
     This variant enforces that the first `perf_dim` latent dimensions are dedicated
     to performance prediction, making them more interpretable. Extends
     LeastVolumeAE_DynamicPruning with performance prediction capabilities.
-    """
 
-    _p_mu: torch.Tensor
-    _p_std: torch.Tensor
-    _perf_epoch_buf: torch.Tensor
+    Performance values should be pre-scaled externally (e.g., using RobustScaler)
+    before being passed to the loss function. No runtime normalization is applied.
+    """
 
     def __init__(  # noqa: PLR0913
         self,
@@ -774,10 +756,6 @@ class InterpretableDesignLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa
         pruning_strategy="plummet",
         pruning_params=None,
         *,
-        normalize_perf: bool = True,
-        perf_ref_warmup_epochs: int = 5,
-        perf_ref_momentum: float = 0.9,
-        per_dim_perf_ref: bool = True,
         # Safeguard parameters (inherited from parent with same defaults)
         min_active_dims: int = 0,
         max_prune_per_epoch: int | None = None,
@@ -792,12 +770,11 @@ class InterpretableDesignLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa
 
         Performance-specific args:
             perf_dim: Number of latent dimensions dedicated to performance prediction
-            normalize_perf: Whether to normalize performance values
-            perf_ref_warmup_epochs: Epochs to warm up performance normalization
-            perf_ref_momentum: EMA momentum for performance stats
-            per_dim_perf_ref: Whether to normalize per dimension or globally
 
         All other args (including safeguards) are inherited from LeastVolumeAE_DynamicPruning.
+
+        Note: Performance values should be pre-scaled externally (e.g., using RobustScaler)
+        before being passed to the loss function.
         """
         if weights is None:
             weights = [1.0, 1.0, 0.001]
@@ -828,51 +805,12 @@ class InterpretableDesignLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa
         self.predictor = predictor
         self.pdim = perf_dim
 
-        self.normalize_perf = normalize_perf
-        self.perf_ref_warmup_epochs = perf_ref_warmup_epochs
-        self.perf_ref_momentum = perf_ref_momentum
-        self.per_dim_perf_ref = per_dim_perf_ref
-        self.register_buffer("_p_mu", torch.tensor(0.0))
-        self.register_buffer("_p_std", torch.tensor(1.0))
-        self.register_buffer("_perf_epoch_buf", torch.zeros((), dtype=torch.long))
-
-    def epoch_hook(self, epoch, *args, **kwargs):
-        """Track current epoch for warmup scheduling."""
-        super().epoch_hook(epoch, *args, **kwargs)
-        self._perf_epoch_buf.fill_(epoch)
-
-    def _norm_perf(self, p: torch.Tensor) -> torch.Tensor:
-        """Normalize performance values using exponential moving average statistics."""
-        if not self.normalize_perf:
-            return p
-
-        if self._p_mu.numel() == 1 and self._p_mu.item() == 0.0:
-            if self.per_dim_perf_ref:
-                mu = p.mean(0).detach()
-                std = p.std(0).detach().clamp_min(1e-8)
-            else:
-                mu = p.mean().detach().expand_as(p.mean(0))
-                std = p.std().detach().clamp_min(1e-8).expand_as(p.std(0))
-            self._p_mu = mu
-            self._p_std = std
-
-        if self.training and (self._perf_epoch_buf.item() < self.perf_ref_warmup_epochs):
-            with torch.no_grad():
-                if self.per_dim_perf_ref:
-                    mu = p.mean(0)
-                    std = p.std(0).clamp_min(1e-8)
-                else:
-                    mu = p.mean().expand_as(self._p_mu)
-                    std = p.std().clamp_min(1e-8).expand_as(self._p_std)
-                a = self.perf_ref_momentum
-                self._p_mu = a * self._p_mu + (1 - a) * mu
-                self._p_std = a * self._p_std + (1 - a) * std
-
-        return (p - self._p_mu) / self._p_std
-
     def loss(self, batch, **kwargs):  # noqa: ARG002
-        """Compute losses using only first pdim latents for performance prediction."""
-        x, c, p = batch
+        """Compute losses using only first pdim latents for performance prediction.
+
+        Note: Performance values (p) should be pre-scaled externally before training.
+        """
+        x, c, p = batch  # p is already scaled externally
         z = self.encode(x)
         x_hat = self.decode(z)
 
@@ -880,17 +818,14 @@ class InterpretableDesignLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa
         pz = z[:, : self.pdim]
         p_hat = self.predictor(torch.cat([pz, c], dim=-1))
 
-        # Normalize targets and predictions
-        p_n = self._norm_perf(p)
-        p_hat_n = self._norm_perf(p_hat)
-
+        # Direct MSE on pre-scaled values (no runtime normalization)
         # Note: _update_moving_mean and pruning logic handled by parent class
         active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
 
         return torch.stack(
             [
                 self.loss_rec(x, x_hat),
-                self.loss_rec(p_n, p_hat_n),  # normalized prediction loss
+                self.loss_rec(p, p_hat),  # Both already scaled
                 active_ratio * self.loss_vol(z[:, ~self._p]),
             ]
         )

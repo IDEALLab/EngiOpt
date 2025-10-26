@@ -103,6 +103,10 @@ class Args:
     """Whether to include conditions in performance prediction (True) or use only latent codes (False)."""
     perf_dim: int = -1
     """Number of latent dimensions dedicated to performance prediction. If -1 (default), uses all latent_dim dimensions."""
+    predictor_lipschitz_scale: float = 1.0
+    """Lipschitz constant multiplier for SNMLPPredictor (1.0 = strict 1-Lipschitz, >1 = relaxed c-Lipschitz)."""
+    decoder_lipschitz_scale: float = 1.0
+    """Lipschitz constant multiplier for TrueSNDecoder (1.0 = strict 1-Lipschitz, >1 = relaxed c-Lipschitz for higher expressiveness)."""
 
     # Dynamic pruning
     pruning_strategy: str = "lognorm"
@@ -184,12 +188,17 @@ class TrueSNDecoder(nn.Module):
     • Deconv2  [128x25x25]  (k=3, s=2, p=1)
     • Deconv3  [64x50x50]   (k=4, s=2, p=1)
     • Deconv4  [1x100x100]  (k=4, s=2, p=1)
+
+    The lipschitz_scale parameter relaxes the strict 1-Lipschitz constraint:
+    - lipschitz_scale = 1.0: Strict 1-Lipschitz (default)
+    - lipschitz_scale > 1.0: Relaxed c-Lipschitz for higher expressiveness
     """
 
-    def __init__(self, latent_dim: int, design_shape: tuple[int, int]):
+    def __init__(self, latent_dim: int, design_shape: tuple[int, int], lipschitz_scale: float = 1.0):
         super().__init__()
         self.design_shape = design_shape
         self.resize_out = transforms.Resize(self.design_shape)
+        self.lipschitz_scale = lipschitz_scale
 
         # Spectral normalized linear projection
         self.proj = nn.Sequential(
@@ -249,24 +258,32 @@ class TrueSNDecoder(nn.Module):
         """Forward pass through the spectral normalized decoder."""
         x = self.proj(z).view(z.size(0), 512, 7, 7)  # (B,512,7,7)
         x = self.deconv(x)  # (B,1,100,100)
-        return self.resize_out(x)  # (B,1,H_orig,W_orig)
+        x = self.resize_out(x)  # (B,1,H_orig,W_orig)
+        return x * self.lipschitz_scale
 
 
 class SNMLPPredictor(nn.Module):
     """Spectral normalized MLP that predicts performance from latent codes.
 
-    Enforces 1-Lipschitz continuity to ensure small steps in latent space
-    correspond to small steps in performance space. Critical for:
+    Enforces c-Lipschitz continuity to ensure small steps in latent space
+    correspond to bounded steps in performance space. Critical for:
     - Smooth optimization in latent space
     - Interpretable performance gradients
     - Stable surrogate-based design search
 
     Uses SNLinearCombo (spectral normalized Linear + ReLU) for hidden layers
     and spectral normalized Linear for the output layer.
+
+    The lipschitz_scale parameter relaxes the strict 1-Lipschitz constraint:
+    - lipschitz_scale = 1.0: Strict 1-Lipschitz (default)
+    - lipschitz_scale > 1.0: Relaxed c-Lipschitz for high-dynamic-range objectives
     """
 
-    def __init__(self, input_dim: int, output_dim: int, hidden_dims: tuple[int, ...] = (256, 128)):
+    def __init__(
+        self, input_dim: int, output_dim: int, hidden_dims: tuple[int, ...] = (256, 128), lipschitz_scale: float = 1.0
+    ):
         super().__init__()
+        self.lipschitz_scale = lipschitz_scale
         layers = []
         prev_dim = input_dim
         for hidden_dim in hidden_dims:
@@ -278,7 +295,7 @@ class SNMLPPredictor(nn.Module):
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         """Predict performance from latent codes + conditions."""
-        return self.net(x)
+        return self.net(x) * self.lipschitz_scale
 
 
 class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
@@ -299,8 +316,11 @@ class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
         self.conditional_predictor = conditional_predictor
 
     def loss(self, batch, **kwargs):
-        """Compute losses using only first perf_dim latents for performance prediction."""
-        x, c, p = batch
+        """Compute losses using only first perf_dim latents for performance prediction.
+
+        Note: Performance values (p) should be pre-scaled externally before training.
+        """
+        x, c, p = batch  # p is already scaled externally
         z = self.encode(x)
         x_hat = self.decode(z)
 
@@ -311,17 +331,14 @@ class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
         # otherwise uses only the first perf_dim latent codes
         p_hat = self.predictor(th.cat([pz, c], dim=-1)) if self.conditional_predictor else self.predictor(pz)
 
-        # Normalize targets and predictions
-        p_n = self._norm_perf(p)
-        p_hat_n = self._norm_perf(p_hat)
-
+        # Direct MSE on pre-scaled values (no runtime normalization)
         # Note: _update_moving_mean and pruning logic handled by parent class
         active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
 
         return th.stack(
             [
                 self.loss_rec(x, x_hat),
-                self.loss_rec(p_n, p_hat_n),  # normalized prediction loss
+                self.loss_rec(p, p_hat),  # Both already scaled
                 active_ratio * self.loss_vol(z[:, ~self._p]),
             ]
         )
@@ -365,9 +382,9 @@ if __name__ == "__main__":
 
     # Build encoder and decoder (always use spectral normalization)
     enc = Encoder(args.latent_dim, design_shape, args.resize_dimensions)
-    dec = TrueSNDecoder(args.latent_dim, design_shape)
-    print("Using TrueSNDecoder with spectral normalization (1-Lipschitz bound)")
-    print("Using SNMLPPredictor with spectral normalization for performance prediction")
+    dec = TrueSNDecoder(args.latent_dim, design_shape, lipschitz_scale=args.decoder_lipschitz_scale)
+    print(f"Using TrueSNDecoder with spectral normalization (Lipschitz scale: {args.decoder_lipschitz_scale})")
+    print(f"Using SNMLPPredictor with spectral normalization (Lipschitz scale: {args.predictor_lipschitz_scale})")
 
     # Build MLP predictor
     # Determine perf_dim: if -1 (default), use all latent dimensions
@@ -379,6 +396,7 @@ if __name__ == "__main__":
         input_dim=predictor_input_dim,
         output_dim=n_perf,
         hidden_dims=args.predictor_hidden_dims,
+        lipschitz_scale=args.predictor_lipschitz_scale,
     )
 
     print(f"Performance dimensions: {perf_dim}/{args.latent_dim} latent dimensions")
@@ -451,19 +469,33 @@ if __name__ == "__main__":
     c_test = th.stack([test_ds[key][:] for key in problem.conditions_keys], dim=-1)
     p_test = test_ds[problem.objectives_keys[0]][:].unsqueeze(-1)
 
+    # Scale performance values using RobustScaler
+    from sklearn.preprocessing import RobustScaler
+
+    p_scaler = RobustScaler()
+    p_train_scaled = th.from_numpy(p_scaler.fit_transform(p_train.numpy())).to(p_train.dtype)
+    p_val_scaled = th.from_numpy(p_scaler.transform(p_val.numpy())).to(p_val.dtype)
+    p_test_scaled = th.from_numpy(p_scaler.transform(p_test.numpy())).to(p_test.dtype)
+
+    print(f"\n{'=' * 60}")
+    print("Performance Scaling Statistics")
+    print(f"{'=' * 60}")
+    print(f"RobustScaler center: {p_scaler.center_[0]:.6f}")
+    print(f"RobustScaler scale:  {p_scaler.scale_[0]:.6f}")
+    print(f"Original range:      [{p_train.min():.6f}, {p_train.max():.6f}]")
+    print(f"Scaled range:        [{p_train_scaled.min():.6f}, {p_train_scaled.max():.6f}]")
+    print(f"{'=' * 60}\n")
+
     loader = DataLoader(
-        TensorDataset(x_train, c_train, p_train),
+        TensorDataset(x_train, c_train, p_train_scaled),
         batch_size=args.batch_size,
         shuffle=True,
     )
     val_loader = DataLoader(
-        TensorDataset(x_val, c_val, p_val),
+        TensorDataset(x_val, c_val, p_val_scaled),
         batch_size=args.batch_size,
         shuffle=False,
     )
-
-    # Track performance loss separately for plotting
-    perf_loss_history = []
 
     # ---- Training loop ----
     for epoch in range(args.n_epochs):
@@ -493,7 +525,6 @@ if __name__ == "__main__":
             # Log to wandb
             if args.track:
                 batches_done = epoch * len(bar) + i
-                perf_loss_history.append(losses[1].item())
 
                 wandb.log(
                     {
@@ -535,28 +566,19 @@ if __name__ == "__main__":
                         # Get performance predictions
                         pz_test = z[:, :perf_dim]
                         if args.conditional_predictor:
-                            p_pred = d_lvae.predictor(th.cat([pz_test, c_test.to(device)], dim=-1))
+                            p_pred_scaled = d_lvae.predictor(th.cat([pz_test, c_test.to(device)], dim=-1))
                         else:
-                            p_pred = d_lvae.predictor(pz_test)
-                        p_actual = p_test.cpu().numpy().flatten()
-                        p_predicted = p_pred.cpu().numpy().flatten()
+                            p_pred_scaled = d_lvae.predictor(pz_test)
+
+                        # Inverse transform to get true-scale values for plotting
+                        p_actual = p_scaler.inverse_transform(p_test_scaled.cpu().numpy()).flatten()
+                        p_predicted = p_scaler.inverse_transform(p_pred_scaled.cpu().numpy()).flatten()
 
                         # Move tensors to CPU for plotting
                         z_std_cpu = z_std.cpu().numpy()
                         Xs_cpu = Xs.cpu().numpy()
 
-                    # Plot 1: Performance loss history
-                    plt.figure(figsize=(10, 6))
-                    plt.plot(perf_loss_history)
-                    plt.xlabel("Training Step")
-                    plt.ylabel("Performance Loss")
-                    plt.title("Performance Prediction Loss over Training")
-                    plt.yscale("log")
-                    plt.grid(True, alpha=0.3)
-                    plt.savefig(f"images/perf_loss_{batches_done}.png")
-                    plt.close()
-
-                    # Plot 2: Latent dimension statistics
+                    # Plot 1: Latent dimension statistics
                     plt.figure(figsize=(12, 6))
                     plt.subplot(211)
                     plt.bar(np.arange(len(z_std_cpu)), z_std_cpu)
@@ -572,7 +594,7 @@ if __name__ == "__main__":
                     plt.savefig(f"images/dim_{batches_done}.png")
                     plt.close()
 
-                    # Plot 3: Interpolated designs
+                    # Plot 2: Interpolated designs
                     fig, axs = plt.subplots(25, 6, figsize=(12, 25))
                     for i, j in product(range(25), range(5)):
                         axs[i, j + 1].imshow(x_ints[j][i].reshape(design_shape))
@@ -589,7 +611,7 @@ if __name__ == "__main__":
                     plt.savefig(f"images/interp_{batches_done}.png")
                     plt.close()
 
-                    # Plot 4: Random designs from latent space
+                    # Plot 3: Random designs from latent space
                     fig, axs = plt.subplots(5, 5, figsize=(15, 7.5))
                     for k, (i, j) in enumerate(product(range(5), range(5))):
                         axs[i, j].imshow(x_rand[k].reshape(design_shape))
@@ -600,7 +622,7 @@ if __name__ == "__main__":
                     plt.savefig(f"images/norm_{batches_done}.png")
                     plt.close()
 
-                    # Plot 5: Predicted vs actual performance
+                    # Plot 4: Predicted vs actual performance
                     plt.figure(figsize=(8, 8))
                     plt.scatter(p_actual, p_predicted, alpha=0.5, s=20)
                     min_val = min(p_actual.min(), p_predicted.min())
@@ -608,7 +630,7 @@ if __name__ == "__main__":
                     plt.plot([min_val, max_val], [min_val, max_val], "r--", linewidth=2, label="1:1 line")
                     plt.xlabel("Actual Performance")
                     plt.ylabel("Predicted Performance")
-                    plt.title(f"Predicted vs Actual Performance (Step {batches_done})")
+                    plt.title(f"MSE: {np.mean((p_actual - p_predicted) ** 2):.4f}")
                     plt.grid(True, alpha=0.3)
                     plt.legend()
                     plt.axis("equal")
@@ -675,6 +697,8 @@ if __name__ == "__main__":
                 "predictor": d_lvae.predictor.state_dict(),
                 "optimizer": d_lvae.optim.state_dict(),
                 "losses": losses.tolist(),
+                "p_scaler": p_scaler,  # Save scaler for inference
+                "args": vars(args),  # Save args for reference
             }
             th.save(ckpt_d_lvae, "d_lvae.pth")
             artifact = wandb.Artifact(f"{args.problem_id}_{args.algo}", type="model")
