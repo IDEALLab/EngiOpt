@@ -324,6 +324,9 @@ class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
         z = self.encode(x)
         x_hat = self.decode(z)
 
+        # Update moving mean for pruning statistics
+        self._update_moving_mean(z)
+
         # Only the first pdim dimensions are used for performance prediction
         pz = z[:, : self.pdim]
 
@@ -332,7 +335,6 @@ class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
         p_hat = self.predictor(th.cat([pz, c], dim=-1)) if self.conditional_predictor else self.predictor(pz)
 
         # Direct MSE on pre-scaled values (no runtime normalization)
-        # Note: _update_moving_mean and pruning logic handled by parent class
         active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
 
         return th.stack(
