@@ -641,7 +641,6 @@ if __name__ == "__main__":
                     # Log all plots to wandb
                     wandb.log(
                         {
-                            "perf_loss_plot": wandb.Image(f"images/perf_loss_{batches_done}.png"),
                             "dim_plot": wandb.Image(f"images/dim_{batches_done}.png"),
                             "interp_plot": wandb.Image(f"images/interp_{batches_done}.png"),
                             "norm_plot": wandb.Image(f"images/norm_{batches_done}.png"),
