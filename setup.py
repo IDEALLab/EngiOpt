@@ -15,4 +15,9 @@ def get_version():
     raise RuntimeError("bad version data in __init__.py")
 
 
-setup(name="engiopt", version=get_version(), long_description=open("README.md").read())
+setup(
+    name="engiopt",
+    version=get_version(),
+    long_description=open("README.md", encoding="utf-8").read(),
+    long_description_content_type="text/markdown",
+)

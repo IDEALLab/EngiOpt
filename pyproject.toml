@@ -38,6 +38,8 @@ dependencies = [
     "hyppo >= 0.5.0",
     "kaleido >= 0.2.1",
     "datasets >=4.0.0",
+    "einops >=0.8.0",
+    "requests >=2.31.0",
 ]
 dynamic = ["version"]
 
@@ -132,7 +134,6 @@ ignore = [
   "S607",     # start-process-with-partial-path
   "T201",     # print
   "TRY003",     # print
-  "PD901",     # avoid using df to name dataframe
 ]
 extend-select = ["I"]
 
@@ -255,7 +256,7 @@ exclude = [
   ".*/templates/.*",
   "^engibench_studies/problems/airfoil/study_[^/]*/",
   "^docs/",
-  "^wandb/",
+  "wandb/.*",
 ]
 [[tool.mypy.overrides]]
 module = [
@@ -291,5 +292,9 @@ module = [
     "hyppo.*",
     "plotly",
     "plotly.*",
+    "einops",
+    "einops.*",
+    "torchvision.*",
+    "requests",
 ]
 ignore_missing_imports = true
