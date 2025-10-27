@@ -84,8 +84,10 @@ if __name__ == "__main__":
             super().__init__("Failed to retrieve the run")
 
     run = artifact_transformer.logged_by()
-    if run is None or not hasattr(run, "config"):
+    if run is None:
         raise RunRetrievalError
+    run = api.run(f"{run.entity}/{run.project}/{run.id}")
+
     artifact_dir_cvqgan = artifact_cvqgan.download()
     artifact_dir_vqgan = artifact_vqgan.download()
     artifact_dir_transformer = artifact_transformer.download()

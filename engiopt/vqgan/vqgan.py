@@ -680,8 +680,8 @@ if __name__ == "__main__":
     # Now we assume the dataset is of shape (N, C, H, W) and work from there
     image_channels = training_ds["optimal_upsampled"][:].shape[1]
     latent_size = args.image_size // (2 ** (len(args.encoder_channels) - 2))
-    conditions = problem.conditions_keys
 
+    conditions = problem.conditions_keys
     # Optionally drop condition columns that are constant like overhang_constraint in beams2d
     if args.drop_constant_conditions:
         training_ds, conditions = drop_constant(training_ds, conditions)
@@ -787,6 +787,8 @@ if __name__ == "__main__":
         wandb.define_metric("epoch_transformer", step_metric="transformer_step")
         if args.early_stopping:
             wandb.define_metric("transformer_val_loss", step_metric="transformer_step")
+        wandb.config["image_channels"] = image_channels
+        wandb.config["latent_size"] = latent_size
 
     vqgan = VQGAN(
         device=device,
