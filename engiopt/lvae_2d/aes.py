@@ -394,13 +394,13 @@ class PruningPolicy:
 
         # Compute log-space drops (how much each dimension drops from previous)
         log_srt = (srt + 1e-12).log()
-        drops = log_srt[:-1] - log_srt[1:]  # Positive values = drops
+        d_log = log_srt[1:] - log_srt[:-1]  # Negative values = drops
 
-        # Find the steepest drop (largest positive value)
-        pidx_sorted = torch.argmax(drops)  # Index of steepest drop
+        # Find the steepest drop (most negative value)
+        pidx_sorted = d_log.argmin()  # Index of steepest drop (most negative)
 
-        # Use variance just after the drop as reference
-        ref_idx = idx[pidx_sorted + 1]  # +1 to get the value after the drop
+        # Use variance at the drop as reference
+        ref_idx = idx[pidx_sorted]  # Value at the drop
         ref = z_std[ref_idx]
 
         # Prune dimensions with ratio below threshold relative to reference
