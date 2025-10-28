@@ -319,29 +319,48 @@ class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
         """Compute losses using only first perf_dim latents for performance prediction.
 
         Note: Performance values (p) should be pre-scaled externally before training.
+
+        Gradient masking: Dimensions beyond perf_dim are detached from performance gradients,
+        ensuring they only receive reconstruction + volume loss gradients. This prevents
+        performance training from "contaminating" the entire latent space and allows
+        proper pruning to achieve: active_dims ≈ lvae_active_dims + perf_dim
         """
         x, c, p = batch  # p is already scaled externally
         z = self.encode(x)
-        x_hat = self.decode(z)
 
-        # Update moving mean for pruning statistics
+        # Update moving mean for pruning statistics (use original z before masking)
         self._update_moving_mean(z)
 
-        # Only the first pdim dimensions are used for performance prediction
-        pz = z[:, : self.pdim]
+        # Gradient masking: Split into performance and reconstruction components
+        z_perf = z[:, : self.pdim]  # Dimensions for performance (receive perf gradients)
+        z_recon = z[:, self.pdim :]  # Dimensions for reconstruction only
 
-        # Conditional: predictor uses first perf_dim latent codes + conditions,
-        # otherwise uses only the first perf_dim latent codes
-        p_hat = self.predictor(th.cat([pz, c], dim=-1)) if self.conditional_predictor else self.predictor(pz)
+        # Detach reconstruction dimensions from performance gradients
+        # This ensures dimensions beyond perf_dim behave like lvae (reconstruction + volume only)
+        z_recon_detached = z_recon.detach()
 
-        # Direct MSE on pre-scaled values (no runtime normalization)
-        active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
+        # Reconstruct using both performance and reconstruction dims (with masking)
+        z_full = th.cat([z_perf, z_recon_detached], dim=1)
+        x_hat = self.decode(z_full)
+
+        # Scale volume loss by active dimension ratio
+        active_ratio = self.dim / len(self._p)
+
+        # Only compute performance loss if perf_dim > 0
+        if self.pdim > 0:
+            # Conditional: predictor uses first perf_dim latent codes + conditions,
+            # otherwise uses only the first perf_dim latent codes
+            p_hat = self.predictor(th.cat([z_perf, c], dim=-1)) if self.conditional_predictor else self.predictor(z_perf)
+            perf_loss = self.loss_rec(p, p_hat)
+        else:
+            # When perf_dim=0, no performance prediction - create zero loss
+            perf_loss = th.tensor(0.0, device=z.device, dtype=z.dtype)
 
         return th.stack(
             [
                 self.loss_rec(x, x_hat),
-                self.loss_rec(p, p_hat),  # Both already scaled
-                active_ratio * self.loss_vol(z[:, ~self._p]),
+                perf_loss,  # Zero when pdim=0
+                active_ratio * self.loss_vol(z[:, ~self._p]),  # Use original z for volume loss
             ]
         )
 

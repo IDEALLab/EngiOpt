@@ -809,25 +809,46 @@ class InterpretableDesignLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa
         """Compute losses using only first pdim latents for performance prediction.
 
         Note: Performance values (p) should be pre-scaled externally before training.
+
+        Gradient masking: Dimensions beyond perf_dim are detached from performance gradients,
+        ensuring they only receive reconstruction + volume loss gradients. This prevents
+        performance training from "contaminating" the entire latent space and allows
+        proper pruning to achieve: active_dims ≈ lvae_active_dims + perf_dim
         """
         x, c, p = batch  # p is already scaled externally
         z = self.encode(x)
-        x_hat = self.decode(z)
 
-        # Update moving mean for pruning statistics
+        # Update moving mean for pruning statistics (use original z before masking)
         self._update_moving_mean(z)
 
-        # Only the first pdim dimensions are used for performance prediction
-        pz = z[:, : self.pdim]
-        p_hat = self.predictor(torch.cat([pz, c], dim=-1))
+        # Gradient masking: Split into performance and reconstruction components
+        z_perf = z[:, : self.pdim]  # Dimensions for performance (receive perf gradients)
+        z_recon = z[:, self.pdim :]  # Dimensions for reconstruction only
 
-        # Direct MSE on pre-scaled values (no runtime normalization)
-        active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
+        # Detach reconstruction dimensions from performance gradients
+        # This ensures dimensions beyond perf_dim behave like lvae (reconstruction + volume only)
+        z_recon_detached = z_recon.detach()
+
+        # Reconstruct using both performance and reconstruction dims (with masking)
+        z_full = torch.cat([z_perf, z_recon_detached], dim=1)
+        x_hat = self.decode(z_full)
+
+        # Scale volume loss by active dimension ratio
+        active_ratio = self.dim / len(self._p)
+
+        # Only compute performance loss if perf_dim > 0
+        if self.pdim > 0:
+            # Only the first pdim dimensions are used for performance prediction
+            p_hat = self.predictor(torch.cat([z_perf, c], dim=-1))
+            perf_loss = self.loss_rec(p, p_hat)
+        else:
+            # When perf_dim=0, no performance prediction - create zero loss
+            perf_loss = torch.tensor(0.0, device=z.device, dtype=z.dtype)
 
         return torch.stack(
             [
                 self.loss_rec(x, x_hat),
-                self.loss_rec(p, p_hat),  # Both already scaled
-                active_ratio * self.loss_vol(z[:, ~self._p]),
+                perf_loss,  # Zero when pdim=0
+                active_ratio * self.loss_vol(z[:, ~self._p]),  # Use original z for volume loss
             ]
         )
