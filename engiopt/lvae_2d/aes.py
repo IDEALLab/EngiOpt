@@ -814,12 +814,14 @@ class InterpretableDesignLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa
         z = self.encode(x)
         x_hat = self.decode(z)
 
+        # Update moving mean for pruning statistics
+        self._update_moving_mean(z)
+
         # Only the first pdim dimensions are used for performance prediction
         pz = z[:, : self.pdim]
         p_hat = self.predictor(torch.cat([pz, c], dim=-1))
 
         # Direct MSE on pre-scaled values (no runtime normalization)
-        # Note: _update_moving_mean and pruning logic handled by parent class
         active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
 
         return torch.stack(
