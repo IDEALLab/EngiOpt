@@ -461,6 +461,12 @@ if __name__ == "__main__":
                         z_mean = z.mean(0)
                         N = (z_std > 0).sum().item()
 
+                        # Generate interpolated designs
+                        x_ints = []
+                        for alpha in [0, 0.25, 0.5, 0.75, 1]:
+                            z_ = alpha * z[:25] + (1 - alpha) * th.roll(z, 1, 0)[:25]
+                            x_ints.append(lvae.decode(z_).detach().cpu().numpy())
+
                         # Generate random designs
                         z_rand = z_mean.unsqueeze(0).repeat([25, 1])
                         z_rand[:, idx[:N]] += z_std[:N] * th.randn_like(z_rand[:, idx[:N]])
@@ -468,6 +474,7 @@ if __name__ == "__main__":
 
                         # Move to CPU
                         z_std_cpu = z_std.cpu().numpy()
+                        Xs_cpu = Xs.cpu().numpy()
 
                     # Plot 1: Latent dimension statistics
                     plt.figure(figsize=(12, 6))
@@ -485,7 +492,26 @@ if __name__ == "__main__":
                     plt.savefig(f"images/dim_{batches_done}.png")
                     plt.close()
 
-                    # Plot 2: Random airfoil designs
+                    # Plot 2: Interpolated designs
+                    fig, axs = plt.subplots(25, 6, figsize=(12, 50))
+                    for i, j in product(range(25), range(5)):
+                        airfoil = x_ints[j][i]  # (2, 192)
+                        axs[i, j + 1].plot(airfoil[0], airfoil[1], "b-")
+                        axs[i, j + 1].axis("off")
+                        axs[i, j + 1].set_aspect("equal")
+                    for ax, alpha in zip(axs[0, 1:], [0, 0.25, 0.5, 0.75, 1]):
+                        ax.set_title(rf"$\alpha$ = {alpha}")
+                    for i in range(25):
+                        airfoil = Xs_cpu[i]  # (2, 192)
+                        axs[i, 0].plot(airfoil[0], airfoil[1], "b-")
+                        axs[i, 0].axis("off")
+                        axs[i, 0].set_aspect("equal")
+                    axs[0, 0].set_title("groundtruth")
+                    fig.tight_layout()
+                    plt.savefig(f"images/interp_{batches_done}.png")
+                    plt.close()
+
+                    # Plot 3: Random airfoil designs
                     fig, axes = plt.subplots(5, 5, figsize=(15, 15))
                     axes = axes.flatten()
                     for j in range(25):
@@ -501,7 +527,7 @@ if __name__ == "__main__":
                     # Plot 3: Reconstruction comparison
                     fig, axes = plt.subplots(5, 2, figsize=(10, 15))
                     coords_orig = coords_test[:5].cpu().numpy()
-                    coords_recon = lvae.decode(z[:5]).cpu().numpy()
+                    coords_recon = lvae.decode(z[:5]).detach().cpu().numpy()
 
                     for k in range(5):
                         # Original
@@ -526,7 +552,8 @@ if __name__ == "__main__":
                     wandb.log(
                         {
                             "dim_plot": wandb.Image(f"images/dim_{batches_done}.png"),
-                            "airfoils_plot": wandb.Image(f"images/airfoils_{batches_done}.png"),
+                            "interp_plot": wandb.Image(f"images/interp_{batches_done}.png"),
+                            "norm_plot": wandb.Image(f"images/airfoils_{batches_done}.png"),
                             "recon_plot": wandb.Image(f"images/recon_{batches_done}.png"),
                         }
                     )
