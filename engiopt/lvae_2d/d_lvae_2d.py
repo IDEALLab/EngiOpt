@@ -81,8 +81,8 @@ class Args:
     """Dimensionality of the latent space (overestimate)."""
     w_v: float = 0.01
     """Weight for the volume loss."""
-    w_p: float = 1.0
-    """Weight for the performance prediction loss."""
+    w_p: float = 0.1
+    """Weight for the performance prediction loss. Reduced default (0.1 vs 1.0) to prevent performance loss from dominating and allow better pruning."""
     polynomial_schedule_n: int = 100
     """Number of epochs for the polynomial schedule."""
     polynomial_schedule_p: int = 2

@@ -775,6 +775,9 @@ class InterpretableDesignLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa
         latent_dim,
         perf_dim,
         weights=None,
+        w_r: float | None = None,
+        w_p: float | None = None,
+        w_v: float | None = None,
         eta=1,
         beta=0.9,
         ratio_threshold=0.02,
@@ -796,14 +799,21 @@ class InterpretableDesignLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa
 
         Performance-specific args:
             perf_dim: Number of latent dimensions dedicated to performance prediction
+            w_r: Weight for reconstruction loss (default: 1.0)
+            w_p: Weight for performance loss (default: 0.1, reduced to prevent dominance)
+            w_v: Weight for volume loss (default: 0.001)
 
         All other args (including safeguards) are inherited from LeastVolumeAE_DynamicPruning.
 
         Note: Performance values should be pre-scaled externally (e.g., using RobustScaler)
         before being passed to the loss function.
         """
+        # Handle weight specification: either weights array or individual w_r/w_p/w_v
         if weights is None:
-            weights = [1.0, 1.0, 0.001]
+            w_r = w_r if w_r is not None else 1.0
+            w_p = w_p if w_p is not None else 0.1  # Reduced default to prevent performance loss dominance
+            w_v = w_v if w_v is not None else 0.001
+            weights = [w_r, w_p, w_v]
 
         # Build pruning_params from ratio_threshold if not provided
         if pruning_params is None:
