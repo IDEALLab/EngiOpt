@@ -464,7 +464,7 @@ if __name__ == "__main__":
                         # Generate interpolated designs
                         x_ints = []
                         for alpha in [0, 0.25, 0.5, 0.75, 1]:
-                            z_ = (1 - alpha) * z[:25] + alpha * th.roll(z, 1, 0)[:25]
+                            z_ = (1 - alpha) * z[:25] + alpha * th.roll(z, -1, 0)[:25]
                             x_ints.append(lvae.decode(z_).detach().cpu().numpy())
 
                         # Generate random designs

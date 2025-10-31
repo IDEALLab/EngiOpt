@@ -99,7 +99,7 @@ class Args:
     # MLP predictor parameters
     predictor_hidden_dims: tuple[int, ...] = (256, 128)
     """Hidden dimensions for the MLP predictor."""
-    conditional_predictor: bool = True
+    conditional_predictor: bool = False
     """Whether to include conditions in performance prediction (True) or use only latent codes (False)."""
     perf_dim: int = -1
     """Number of latent dimensions dedicated to performance prediction. If -1 (default), uses all latent_dim dimensions."""
@@ -557,7 +557,7 @@ if __name__ == "__main__":
                         # Generate interpolated designs
                         x_ints = []
                         for alpha in [0, 0.25, 0.5, 0.75, 1]:
-                            z_ = (1 - alpha) * z[:25] + alpha * th.roll(z, 1, 0)[:25]
+                            z_ = (1 - alpha) * z[:25] + alpha * th.roll(z, -1, 0)[:25]
                             x_ints.append(d_lvae.decode(z_).cpu().numpy())
 
                         # Generate random designs
