@@ -524,7 +524,7 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
             Ratio of each std relative to the reference at the steepest drop
         """
         z_std_srt, idx = torch.sort(z_std, descending=True)
-        log_std = (z_std_srt[:self.dim] + 1e-12).log()  # exclude pruned dimensions, add epsilon
+        log_std = (z_std_srt[: self.dim] + 1e-12).log()  # exclude pruned dimensions, add epsilon
         d_log = log_std[1:] - log_std[:-1]  # Negative values = drops
 
         self._p_idx = d_log.argmin().item()  # plummet idx, sorted (steepest drop)
@@ -564,7 +564,13 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
             return
 
         # --- Candidate selection from policy ---
-        cand = self.policy(self._zstd).to(self._below_counts.device)  # boolean mask of "low variance" candidates
+        # Only consider active (unpruned) dimensions for pruning policy
+        z_std_active = self._zstd[~self._p]
+        cand_active = self.policy(z_std_active).to(self._below_counts.device)
+
+        # Map back to full dimension space
+        cand = torch.zeros_like(self._p, dtype=torch.bool)
+        cand[~self._p] = cand_active
 
         # --- Debounce with consecutive evidence ---
         # Keep a counter of how many epochs each dim has been marked as candidate
