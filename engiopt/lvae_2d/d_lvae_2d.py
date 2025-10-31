@@ -42,7 +42,6 @@ import tyro
 import wandb
 
 from engiopt.lvae_2d.aes import InterpretableDesignLeastVolumeAE_DP
-from engiopt.lvae_2d.utils import polynomial_schedule
 from engiopt.lvae_2d.utils import SNLinearCombo
 from engiopt.lvae_2d.utils import spectral_norm_conv
 from engiopt.lvae_2d.utils import TrueSNDeconv2DCombo
@@ -79,14 +78,23 @@ class Args:
     # LVAE-specific
     latent_dim: int = 250
     """Dimensionality of the latent space (overestimate)."""
-    w_v: float = 0.01
-    """Weight for the volume loss."""
-    w_p: float = 0.1
-    """Weight for the performance prediction loss. Reduced default (0.1 vs 1.0) to prevent performance loss from dominating and allow better pruning."""
-    polynomial_schedule_n: int = 100
-    """Number of epochs for the polynomial schedule."""
-    polynomial_schedule_p: int = 2
-    """Polynomial exponent for the schedule."""
+
+    # Augmented Lagrangian parameters (replaces w_v, w_p)
+    reconstruction_threshold: float = 0.001
+    """Constraint threshold for reconstruction MSE. Volume is minimized subject to reconstruction_loss <= this value."""
+    performance_threshold: float = 0.01
+    """Constraint threshold for performance MSE. Volume is minimized subject to performance_loss <= this value."""
+    alpha_r: float = 0.1
+    """Learning rate for reconstruction Lagrange multiplier (dual ascent)."""
+    alpha_p: float = 0.1
+    """Learning rate for performance Lagrange multiplier (dual ascent)."""
+    mu_r: float = 10.0
+    """Penalty coefficient for reconstruction constraint (augmented Lagrangian)."""
+    mu_p: float = 10.0
+    """Penalty coefficient for performance constraint (augmented Lagrangian)."""
+    warmup_epochs: int = 100
+    """Number of epochs to linearly ramp up penalty coefficients (mu_r, mu_p) from 0 to final values."""
+
     pruning_epoch: int = 500
     """Epoch to start pruning dimensions."""
     beta: float = 0.9
@@ -303,22 +311,83 @@ class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
 
     This variant uses only the first perf_dim latent dimensions for performance prediction,
     making those dimensions interpretable as performance-relevant features.
+
+    Uses augmented Lagrangian formulation:
+    - Primary objective: minimize volume_loss
+    - Constraints: reconstruction_loss <= epsilon_r, performance_loss <= epsilon_p
+    - Lagrange multipliers (lambda_r, lambda_p) automatically adjust to enforce constraints
     """
 
-    def __init__(self, *args, conditional_predictor: bool = True, **kwargs):
-        """Initialize with conditional flag.
+    def __init__(
+        self,
+        *args,
+        conditional_predictor: bool = True,
+        reconstruction_threshold: float = 0.001,
+        performance_threshold: float = 0.01,
+        alpha_r: float = 0.1,
+        alpha_p: float = 0.1,
+        mu_r: float = 10.0,
+        mu_p: float = 10.0,
+        warmup_epochs: int = 100,
+        **kwargs,
+    ):
+        """Initialize with conditional flag and augmented Lagrangian parameters.
 
         Args:
             conditional_predictor: If True, predictor uses [z[:perf_dim], c]. If False, uses only [z[:perf_dim]].
+            reconstruction_threshold: Constraint on reconstruction MSE
+            performance_threshold: Constraint on performance MSE
+            alpha_r: Learning rate for reconstruction Lagrange multiplier
+            alpha_p: Learning rate for performance Lagrange multiplier
+            mu_r: Penalty coefficient for reconstruction constraint
+            mu_p: Penalty coefficient for performance constraint
+            warmup_epochs: Number of epochs to linearly ramp up penalty coefficients
             *args, **kwargs: Passed to parent InterpretableDesignLeastVolumeAE_DP
         """
         super().__init__(*args, **kwargs)
         self.conditional_predictor = conditional_predictor
 
+        # Augmented Lagrangian parameters
+        self.reconstruction_threshold = reconstruction_threshold
+        self.performance_threshold = performance_threshold
+        self.alpha_r = alpha_r
+        self.alpha_p = alpha_p
+        self.mu_r_final = mu_r
+        self.mu_p_final = mu_p
+        self.warmup_epochs = warmup_epochs
+
+        # Lagrange multipliers (start at 0, will increase if constraints violated)
+        self.register_buffer("lambda_r", th.tensor(0.0))
+        self.register_buffer("lambda_p", th.tensor(0.0))
+
+        # Track current epoch for warmup scheduling
+        self._current_epoch = 0
+
+    def get_penalty_coefficients(self):
+        """Get current penalty coefficients with linear warmup."""
+        if self._current_epoch < self.warmup_epochs:
+            warmup_factor = self._current_epoch / self.warmup_epochs
+            mu_r = self.mu_r_final * warmup_factor
+            mu_p = self.mu_p_final * warmup_factor
+        else:
+            mu_r = self.mu_r_final
+            mu_p = self.mu_p_final
+        return mu_r, mu_p
+
     def loss(self, batch, **kwargs):
-        """Compute losses using only first perf_dim latents for performance prediction.
+        """Compute augmented Lagrangian loss: minimize volume subject to reconstruction/performance constraints.
+
+        Formulation:
+            Primary objective: minimize volume_loss
+            Constraints: reconstruction_loss <= epsilon_r, performance_loss <= epsilon_p
+
+        Augmented Lagrangian:
+            L = volume_loss +
+                lambda_r * max(0, rec_loss - epsilon_r) + mu_r/2 * max(0, rec_loss - epsilon_r)^2 +
+                lambda_p * max(0, perf_loss - epsilon_p) + mu_p/2 * max(0, perf_loss - epsilon_p)^2
 
         Note: Performance values (p) should be pre-scaled externally before training.
+        Returns: [reconstruction_loss, performance_loss, volume_loss] for logging (actual loss computed separately)
         """
         x, c, p = batch  # p is already scaled externally
         z = self.encode(x)
@@ -334,16 +403,57 @@ class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
         # otherwise uses only the first perf_dim latent codes
         p_hat = self.predictor(th.cat([pz, c], dim=-1)) if self.conditional_predictor else self.predictor(pz)
 
-        # Direct MSE on pre-scaled values (no runtime normalization)
+        # Compute individual loss components
+        reconstruction_loss = self.loss_rec(x, x_hat)
+        performance_loss = self.loss_rec(p, p_hat)  # Both already scaled
         active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
+        volume_loss = active_ratio * self.loss_vol(z[:, ~self._p])
 
-        return th.stack(
-            [
-                self.loss_rec(x, x_hat),
-                self.loss_rec(p, p_hat),  # Both already scaled
-                active_ratio * self.loss_vol(z[:, ~self._p]),
-            ]
+        # Return loss components for logging (stored in self for use in training loop)
+        self._loss_components = th.stack([reconstruction_loss, performance_loss, volume_loss])
+        return self._loss_components
+
+    def compute_augmented_lagrangian_loss(self):
+        """Compute total augmented Lagrangian loss from stored components.
+
+        This should be called after loss() to get the actual loss for backprop.
+        """
+        reconstruction_loss, performance_loss, volume_loss = self._loss_components
+
+        # Compute constraint violations (positive when violated)
+        reconstruction_violation = th.clamp(reconstruction_loss - self.reconstruction_threshold, min=0.0)
+        performance_violation = th.clamp(performance_loss - self.performance_threshold, min=0.0)
+
+        # Get current penalty coefficients (with warmup)
+        mu_r, mu_p = self.get_penalty_coefficients()
+
+        # Augmented Lagrangian formulation:
+        # Primary objective: minimize volume
+        # Penalty terms: enforce constraints on reconstruction and performance
+        total_loss = (
+            volume_loss
+            + self.lambda_r * reconstruction_violation
+            + 0.5 * mu_r * reconstruction_violation**2
+            + self.lambda_p * performance_violation
+            + 0.5 * mu_p * performance_violation**2
         )
+
+        # Store violations for multiplier updates
+        self._reconstruction_violation = reconstruction_violation.detach()
+        self._performance_violation = performance_violation.detach()
+
+        return total_loss
+
+    def update_lagrange_multipliers(self):
+        """Update Lagrange multipliers via dual ascent (called after optimizer.step())."""
+        # Dual ascent: increase multipliers when constraints are violated
+        self.lambda_r = th.clamp(self.lambda_r + self.alpha_r * self._reconstruction_violation, min=0.0)
+        self.lambda_p = th.clamp(self.lambda_p + self.alpha_p * self._performance_violation, min=0.0)
+
+    def epoch_hook(self, epoch, *args, **kwargs):
+        """Update current epoch for warmup scheduling."""
+        super().epoch_hook(epoch, *args, **kwargs)
+        self._current_epoch = epoch
 
 
 if __name__ == "__main__":
@@ -421,8 +531,9 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Unknown pruning_strategy: {args.pruning_strategy}")
 
-    # Initialize DesignLVAE with dynamic pruning
+    # Initialize DesignLVAE with dynamic pruning and augmented Lagrangian
     # Always use interpretable version (generalizes to regular when perf_dim = latent_dim)
+    # Note: weights parameter is not used with augmented Lagrangian (replaced by constraint thresholds)
     d_lvae = ConfigIDLVAE(
         encoder=enc,
         decoder=dec,
@@ -433,18 +544,20 @@ if __name__ == "__main__":
         ),
         latent_dim=args.latent_dim,
         perf_dim=perf_dim,
-        weights=polynomial_schedule(
-            [1.0, args.w_p, args.w_v],
-            N=args.polynomial_schedule_n,
-            p=args.polynomial_schedule_p,
-            w_init=[1.0, 0, 0],
-        ),
+        weights=[1.0, 0.0, 1.0],  # Dummy weights (not used in augmented Lagrangian)
         pruning_epoch=args.pruning_epoch,
         beta=args.beta,
         eta=args.eta,
         pruning_strategy=args.pruning_strategy,
         pruning_params=pruning_params,
         conditional_predictor=args.conditional_predictor,
+        reconstruction_threshold=args.reconstruction_threshold,
+        performance_threshold=args.performance_threshold,
+        alpha_r=args.alpha_r,
+        alpha_p=args.alpha_p,
+        mu_r=args.mu_r,
+        mu_p=args.mu_p,
+        warmup_epochs=args.warmup_epochs,
         min_active_dims=args.min_active_dims,
         max_prune_per_epoch=args.max_prune_per_epoch,
         cooldown_epochs=args.cooldown_epochs,
@@ -510,10 +623,18 @@ if __name__ == "__main__":
             p_batch = batch[2].to(device)
 
             d_lvae.optim.zero_grad()
+
+            # Compute loss components (rec, perf, vol) for logging
             losses = d_lvae.loss((x_batch, c_batch, p_batch))  # [rec, perf, vol]
-            loss = (losses * d_lvae.w).sum()  # apply weights
+
+            # Compute augmented Lagrangian loss for backprop
+            loss = d_lvae.compute_augmented_lagrangian_loss()
+
             loss.backward()
             d_lvae.optim.step()
+
+            # Update Lagrange multipliers via dual ascent
+            d_lvae.update_lagrange_multipliers()
 
             bar.set_postfix(
                 {
@@ -521,12 +642,17 @@ if __name__ == "__main__":
                     "perf": f"{losses[1].item():.3f}",
                     "vol": f"{losses[2].item():.3f}",
                     "dim": d_lvae.dim,
+                    "λ_r": f"{d_lvae.lambda_r.item():.2f}",
+                    "λ_p": f"{d_lvae.lambda_p.item():.2f}",
                 }
             )
 
             # Log to wandb
             if args.track:
                 batches_done = epoch * len(bar) + i
+
+                # Get current penalty coefficients for logging
+                mu_r, mu_p = d_lvae.get_penalty_coefficients()
 
                 wandb.log(
                     {
@@ -535,13 +661,20 @@ if __name__ == "__main__":
                         "vol_loss": losses[2].item(),
                         "total_loss": loss.item(),
                         "active_dims": d_lvae.dim,
+                        "lambda_r": d_lvae.lambda_r.item(),
+                        "lambda_p": d_lvae.lambda_p.item(),
+                        "reconstruction_violation": d_lvae._reconstruction_violation.item(),
+                        "performance_violation": d_lvae._performance_violation.item(),
+                        "mu_r": mu_r,
+                        "mu_p": mu_p,
                         "epoch": epoch,
                     }
                 )
                 print(
                     f"[Epoch {epoch}/{args.n_epochs}] [Batch {i}/{len(bar)}] "
                     f"[rec loss: {losses[0].item():.4f}] [perf loss: {losses[1].item():.4f}] "
-                    f"[vol loss: {losses[2].item():.4f}] [active dims: {d_lvae.dim}]"
+                    f"[vol loss: {losses[2].item():.4f}] [active dims: {d_lvae.dim}] "
+                    f"[λ_r: {d_lvae.lambda_r.item():.2f}] [λ_p: {d_lvae.lambda_p.item():.2f}]"
                 )
 
                 # Sample and visualize at regular intervals
@@ -668,7 +801,18 @@ if __name__ == "__main__":
         val_rec /= n
         val_perf /= n
         val_vol /= n
-        val_total = val_rec + args.w_p * val_perf + args.w_v * val_vol
+
+        # Compute validation total loss using augmented Lagrangian
+        val_rec_violation = max(0.0, val_rec - args.reconstruction_threshold)
+        val_perf_violation = max(0.0, val_perf - args.performance_threshold)
+        mu_r, mu_p = d_lvae.get_penalty_coefficients()
+        val_total = (
+            val_vol
+            + d_lvae.lambda_r.item() * val_rec_violation
+            + 0.5 * mu_r * val_rec_violation**2
+            + d_lvae.lambda_p.item() * val_perf_violation
+            + 0.5 * mu_p * val_perf_violation**2
+        )
 
         # Pass validation reconstruction loss to pruning logic
         d_lvae.epoch_report(epoch=epoch, callbacks=[], batch=None, loss=loss, pbar=None, val_recon=val_rec)
@@ -681,6 +825,8 @@ if __name__ == "__main__":
                     "val_perf": val_perf,
                     "val_vol_loss": val_vol,
                     "val_total_loss": val_total,
+                    "val_reconstruction_violation": val_rec_violation,
+                    "val_performance_violation": val_perf_violation,
                 },
                 commit=True,
             )
