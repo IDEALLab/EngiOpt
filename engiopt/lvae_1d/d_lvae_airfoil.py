@@ -661,7 +661,7 @@ if __name__ == "__main__":
 
                     # Plot: Reconstructions
                     coords_recon, angle_recon = d_lvae.decode(z[:5])
-                    coords_recon_np = coords_recon.cpu().numpy()
+                    coords_recon_np = coords_recon.detach().cpu().numpy()
 
                     fig, axes = plt.subplots(5, 2, figsize=(10, 15))
                     for k in range(5):
