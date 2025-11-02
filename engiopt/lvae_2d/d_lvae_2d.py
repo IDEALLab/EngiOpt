@@ -95,7 +95,7 @@ class Args:
     warmup_epochs: int = 100
     """Number of epochs to linearly ramp up penalty coefficients (mu_r, mu_p) from 0 to final values."""
 
-    pruning_epoch: int = 500
+    pruning_epoch: int = 50
     """Epoch to start pruning dimensions."""
     beta: float = 0.9
     """Momentum for the pruning ratio calculation."""
@@ -765,7 +765,8 @@ if __name__ == "__main__":
                     plt.plot([min_val, max_val], [min_val, max_val], "r--", linewidth=2, label="1:1 line")
                     plt.xlabel("Actual Performance")
                     plt.ylabel("Predicted Performance")
-                    plt.title(f"MSE: {np.mean((p_actual - p_predicted) ** 2):.4f}")
+                    mse_value = np.mean((p_actual - p_predicted) ** 2)
+                    plt.title(f"MSE: {mse_value:.4e}")
                     plt.grid(True, alpha=0.3)
                     plt.legend()
                     plt.axis("equal")
