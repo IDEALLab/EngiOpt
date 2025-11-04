@@ -424,8 +424,8 @@ if __name__ == "__main__":
                 # Sample and visualize at regular intervals
                 if batches_done % args.sample_interval == 0:
                     with th.no_grad():
-                        # Encode test designs
-                        Xs = x_test.to(device)
+                        # Encode TRAINING designs - pruning is based on training data
+                        Xs = x_train.to(device)
                         z = lvae.encode(Xs)
                         z_std, idx = th.sort(z.std(0), descending=True)
                         z_mean = z.mean(0)

@@ -680,8 +680,8 @@ if __name__ == "__main__":
                 # Sample and visualize at regular intervals
                 if batches_done % args.sample_interval == 0:
                     with th.no_grad():
-                        # Encode test designs
-                        Xs = x_test.to(device)
+                        # Encode TRAINING designs - pruning is based on training data
+                        Xs = x_train.to(device)
                         z = d_lvae.encode(Xs)
                         z_std, idx = th.sort(z.std(0), descending=True)
                         z_mean = z.mean(0)
@@ -698,15 +698,15 @@ if __name__ == "__main__":
                         z_rand[:, idx[:N]] += z_std[:N] * th.randn_like(z_rand[:, idx[:N]])
                         x_rand = d_lvae.decode(z_rand).cpu().numpy()
 
-                        # Get performance predictions
-                        pz_test = z[:, :perf_dim]
+                        # Get performance predictions on TRAINING data
+                        pz_train = z[:, :perf_dim]
                         if args.conditional_predictor:
-                            p_pred_scaled = d_lvae.predictor(th.cat([pz_test, c_test.to(device)], dim=-1))
+                            p_pred_scaled = d_lvae.predictor(th.cat([pz_train, c_train.to(device)], dim=-1))
                         else:
-                            p_pred_scaled = d_lvae.predictor(pz_test)
+                            p_pred_scaled = d_lvae.predictor(pz_train)
 
                         # Inverse transform to get true-scale values for plotting
-                        p_actual = p_scaler.inverse_transform(p_test_scaled.cpu().numpy()).flatten()
+                        p_actual = p_scaler.inverse_transform(p_train_scaled.cpu().numpy()).flatten()
                         p_predicted = p_scaler.inverse_transform(p_pred_scaled.cpu().numpy()).flatten()
 
                         # Move tensors to CPU for plotting

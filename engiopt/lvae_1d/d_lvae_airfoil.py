@@ -67,13 +67,17 @@ class Args:
     """Learning rate for the optimizer."""
 
     # LVAE-specific
-    latent_dim: int = 250
+    latent_dim: int = 100
     """Dimensionality of the latent space (overestimate)."""
 
+    # Bezier architecture parameters
+    n_control_points: int = 64
+    """Number of control points for Bezier curve generation."""
+
     # Augmented Lagrangian parameters
-    reconstruction_threshold: float = 0.001
+    reconstruction_threshold: float = 0.0001
     """Constraint threshold for reconstruction MSE."""
-    performance_threshold: float = 0.01
+    performance_threshold: float = 0.001
     """Constraint threshold for performance MSE."""
     alpha_r: float = 0.1
     """Learning rate for reconstruction Lagrange multiplier."""
@@ -106,7 +110,7 @@ class Args:
     """Lipschitz constant multiplier for TrueSNDecoder."""
 
     # Dynamic pruning
-    pruning_strategy: str = "lognorm"
+    pruning_strategy: str = "plummet"
     """Which pruning strategy to use: [plummet, pca_cdf, lognorm, probabilistic]."""
     cdf_threshold: float = 0.99
     """(pca_cdf) Cumulative variance threshold."""
@@ -116,7 +120,7 @@ class Args:
     """(plummet) Threshold for pruning dimensions."""
     alpha: float = 0.2
     """(lognorm) Weighting factor for blending reference and current distribution."""
-    percentile: float = 0.01
+    percentile: float = 0.05
     """(lognorm) Percentile threshold for pruning."""
 
     # Safeguard parameters
@@ -199,79 +203,175 @@ class AirfoilEncoder(nn.Module):
         return self.mlp(combined)
 
 
-class AirfoilTrueSNDecoder(nn.Module):
-    """Decoder with spectral normalization for airfoil: latent → coords (2, 192) + angle_of_attack.
+class BezierLayer(nn.Module):
+    """Generates Bezier curves using rational Bezier basis functions."""
 
-    Uses spectral normalization for 1-Lipschitz bound.
-    Outputs both the airfoil coordinates and the angle_of_attack.
+    def __init__(self, m_features: int, n_control_points: int, n_data_points: int, eps: float = 1e-7):
+        super().__init__()
+        self.n_control_points = n_control_points
+        self.n_data_points = n_data_points
+        self.eps = eps
+
+        # Generate intervals (parameter values) from features
+        self.generate_intervals = nn.Sequential(
+            nn.Linear(m_features, n_data_points - 1),
+            nn.Softmax(dim=1),
+            nn.ConstantPad1d((1, 0), 0.0),  # Add leading zero
+        )
+
+    def forward(
+        self, features: th.Tensor, control_points: th.Tensor, weights: th.Tensor
+    ) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
+        """Generate Bezier curves.
+
+        Args:
+            features: (B, m_features)
+            control_points: (B, 2, n_cp)
+            weights: (B, 1, n_cp)
+
+        Returns:
+            data_points: (B, 2, n_dp)
+            param_vars: (B, 1, n_dp)
+            intervals: (B, n_dp)
+        """
+        # Generate parameter values t in [0, 1]
+        intervals = self.generate_intervals(features)  # (B, n_dp)
+        pv = th.cumsum(intervals, dim=-1).clamp(0, 1).unsqueeze(1)  # (B, 1, n_dp)
+
+        # Compute Bernstein polynomials
+        # B_{i,n}(t) = C(n,i) * t^i * (1-t)^(n-i)
+        pw1 = th.arange(0.0, self.n_control_points, device=features.device).view(1, -1, 1)
+        pw2 = th.flip(pw1, (1,))
+
+        # Log-space computation for numerical stability
+        lbs = (
+            pw1 * th.log(pv + self.eps)
+            + pw2 * th.log(1 - pv + self.eps)
+            + th.lgamma(th.tensor(self.n_control_points, device=features.device) + self.eps).view(1, -1, 1)
+            - th.lgamma(pw1 + 1 + self.eps)
+            - th.lgamma(pw2 + 1 + self.eps)
+        )
+        bs = th.exp(lbs)  # (B, n_cp, n_dp)
+
+        # Rational Bezier curve: sum(w_i * P_i * B_i) / sum(w_i * B_i)
+        dp = (control_points * weights) @ bs / (weights @ bs + self.eps)  # (B, 2, n_dp)
+
+        return dp, pv, intervals
+
+
+class SNBezierDecoder(nn.Module):
+    """Spectral normalized Bezier decoder for airfoil coordinates.
+
+    Generates airfoil coords (B, 2, 192) from latent (B, latent_dim).
+    Separate head generates angle_of_attack.
     """
 
-    def __init__(self, latent_dim: int, n_data_points: int = 192, lipschitz_scale: float = 1.0):
+    def __init__(
+        self,
+        latent_dim: int,
+        n_control_points: int,
+        n_data_points: int,
+        lipschitz_scale: float = 1.0,
+        angle_min: float = 0.0,
+        angle_max: float = 1.0,
+        eps: float = 1e-7,
+    ):
         super().__init__()
+        self.latent_dim = latent_dim
+        self.n_control_points = n_control_points
         self.n_data_points = n_data_points
         self.lipschitz_scale = lipschitz_scale
+        self.register_buffer("angle_min", th.tensor(angle_min))
+        self.register_buffer("angle_max", th.tensor(angle_max))
+        self.eps = eps
 
-        # MLP to generate features for coords and angle
-        self.feature_mlp = nn.Sequential(
-            spectral_norm(nn.Linear(latent_dim, 512)),
-            nn.ReLU(inplace=True),
-            spectral_norm(nn.Linear(512, 1024)),
-            nn.ReLU(inplace=True),
+        m_features = 256
+
+        # Feature generator for Bezier layer
+        self.feature_generator = nn.Sequential(
+            spectral_norm(nn.Linear(latent_dim, 1024)),
+            nn.LeakyReLU(0.2),
+            spectral_norm(nn.Linear(1024, 512)),
+            nn.LeakyReLU(0.2),
+            spectral_norm(nn.Linear(512, m_features)),
         )
 
-        # Branch 1: Generate angle_of_attack (scalar)
-        self.angle_head = spectral_norm(nn.Linear(1024, 1))
+        # Control point and weight generator
+        # Dense layers
+        deconv_channels = [768, 384, 192, 96]
+        n_layers = len(deconv_channels) - 1
+        in_width = n_control_points // (2**n_layers)
+        in_channels = deconv_channels[0]
 
-        # Branch 2: Generate airfoil coordinates via deconv
-        # Project to initial conv shape
-        conv_start_size = 3  # Will upsample to 192
-        self.coords_proj = nn.Sequential(
-            spectral_norm(nn.Linear(1024, 2048 * conv_start_size)),
-            nn.ReLU(inplace=True),
+        self.cpw_dense = nn.Sequential(
+            spectral_norm(nn.Linear(latent_dim, 1024)),
+            nn.LeakyReLU(0.2),
+            spectral_norm(nn.Linear(1024, in_channels * in_width)),
         )
 
-        # Deconvolutional layers: 3 -> 6 -> 12 -> 24 -> 48 -> 96 -> 192
-        self.deconv = nn.Sequential(
-            spectral_norm(nn.ConvTranspose1d(2048, 1024, kernel_size=4, stride=2, padding=1, bias=False)),
-            nn.BatchNorm1d(1024),
-            nn.ReLU(inplace=True),
-            spectral_norm(nn.ConvTranspose1d(1024, 512, kernel_size=4, stride=2, padding=1, bias=False)),
-            nn.BatchNorm1d(512),
-            nn.ReLU(inplace=True),
-            spectral_norm(nn.ConvTranspose1d(512, 256, kernel_size=4, stride=2, padding=1, bias=False)),
-            nn.BatchNorm1d(256),
-            nn.ReLU(inplace=True),
-            spectral_norm(nn.ConvTranspose1d(256, 128, kernel_size=4, stride=2, padding=1, bias=False)),
-            nn.BatchNorm1d(128),
-            nn.ReLU(inplace=True),
-            spectral_norm(nn.ConvTranspose1d(128, 64, kernel_size=4, stride=2, padding=1, bias=False)),
-            nn.BatchNorm1d(64),
-            nn.ReLU(inplace=True),
-            spectral_norm(nn.ConvTranspose1d(64, 2, kernel_size=4, stride=2, padding=1, bias=False)),
-            nn.Tanh(),  # Airfoil coords typically in [-1, 1] range
-        )
+        self.in_channels = in_channels
+        self.in_width = in_width
+
+        # Deconvolutional layers
+        deconv_layers = []
+        for i in range(len(deconv_channels) - 1):
+            deconv_layers.extend(
+                [
+                    spectral_norm(nn.ConvTranspose1d(deconv_channels[i], deconv_channels[i + 1], 4, 2, 1)),
+                    nn.BatchNorm1d(deconv_channels[i + 1]),
+                    nn.ReLU(),
+                ]
+            )
+        self.deconv = nn.Sequential(*deconv_layers)
+
+        # Output heads for Bezier
+        self.cp_gen = nn.Sequential(spectral_norm(nn.Conv1d(deconv_channels[-1], 2, 1)), nn.Tanh())
+        self.w_gen = nn.Sequential(spectral_norm(nn.Conv1d(deconv_channels[-1], 1, 1)), nn.Sigmoid())
+
+        # Bezier layer
+        self.bezier_layer = BezierLayer(m_features, n_control_points, n_data_points)
+
+        # Separate head for angle_of_attack
+        self.angle_head = spectral_norm(nn.Linear(latent_dim, 1))
 
     def forward(self, z: th.Tensor) -> tuple[th.Tensor, th.Tensor]:
-        """Decode latent code to airfoil design.
+        """Generate airfoil coordinates and angle from latent code.
 
         Args:
             z: (B, latent_dim)
 
         Returns:
-            coords: (B, 2, 192) airfoil coordinates
-            angle: (B, 1) angle of attack
+            coords: (B, 2, n_data_points) airfoil coordinates
+            angle: (B, 1) angle of attack (normalized to [0, 1])
         """
-        features = self.feature_mlp(z)  # (B, 1024)
+        # Generate features for Bezier
+        features = self.feature_generator(z)
 
-        # Generate angle_of_attack
-        angle = th.sigmoid(self.angle_head(features)) * self.lipschitz_scale  # (B, 1)
+        # Generate control points and weights
+        x = self.cpw_dense(z).view(-1, self.in_channels, self.in_width)
+        x = self.deconv(x)
+        cp = self.cp_gen(x)  # (B, 2, n_cp)
+        w = self.w_gen(x)  # (B, 1, n_cp)
 
-        # Generate coords
-        coords_flat = self.coords_proj(features)  # (B, 2048*3)
-        coords_reshaped = coords_flat.view(-1, 2048, 3)  # (B, 2048, 3)
-        coords = self.deconv(coords_reshaped) * self.lipschitz_scale  # (B, 2, 192)
+        # Generate Bezier curve
+        coords, _, _ = self.bezier_layer(features, cp, w)
+        coords = coords * self.lipschitz_scale
 
-        return coords, angle
+        # Generate angle_of_attack (normalized [0, 1])
+        angle_norm = th.sigmoid(self.angle_head(z))  # (B, 1) in [0, 1]
+
+        return coords, angle_norm
+
+    def denormalize_angle(self, angle_norm: th.Tensor) -> th.Tensor:
+        """Denormalize angle from [0, 1] to original range.
+
+        Args:
+            angle_norm: (B, 1) normalized angle in [0, 1]
+
+        Returns:
+            angle: (B, 1) angle in original range [angle_min, angle_max]
+        """
+        return angle_norm * (self.angle_max - self.angle_min + self.eps) + self.angle_min
 
 
 class SNMLPPredictor(nn.Module):
@@ -447,75 +547,9 @@ if __name__ == "__main__":
 
     device = th.device("mps" if th.backends.mps.is_available() else "cuda" if th.cuda.is_available() else "cpu")
 
-    # Build encoder and decoder
-    enc = AirfoilEncoder(args.latent_dim, n_data_points)
-    dec = AirfoilTrueSNDecoder(args.latent_dim, n_data_points, lipschitz_scale=args.decoder_lipschitz_scale)
-
-    print(f"Using AirfoilTrueSNDecoder with spectral normalization (Lipschitz scale: {args.decoder_lipschitz_scale})")
-    print(f"Using SNMLPPredictor with spectral normalization (Lipschitz scale: {args.predictor_lipschitz_scale})")
-
-    # Build MLP predictor
-    perf_dim = args.latent_dim if args.perf_dim == -1 else args.perf_dim
-    n_perf = 1
-
-    predictor_input_dim = perf_dim + (n_conds if args.conditional_predictor else 0)
-    predictor = SNMLPPredictor(
-        input_dim=predictor_input_dim,
-        output_dim=n_perf,
-        hidden_dims=args.predictor_hidden_dims,
-        lipschitz_scale=args.predictor_lipschitz_scale,
-    )
-
-    print(f"Performance dimensions: {perf_dim}/{args.latent_dim} latent dimensions")
-    print(f"Predictor mode: {'Conditional' if args.conditional_predictor else 'Unconditional'}")
-
-    # Build pruning parameters
-    pruning_params = {}
-    if args.pruning_strategy == "plummet":
-        pruning_params["threshold"] = args.plummet_threshold
-    elif args.pruning_strategy == "pca_cdf":
-        pruning_params["threshold"] = args.cdf_threshold
-    elif args.pruning_strategy == "probabilistic":
-        pruning_params["temperature"] = args.temperature
-    elif args.pruning_strategy == "lognorm":
-        pruning_params["alpha"] = args.alpha
-        pruning_params["threshold"] = args.percentile
-    else:
-        raise ValueError(f"Unknown pruning_strategy: {args.pruning_strategy}")
-
-    # Initialize model
-    d_lvae = ConfigIDLVAE(
-        encoder=enc,
-        decoder=dec,
-        predictor=predictor,
-        optimizer=Adam(
-            list(enc.parameters()) + list(dec.parameters()) + list(predictor.parameters()),
-            lr=args.lr,
-        ),
-        latent_dim=args.latent_dim,
-        perf_dim=perf_dim,
-        weights=[1.0, 0.0, 1.0],  # Dummy weights
-        pruning_epoch=args.pruning_epoch,
-        beta=args.beta,
-        eta=args.eta,
-        pruning_strategy=args.pruning_strategy,
-        pruning_params=pruning_params,
-        conditional_predictor=args.conditional_predictor,
-        reconstruction_threshold=args.reconstruction_threshold,
-        performance_threshold=args.performance_threshold,
-        alpha_r=args.alpha_r,
-        alpha_p=args.alpha_p,
-        mu_r=args.mu_r,
-        mu_p=args.mu_p,
-        warmup_epochs=args.warmup_epochs,
-        min_active_dims=args.min_active_dims,
-        max_prune_per_epoch=args.max_prune_per_epoch,
-        cooldown_epochs=args.cooldown_epochs,
-        k_consecutive=args.k_consecutive,
-        recon_tol=args.recon_tol,
-    ).to(device)
-
-    # DataLoader
+    # ============================================================================
+    # Data Loading and Preprocessing (BEFORE model initialization)
+    # ============================================================================
     hf = problem.dataset.with_format("torch")
     train_ds = hf["train"]
     val_ds = hf["val"]
@@ -563,13 +597,116 @@ if __name__ == "__main__":
     print(f"Scaled range:        [{p_train_scaled.min():.6f}, {p_train_scaled.max():.6f}]")
     print(f"{'=' * 60}\n")
 
+    # Normalize angle_of_attack to [0, 1] for encoder/decoder
+    angle_min = angle_train.min()
+    angle_max = angle_train.max()
+    eps_angle = 1e-7
+
+    angle_train_norm = (angle_train - angle_min) / (angle_max - angle_min + eps_angle)
+    angle_val_norm = (angle_val - angle_min) / (angle_max - angle_min + eps_angle)
+    angle_test_norm = (angle_test - angle_min) / (angle_max - angle_min + eps_angle)
+
+    print(f"{'=' * 60}")
+    print("Angle of Attack Normalization Statistics")
+    print(f"{'=' * 60}")
+    print(f"Original range:      [{angle_min:.6f}, {angle_max:.6f}]")
+    print(f"Normalized range:    [{angle_train_norm.min():.6f}, {angle_train_norm.max():.6f}]")
+    print(f"{'=' * 60}\n")
+
+    # Build decoder with angle normalization parameters
+    dec = SNBezierDecoder(
+        args.latent_dim,
+        args.n_control_points,
+        n_data_points,
+        lipschitz_scale=args.decoder_lipschitz_scale,
+        angle_min=angle_min.item(),
+        angle_max=angle_max.item(),
+    )
+
+    print(
+        f"Using SNBezierDecoder with {args.n_control_points} control points (Lipschitz scale: {args.decoder_lipschitz_scale})"
+    )
+    print(f"Using SNMLPPredictor with spectral normalization (Lipschitz scale: {args.predictor_lipschitz_scale})")
+
+    # ============================================================================
+    # Model Initialization (AFTER data preprocessing)
+    # ============================================================================
+
+    # Build encoder
+    enc = AirfoilEncoder(args.latent_dim, n_data_points)
+
+    # Build MLP predictor
+    perf_dim = args.latent_dim if args.perf_dim == -1 else args.perf_dim
+    n_perf = 1
+
+    predictor_input_dim = perf_dim + (n_conds if args.conditional_predictor else 0)
+    predictor = SNMLPPredictor(
+        input_dim=predictor_input_dim,
+        output_dim=n_perf,
+        hidden_dims=args.predictor_hidden_dims,
+        lipschitz_scale=args.predictor_lipschitz_scale,
+    )
+
+    print(f"Performance dimensions: {perf_dim}/{args.latent_dim} latent dimensions")
+    print(f"Predictor mode: {'Conditional' if args.conditional_predictor else 'Unconditional'}")
+
+    # Build pruning parameters
+    pruning_params = {}
+    if args.pruning_strategy == "plummet":
+        pruning_params["threshold"] = args.plummet_threshold
+    elif args.pruning_strategy == "pca_cdf":
+        pruning_params["threshold"] = args.cdf_threshold
+    elif args.pruning_strategy == "probabilistic":
+        pruning_params["temperature"] = args.temperature
+    elif args.pruning_strategy == "lognorm":
+        pruning_params["alpha"] = args.alpha
+        pruning_params["threshold"] = args.percentile
+    else:
+        raise ValueError(f"Unknown pruning_strategy: {args.pruning_strategy}")
+
+    # Initialize model with all components
+    d_lvae = ConfigIDLVAE(
+        encoder=enc,
+        decoder=dec,
+        predictor=predictor,
+        optimizer=Adam(
+            list(enc.parameters()) + list(dec.parameters()) + list(predictor.parameters()),
+            lr=args.lr,
+        ),
+        latent_dim=args.latent_dim,
+        perf_dim=perf_dim,
+        weights=[1.0, 0.0, 1.0],  # Dummy weights
+        pruning_epoch=args.pruning_epoch,
+        beta=args.beta,
+        eta=args.eta,
+        pruning_strategy=args.pruning_strategy,
+        pruning_params=pruning_params,
+        conditional_predictor=args.conditional_predictor,
+        reconstruction_threshold=args.reconstruction_threshold,
+        performance_threshold=args.performance_threshold,
+        alpha_r=args.alpha_r,
+        alpha_p=args.alpha_p,
+        mu_r=args.mu_r,
+        mu_p=args.mu_p,
+        warmup_epochs=args.warmup_epochs,
+        min_active_dims=args.min_active_dims,
+        max_prune_per_epoch=args.max_prune_per_epoch,
+        cooldown_epochs=args.cooldown_epochs,
+        k_consecutive=args.k_consecutive,
+        recon_tol=args.recon_tol,
+    ).to(device)
+
+    # ============================================================================
+    # Create DataLoaders
+    # ============================================================================
+
     loader = DataLoader(
-        TensorDataset(coords_train, angle_train, c_train, p_train_scaled),
+        TensorDataset(coords_train, angle_train_norm, c_train, p_train_scaled),
         batch_size=args.batch_size,
         shuffle=True,
     )
     val_loader = DataLoader(
-        TensorDataset(coords_val, angle_val, c_val, p_val_scaled),
+        TensorDataset(coords_val, angle_val_norm, c_val, p_val_scaled),
         batch_size=args.batch_size,
         shuffle=False,
     )
@@ -643,10 +780,10 @@ if __name__ == "__main__":
                 # Sample and visualize at regular intervals
                 if batches_done % args.sample_interval == 0:
                     with th.no_grad():
-                        # Encode test designs
-                        Xs_coords = coords_test.to(device)
-                        Xs_angle = angle_test.to(device)
-                        z = d_lvae.encode((Xs_coords, Xs_angle))
+                        # Encode TRAINING designs (use normalized angles) - pruning is based on training data
+                        Xs_coords = coords_train.to(device)
+                        Xs_angle_norm = angle_train_norm.to(device)
+                        z = d_lvae.encode((Xs_coords, Xs_angle_norm))
                         z_std, idx = th.sort(z.std(0), descending=True)
                         z_mean = z.mean(0)
                         N = (z_std > 0).sum().item()
@@ -656,30 +793,34 @@ if __name__ == "__main__":
                         x_ints_angle = []
                         for alpha in [0, 0.25, 0.5, 0.75, 1]:
                             z_ = (1 - alpha) * z[:25] + alpha * th.roll(z, -1, 0)[:25]
-                            coords_, angle_ = d_lvae.decode(z_)
+                            coords_, angle_norm_ = d_lvae.decode(z_)
+                            # Denormalize angles for plotting
+                            angle_ = d_lvae.decoder.denormalize_angle(angle_norm_)
                             x_ints_coords.append(coords_.cpu().numpy())
                             x_ints_angle.append(angle_.cpu().numpy())
 
                         # Generate random designs
                         z_rand = z_mean.unsqueeze(0).repeat([25, 1])
                         z_rand[:, idx[:N]] += z_std[:N] * th.randn_like(z_rand[:, idx[:N]])
-                        coords_rand, angle_rand = d_lvae.decode(z_rand)
+                        coords_rand, angle_rand_norm = d_lvae.decode(z_rand)
+                        # Denormalize angles for plotting
+                        angle_rand = d_lvae.decoder.denormalize_angle(angle_rand_norm)
 
-                        # Get performance predictions
-                        pz_test = z[:, :perf_dim]
+                        # Get performance predictions on TRAINING data
+                        pz_train = z[:, :perf_dim]
                         if args.conditional_predictor:
-                            p_pred_scaled = d_lvae.predictor(th.cat([pz_test, c_test.to(device)], dim=-1))
+                            p_pred_scaled = d_lvae.predictor(th.cat([pz_train, c_train.to(device)], dim=-1))
                         else:
-                            p_pred_scaled = d_lvae.predictor(pz_test)
+                            p_pred_scaled = d_lvae.predictor(pz_train)
 
                         # Inverse transform to get true-scale values for plotting
-                        p_actual = p_scaler.inverse_transform(p_test_scaled.cpu().numpy()).flatten()
+                        p_actual = p_scaler.inverse_transform(p_train_scaled.cpu().numpy()).flatten()
                         p_predicted = p_scaler.inverse_transform(p_pred_scaled.cpu().numpy()).flatten()
 
-                        # Move tensors to CPU for plotting
+                        # Move tensors to CPU for plotting (use original unnormalized angles)
                         z_std_cpu = z_std.cpu().numpy()
                         Xs_coords_cpu = Xs_coords.cpu().numpy()
-                        Xs_angle_cpu = Xs_angle.cpu().numpy()
+                        Xs_angle_cpu = angle_train[: len(Xs_coords)].cpu().numpy()  # Use original unnormalized angles
                         coords_rand_np = coords_rand.cpu().numpy()
                         angle_rand_np = angle_rand.cpu().numpy()
 
@@ -703,17 +844,23 @@ if __name__ == "__main__":
                     fig, axs = plt.subplots(25, 6, figsize=(12, 25))
                     for i, j in product(range(25), range(5)):
                         airfoil = x_ints_coords[j][i]
+                        angle_val = x_ints_angle[j][i][0]  # Extract scalar angle value
                         axs[i, j + 1].plot(airfoil[0], airfoil[1], "b-")
                         axs[i, j + 1].set_aspect("equal")
                         axs[i, j + 1].axis("off")
+                        axs[i, j + 1].set_title(f"α={angle_val:.2f}", fontsize=8)
                     for ax, alpha in zip(axs[0, 1:], [0, 0.25, 0.5, 0.75, 1]):
-                        ax.set_title(rf"$\alpha$ = {alpha}")
+                        # Update column headers to show interpolation parameter
+                        current_title = ax.get_title()
+                        ax.set_title(rf"interp={alpha}" + "\n" + current_title, fontsize=8)
                     for i in range(25):
                         airfoil = Xs_coords_cpu[i]
+                        angle_val = Xs_angle_cpu[i][0]  # Extract scalar angle value
                         axs[i, 0].plot(airfoil[0], airfoil[1], "b-")
                         axs[i, 0].set_aspect("equal")
                         axs[i, 0].axis("off")
-                    axs[0, 0].set_title("groundtruth")
+                        axs[i, 0].set_title(f"α={angle_val:.2f}", fontsize=8)
+                    axs[0, 0].set_title("groundtruth\n" + axs[0, 0].get_title(), fontsize=8)
                     fig.tight_layout()
                     plt.savefig(f"images/interp_{batches_done}.png")
                     plt.close()
@@ -722,11 +869,13 @@ if __name__ == "__main__":
                     fig, axs = plt.subplots(5, 5, figsize=(15, 7.5))
                     for k, (i, j) in enumerate(product(range(5), range(5))):
                         airfoil = coords_rand_np[k]
+                        angle_val = angle_rand_np[k][0]  # Extract scalar angle value
                         axs[i, j].plot(airfoil[0], airfoil[1], "b-")
                         axs[i, j].set_aspect("equal")
                         axs[i, j].axis("off")
+                        axs[i, j].set_title(f"α={angle_val:.2f}", fontsize=8)
                     fig.tight_layout()
-                    plt.suptitle("Gaussian random designs from latent space")
+                    plt.suptitle("Gaussian random designs from latent space", y=1.0)
                     plt.savefig(f"images/norm_{batches_done}.png")
                     plt.close()
 
