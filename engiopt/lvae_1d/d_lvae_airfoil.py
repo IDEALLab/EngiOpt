@@ -605,11 +605,16 @@ if __name__ == "__main__":
                     "perf": f"{losses[1].item():.3f}",
                     "vol": f"{losses[2].item():.3f}",
                     "dim": d_lvae.dim,
+                    "λ_r": f"{d_lvae.lambda_r.item():.2f}",
+                    "λ_p": f"{d_lvae.lambda_p.item():.2f}",
                 }
             )
 
+            # Log to wandb
             if args.track:
                 batches_done = epoch * len(bar) + i
+
+                # Get current penalty coefficients for logging
                 mu_r, mu_p = d_lvae.get_penalty_coefficients()
 
                 wandb.log(
@@ -621,74 +626,138 @@ if __name__ == "__main__":
                         "active_dims": d_lvae.dim,
                         "lambda_r": d_lvae.lambda_r.item(),
                         "lambda_p": d_lvae.lambda_p.item(),
+                        "reconstruction_violation": d_lvae._reconstruction_violation.item(),
+                        "performance_violation": d_lvae._performance_violation.item(),
                         "mu_r": mu_r,
                         "mu_p": mu_p,
                         "epoch": epoch,
                     }
                 )
+                print(
+                    f"[Epoch {epoch}/{args.n_epochs}] [Batch {i}/{len(bar)}] "
+                    f"[rec loss: {losses[0].item():.4f}] [perf loss: {losses[1].item():.4f}] "
+                    f"[vol loss: {losses[2].item():.4f}] [active dims: {d_lvae.dim}] "
+                    f"[λ_r: {d_lvae.lambda_r.item():.2f}] [λ_p: {d_lvae.lambda_p.item():.2f}]"
+                )
 
-                # Visualization at intervals
+                # Sample and visualize at regular intervals
                 if batches_done % args.sample_interval == 0:
                     with th.no_grad():
-                        Xs_coords = coords_test[:25].to(device)
-                        Xs_angle = angle_test[:25].to(device)
+                        # Encode test designs
+                        Xs_coords = coords_test.to(device)
+                        Xs_angle = angle_test.to(device)
                         z = d_lvae.encode((Xs_coords, Xs_angle))
                         z_std, idx = th.sort(z.std(0), descending=True)
                         z_mean = z.mean(0)
                         N = (z_std > 0).sum().item()
 
-                        # Random samples
+                        # Generate interpolated designs
+                        x_ints_coords = []
+                        x_ints_angle = []
+                        for alpha in [0, 0.25, 0.5, 0.75, 1]:
+                            z_ = (1 - alpha) * z[:25] + alpha * th.roll(z, -1, 0)[:25]
+                            coords_, angle_ = d_lvae.decode(z_)
+                            x_ints_coords.append(coords_.cpu().numpy())
+                            x_ints_angle.append(angle_.cpu().numpy())
+
+                        # Generate random designs
                         z_rand = z_mean.unsqueeze(0).repeat([25, 1])
                         z_rand[:, idx[:N]] += z_std[:N] * th.randn_like(z_rand[:, idx[:N]])
                         coords_rand, angle_rand = d_lvae.decode(z_rand)
 
+                        # Get performance predictions
+                        pz_test = z[:, :perf_dim]
+                        if args.conditional_predictor:
+                            p_pred_scaled = d_lvae.predictor(th.cat([pz_test, c_test.to(device)], dim=-1))
+                        else:
+                            p_pred_scaled = d_lvae.predictor(pz_test)
+
+                        # Inverse transform to get true-scale values for plotting
+                        p_actual = p_scaler.inverse_transform(p_test_scaled.cpu().numpy()).flatten()
+                        p_predicted = p_scaler.inverse_transform(p_pred_scaled.cpu().numpy()).flatten()
+
+                        # Move tensors to CPU for plotting
+                        z_std_cpu = z_std.cpu().numpy()
+                        Xs_coords_cpu = Xs_coords.cpu().numpy()
+                        Xs_angle_cpu = Xs_angle.cpu().numpy()
                         coords_rand_np = coords_rand.cpu().numpy()
-                        Xs_coords_np = Xs_coords.cpu().numpy()
+                        angle_rand_np = angle_rand.cpu().numpy()
 
-                    # Plot: Random airfoil designs
-                    fig, axes = plt.subplots(5, 5, figsize=(15, 15))
-                    axes = axes.flatten()
-                    for j in range(25):
-                        airfoil = coords_rand_np[j]
-                        axes[j].plot(airfoil[0], airfoil[1], "b-")
-                        axes[j].set_aspect("equal")
-                        axes[j].axis("off")
-                        axes[j].set_title(f"α={angle_rand[j].item():.2f}", fontsize=8)
-                    plt.tight_layout()
-                    plt.suptitle("Random airfoils from latent space")
-                    plt.savefig(f"images/airfoils_{batches_done}.png")
+                    # Plot 1: Latent dimension statistics
+                    plt.figure(figsize=(12, 6))
+                    plt.subplot(211)
+                    plt.bar(np.arange(len(z_std_cpu)), z_std_cpu)
+                    plt.yscale("log")
+                    plt.xlabel("Latent dimension index")
+                    plt.ylabel("Standard deviation")
+                    plt.title(f"Number of principal components = {N}")
+                    plt.subplot(212)
+                    plt.bar(np.arange(N), z_std_cpu[:N])
+                    plt.yscale("log")
+                    plt.xlabel("Latent dimension index")
+                    plt.ylabel("Standard deviation")
+                    plt.savefig(f"images/dim_{batches_done}.png")
                     plt.close()
 
-                    # Plot: Reconstructions
-                    coords_recon, angle_recon = d_lvae.decode(z[:5])
-                    coords_recon_np = coords_recon.detach().cpu().numpy()
-
-                    fig, axes = plt.subplots(5, 2, figsize=(10, 15))
-                    for k in range(5):
-                        # Original
-                        axes[k, 0].plot(Xs_coords_np[k][0], Xs_coords_np[k][1], "b-")
-                        axes[k, 0].set_aspect("equal")
-                        axes[k, 0].axis("off")
-                        axes[k, 0].set_title(f"Orig α={Xs_angle[k].item():.2f}", fontsize=8)
-
-                        # Reconstructed
-                        axes[k, 1].plot(coords_recon_np[k][0], coords_recon_np[k][1], "r-")
-                        axes[k, 1].set_aspect("equal")
-                        axes[k, 1].axis("off")
-                        axes[k, 1].set_title(f"Recon α={angle_recon[k].item():.2f}", fontsize=8)
-
-                    plt.tight_layout()
-                    plt.savefig(f"images/recon_{batches_done}.png")
+                    # Plot 2: Interpolated airfoil designs
+                    fig, axs = plt.subplots(25, 6, figsize=(12, 25))
+                    for i, j in product(range(25), range(5)):
+                        airfoil = x_ints_coords[j][i]
+                        axs[i, j + 1].plot(airfoil[0], airfoil[1], "b-")
+                        axs[i, j + 1].set_aspect("equal")
+                        axs[i, j + 1].axis("off")
+                    for ax, alpha in zip(axs[0, 1:], [0, 0.25, 0.5, 0.75, 1]):
+                        ax.set_title(rf"$\alpha$ = {alpha}")
+                    for i in range(25):
+                        airfoil = Xs_coords_cpu[i]
+                        axs[i, 0].plot(airfoil[0], airfoil[1], "b-")
+                        axs[i, 0].set_aspect("equal")
+                        axs[i, 0].axis("off")
+                    axs[0, 0].set_title("groundtruth")
+                    fig.tight_layout()
+                    plt.savefig(f"images/interp_{batches_done}.png")
                     plt.close()
 
+                    # Plot 3: Random airfoil designs from latent space
+                    fig, axs = plt.subplots(5, 5, figsize=(15, 7.5))
+                    for k, (i, j) in enumerate(product(range(5), range(5))):
+                        airfoil = coords_rand_np[k]
+                        axs[i, j].plot(airfoil[0], airfoil[1], "b-")
+                        axs[i, j].set_aspect("equal")
+                        axs[i, j].axis("off")
+                    fig.tight_layout()
+                    plt.suptitle("Gaussian random designs from latent space")
+                    plt.savefig(f"images/norm_{batches_done}.png")
+                    plt.close()
+
+                    # Plot 4: Predicted vs actual performance
+                    plt.figure(figsize=(8, 8))
+                    plt.scatter(p_actual, p_predicted, alpha=0.5, s=20)
+                    min_val = min(p_actual.min(), p_predicted.min())
+                    max_val = max(p_actual.max(), p_predicted.max())
+                    plt.plot([min_val, max_val], [min_val, max_val], "r--", linewidth=2, label="1:1 line")
+                    plt.xlabel("Actual Performance")
+                    plt.ylabel("Predicted Performance")
+                    mse_value = np.mean((p_actual - p_predicted) ** 2)
+                    plt.title(f"MSE: {mse_value:.4e}")
+                    plt.grid(True, alpha=0.3)
+                    plt.legend()
+                    plt.axis("equal")
+                    plt.tight_layout()
+                    plt.savefig(f"images/perf_pred_vs_actual_{batches_done}.png")
+                    plt.close()
+
+                    # Log all plots to wandb
                     wandb.log(
                         {
-                            "airfoils": wandb.Image(f"images/airfoils_{batches_done}.png"),
-                            "recon": wandb.Image(f"images/recon_{batches_done}.png"),
+                            "dim_plot": wandb.Image(f"images/dim_{batches_done}.png"),
+                            "interp_plot": wandb.Image(f"images/interp_{batches_done}.png"),
+                            "norm_plot": wandb.Image(f"images/norm_{batches_done}.png"),
+                            "perf_pred_vs_actual": wandb.Image(f"images/perf_pred_vs_actual_{batches_done}.png"),
                         }
                     )
 
-        # Validation
+        # ---- Validation (batched, no graph) ----
         with th.no_grad():
             d_lvae.eval()
             val_rec = val_perf = val_vol = 0.0
@@ -708,6 +777,7 @@ if __name__ == "__main__":
         val_perf /= n
         val_vol /= n
 
+        # Compute validation total loss using augmented Lagrangian
         val_rec_violation = max(0.0, val_rec - args.reconstruction_threshold)
         val_perf_violation = max(0.0, val_perf - args.performance_threshold)
         mu_r, mu_p = d_lvae.get_penalty_coefficients()
@@ -719,6 +789,7 @@ if __name__ == "__main__":
             + 0.5 * mu_p * val_perf_violation**2
         )
 
+        # Pass validation reconstruction loss to pruning logic
         d_lvae.epoch_report(epoch=epoch, callbacks=[], batch=None, loss=loss, pbar=None, val_recon=val_rec)
 
         if args.track:
@@ -729,6 +800,8 @@ if __name__ == "__main__":
                     "val_perf": val_perf,
                     "val_vol_loss": val_vol,
                     "val_total_loss": val_total,
+                    "val_reconstruction_violation": val_rec_violation,
+                    "val_performance_violation": val_perf_violation,
                 },
                 commit=True,
             )
@@ -736,20 +809,22 @@ if __name__ == "__main__":
         th.cuda.empty_cache()
         d_lvae.train()
 
-        # Save model
+        # Save models at end of training
         if args.save_model and epoch == args.n_epochs - 1:
-            ckpt = {
+            ckpt_d_lvae = {
                 "epoch": epoch,
+                "batches_done": batches_done,
                 "encoder": d_lvae.encoder.state_dict(),
                 "decoder": d_lvae.decoder.state_dict(),
                 "predictor": d_lvae.predictor.state_dict(),
                 "optimizer": d_lvae.optim.state_dict(),
-                "p_scaler": p_scaler,
-                "args": vars(args),
+                "losses": losses.tolist(),
+                "p_scaler": p_scaler,  # Save scaler for inference
+                "args": vars(args),  # Save args for reference
             }
-            th.save(ckpt, "d_lvae_airfoil.pth")
+            th.save(ckpt_d_lvae, "d_lvae.pth")
             artifact = wandb.Artifact(f"{args.problem_id}_{args.algo}", type="model")
-            artifact.add_file("d_lvae_airfoil.pth")
+            artifact.add_file("d_lvae.pth")
             wandb.log_artifact(artifact, aliases=[f"seed_{args.seed}"])
 
     wandb.finish()
