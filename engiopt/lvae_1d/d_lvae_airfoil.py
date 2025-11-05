@@ -695,8 +695,8 @@ if __name__ == "__main__":
         handler_kwargs = {
             "mu_r_init": args.mu_r_init,
             "mu_p_init": args.mu_p_init,
-            "mu_r": args.mu_r,
-            "mu_p": args.mu_p,
+            "mu_r_final": args.mu_r_final,
+            "mu_p_final": args.mu_p_final,
             "alpha_r": args.alpha_r,
             "alpha_p": args.alpha_p,
             "warmup_epochs": args.warmup_epochs,
@@ -706,7 +706,7 @@ if __name__ == "__main__":
             "t_init": args.t_init,
             "t_growth": args.t_growth,
             "t_max": args.t_max,
-            "barrier_epsilon": args.barrier_epsilon,
+            "epsilon": args.barrier_epsilon,
             "fallback_penalty": args.fallback_penalty,
         }
     elif args.constraint_method == "primal_dual":
@@ -724,11 +724,11 @@ if __name__ == "__main__":
         }
     elif args.constraint_method == "softplus_al":
         handler_kwargs = {
-            "softplus_beta": args.softplus_beta,
+            "beta": args.softplus_beta,
             "mu_r_init": args.mu_r_init,
             "mu_p_init": args.mu_p_init,
-            "mu_r": args.mu_r,
-            "mu_p": args.mu_p,
+            "mu_r_final": args.mu_r_final,
+            "mu_p_final": args.mu_p_final,
             "alpha_r": args.alpha_r,
             "alpha_p": args.alpha_p,
             "warmup_epochs": args.warmup_epochs,
