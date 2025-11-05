@@ -41,6 +41,10 @@ import tqdm
 import tyro
 import wandb
 
+from engiopt.lvae_2d.constraint_handlers import ConstraintHandler
+from engiopt.lvae_2d.constraint_handlers import ConstraintLosses
+from engiopt.lvae_2d.constraint_handlers import ConstraintThresholds
+from engiopt.lvae_2d.constraint_handlers import create_constraint_handler
 from engiopt.lvae_2d.aes import InterpretableDesignLeastVolumeAE_DP
 from engiopt.lvae_2d.utils import SNLinearCombo
 from engiopt.lvae_2d.utils import spectral_norm_conv
@@ -79,21 +83,67 @@ class Args:
     latent_dim: int = 250
     """Dimensionality of the latent space (overestimate)."""
 
-    # Augmented Lagrangian parameters (replaces w_v, w_p)
+    # Constraint optimization method
+    constraint_method: str = "augmented_lagrangian"
+    """Constraint method: weighted_sum, augmented_lagrangian, log_barrier, primal_dual, adaptive, softplus_al"""
+
+    # Constraint thresholds (used by all methods except weighted_sum)
     reconstruction_threshold: float = 0.001
     """Constraint threshold for reconstruction MSE. Volume is minimized subject to reconstruction_loss <= this value."""
     performance_threshold: float = 0.01
     """Constraint threshold for performance MSE. Volume is minimized subject to performance_loss <= this value."""
+
+    # Weighted sum parameters (used when constraint_method='weighted_sum')
+    w_volume: float = 1.0
+    """Weight for volume loss in weighted sum method."""
+    w_reconstruction: float = 1.0
+    """Weight for reconstruction loss in weighted sum method."""
+    w_performance: float = 1.0
+    """Weight for performance loss in weighted sum method."""
+
+    # Augmented Lagrangian parameters (used when constraint_method='augmented_lagrangian' or 'softplus_al')
     alpha_r: float = 0.1
     """Learning rate for reconstruction Lagrange multiplier (dual ascent)."""
     alpha_p: float = 0.1
     """Learning rate for performance Lagrange multiplier (dual ascent)."""
+    mu_r_init: float = 1.0
+    """Initial penalty coefficient for reconstruction constraint."""
+    mu_p_init: float = 1.0
+    """Initial penalty coefficient for performance constraint."""
     mu_r: float = 10.0
-    """Penalty coefficient for reconstruction constraint (augmented Lagrangian)."""
+    """Final penalty coefficient for reconstruction constraint (augmented Lagrangian)."""
     mu_p: float = 10.0
-    """Penalty coefficient for performance constraint (augmented Lagrangian)."""
+    """Final penalty coefficient for performance constraint (augmented Lagrangian)."""
     warmup_epochs: int = 100
-    """Number of epochs to linearly ramp up penalty coefficients (mu_r, mu_p) from 0 to final values."""
+    """Number of epochs to linearly ramp up penalty coefficients (mu_r, mu_p) from init to final values."""
+
+    # Softplus AL parameters (used when constraint_method='softplus_al')
+    softplus_beta: float = 10.0
+    """Smoothness parameter for softplus activation (larger = sharper, closer to ReLU)."""
+
+    # Log barrier parameters (used when constraint_method='log_barrier')
+    t_init: float = 1.0
+    """Initial barrier parameter (larger = stricter constraints)."""
+    t_growth: float = 1.05
+    """Multiplicative growth rate for barrier parameter per epoch."""
+    t_max: float = 1000.0
+    """Maximum barrier parameter."""
+    barrier_epsilon: float = 1e-6
+    """Safety margin from constraint boundary."""
+    fallback_penalty: float = 1e6
+    """Penalty multiplier when constraints are violated (infeasible)."""
+
+    # Primal-dual parameters (used when constraint_method='primal_dual')
+    lr_dual: float = 0.01
+    """Learning rate for dual variable updates."""
+    clip_lambda: float = 100.0
+    """Maximum value for dual variables (Lagrange multipliers)."""
+
+    # Adaptive weight parameters (used when constraint_method='adaptive')
+    adaptation_lr: float = 0.01
+    """Learning rate for automatic weight adaptation."""
+    update_frequency: int = 10
+    """Update adaptive weights every N steps."""
 
     pruning_epoch: int = 50
     """Epoch to start pruning dimensions."""
@@ -312,82 +362,38 @@ class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
     This variant uses only the first perf_dim latent dimensions for performance prediction,
     making those dimensions interpretable as performance-relevant features.
 
-    Uses augmented Lagrangian formulation:
-    - Primary objective: minimize volume_loss
-    - Constraints: reconstruction_loss <= epsilon_r, performance_loss <= epsilon_p
-    - Lagrange multipliers (lambda_r, lambda_p) automatically adjust to enforce constraints
+    Supports multiple constraint optimization methods via constraint_handler.
     """
 
     def __init__(
         self,
         *args,
         conditional_predictor: bool = True,
+        constraint_handler: ConstraintHandler,
         reconstruction_threshold: float = 0.001,
         performance_threshold: float = 0.01,
-        alpha_r: float = 0.1,
-        alpha_p: float = 0.1,
-        mu_r: float = 10.0,
-        mu_p: float = 10.0,
-        warmup_epochs: int = 100,
         **kwargs,
     ):
-        """Initialize with conditional flag and augmented Lagrangian parameters.
+        """Initialize with conditional flag and constraint handler.
 
         Args:
             conditional_predictor: If True, predictor uses [z[:perf_dim], c]. If False, uses only [z[:perf_dim]].
+            constraint_handler: Constraint optimization method handler
             reconstruction_threshold: Constraint on reconstruction MSE
             performance_threshold: Constraint on performance MSE
-            alpha_r: Learning rate for reconstruction Lagrange multiplier
-            alpha_p: Learning rate for performance Lagrange multiplier
-            mu_r: Penalty coefficient for reconstruction constraint
-            mu_p: Penalty coefficient for performance constraint
-            warmup_epochs: Number of epochs to linearly ramp up penalty coefficients
             *args, **kwargs: Passed to parent InterpretableDesignLeastVolumeAE_DP
         """
         super().__init__(*args, **kwargs)
         self.conditional_predictor = conditional_predictor
-
-        # Augmented Lagrangian parameters
+        self.constraint_handler = constraint_handler
         self.reconstruction_threshold = reconstruction_threshold
         self.performance_threshold = performance_threshold
-        self.alpha_r = alpha_r
-        self.alpha_p = alpha_p
-        self.mu_r_final = mu_r
-        self.mu_p_final = mu_p
-        self.warmup_epochs = warmup_epochs
-
-        # Lagrange multipliers (start at 0, will increase if constraints violated)
-        self.register_buffer("lambda_r", th.tensor(0.0))
-        self.register_buffer("lambda_p", th.tensor(0.0))
-
-        # Track current epoch for warmup scheduling
-        self._current_epoch = 0
-
-    def get_penalty_coefficients(self):
-        """Get current penalty coefficients with linear warmup."""
-        if self._current_epoch < self.warmup_epochs:
-            warmup_factor = self._current_epoch / self.warmup_epochs
-            mu_r = self.mu_r_final * warmup_factor
-            mu_p = self.mu_p_final * warmup_factor
-        else:
-            mu_r = self.mu_r_final
-            mu_p = self.mu_p_final
-        return mu_r, mu_p
 
     def loss(self, batch, **kwargs):
-        """Compute augmented Lagrangian loss: minimize volume subject to reconstruction/performance constraints.
-
-        Formulation:
-            Primary objective: minimize volume_loss
-            Constraints: reconstruction_loss <= epsilon_r, performance_loss <= epsilon_p
-
-        Augmented Lagrangian:
-            L = volume_loss +
-                lambda_r * max(0, rec_loss - epsilon_r) + mu_r/2 * max(0, rec_loss - epsilon_r)^2 +
-                lambda_p * max(0, perf_loss - epsilon_p) + mu_p/2 * max(0, perf_loss - epsilon_p)^2
+        """Compute loss components and total loss using constraint handler.
 
         Note: Performance values (p) should be pre-scaled externally before training.
-        Returns: [reconstruction_loss, performance_loss, volume_loss] for logging (actual loss computed separately)
+        Returns: [reconstruction_loss, performance_loss, volume_loss] for logging
         """
         x, c, p = batch  # p is already scaled externally
         z = self.encode(x)
@@ -409,51 +415,45 @@ class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
         active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
         volume_loss = active_ratio * self.loss_vol(z[:, ~self._p])
 
-        # Return loss components for logging (stored in self for use in training loop)
-        self._loss_components = th.stack([reconstruction_loss, performance_loss, volume_loss])
-        return self._loss_components
+        # Store components for handler
+        self._loss_components = ConstraintLosses(
+            volume=volume_loss,
+            reconstruction=reconstruction_loss,
+            performance=performance_loss,
+        )
 
-    def compute_augmented_lagrangian_loss(self):
-        """Compute total augmented Lagrangian loss from stored components.
+        # Return as tensor for logging
+        return th.stack([reconstruction_loss, performance_loss, volume_loss])
+
+    def compute_total_loss(self):
+        """Compute total loss using constraint handler.
 
         This should be called after loss() to get the actual loss for backprop.
         """
-        reconstruction_loss, performance_loss, volume_loss = self._loss_components
-
-        # Compute constraint violations (positive when violated)
-        reconstruction_violation = th.clamp(reconstruction_loss - self.reconstruction_threshold, min=0.0)
-        performance_violation = th.clamp(performance_loss - self.performance_threshold, min=0.0)
-
-        # Get current penalty coefficients (with warmup)
-        mu_r, mu_p = self.get_penalty_coefficients()
-
-        # Augmented Lagrangian formulation:
-        # Primary objective: minimize volume
-        # Penalty terms: enforce constraints on reconstruction and performance
-        total_loss = (
-            volume_loss
-            + self.lambda_r * reconstruction_violation
-            + 0.5 * mu_r * reconstruction_violation**2
-            + self.lambda_p * performance_violation
-            + 0.5 * mu_p * performance_violation**2
+        thresholds = ConstraintThresholds(
+            reconstruction=self.reconstruction_threshold,
+            performance=self.performance_threshold,
         )
+        return self.constraint_handler.compute_loss(self._loss_components, thresholds)
 
-        # Store violations for multiplier updates
-        self._reconstruction_violation = reconstruction_violation.detach()
-        self._performance_violation = performance_violation.detach()
-
-        return total_loss
-
-    def update_lagrange_multipliers(self):
-        """Update Lagrange multipliers via dual ascent (called after optimizer.step())."""
-        # Dual ascent: increase multipliers when constraints are violated
-        self.lambda_r = th.clamp(self.lambda_r + self.alpha_r * self._reconstruction_violation, min=0.0)
-        self.lambda_p = th.clamp(self.lambda_p + self.alpha_p * self._performance_violation, min=0.0)
+    def update_constraint_handler(self):
+        """Update constraint handler state (e.g., dual variables, barrier parameter)."""
+        thresholds = ConstraintThresholds(
+            reconstruction=self.reconstruction_threshold,
+            performance=self.performance_threshold,
+        )
+        # Detach loss components for handler updates
+        detached_losses = ConstraintLosses(
+            volume=self._loss_components.volume.detach(),
+            reconstruction=self._loss_components.reconstruction.detach(),
+            performance=self._loss_components.performance.detach(),
+        )
+        self.constraint_handler.step(detached_losses, thresholds)
 
     def epoch_hook(self, epoch, *args, **kwargs):
-        """Update current epoch for warmup scheduling."""
+        """Update current epoch for constraint handler."""
         super().epoch_hook(epoch, *args, **kwargs)
-        self._current_epoch = epoch
+        self.constraint_handler.epoch_hook(epoch)
 
 
 if __name__ == "__main__":
@@ -531,9 +531,69 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Unknown pruning_strategy: {args.pruning_strategy}")
 
-    # Initialize DesignLVAE with dynamic pruning and augmented Lagrangian
+    # Create constraint handler based on method
+    handler_kwargs = {}
+    if args.constraint_method == "weighted_sum":
+        handler_kwargs = {
+            "w_volume": args.w_volume,
+            "w_reconstruction": args.w_reconstruction,
+            "w_performance": args.w_performance,
+        }
+    elif args.constraint_method == "augmented_lagrangian":
+        handler_kwargs = {
+            "mu_r_init": args.mu_r_init,
+            "mu_p_init": args.mu_p_init,
+            "mu_r_final": args.mu_r,
+            "mu_p_final": args.mu_p,
+            "alpha_r": args.alpha_r,
+            "alpha_p": args.alpha_p,
+            "warmup_epochs": args.warmup_epochs,
+        }
+    elif args.constraint_method == "log_barrier":
+        handler_kwargs = {
+            "t_init": args.t_init,
+            "t_growth": args.t_growth,
+            "t_max": args.t_max,
+            "epsilon": args.barrier_epsilon,
+            "fallback_penalty": args.fallback_penalty,
+        }
+    elif args.constraint_method == "primal_dual":
+        handler_kwargs = {
+            "lr_dual": args.lr_dual,
+            "clip_lambda": args.clip_lambda,
+        }
+    elif args.constraint_method == "adaptive":
+        handler_kwargs = {
+            "w_volume_init": args.w_volume,
+            "w_reconstruction_init": args.w_reconstruction,
+            "w_performance_init": args.w_performance,
+            "adaptation_lr": args.adaptation_lr,
+            "update_frequency": args.update_frequency,
+        }
+    elif args.constraint_method == "softplus_al":
+        handler_kwargs = {
+            "beta": args.softplus_beta,
+            "mu_r_init": args.mu_r_init,
+            "mu_p_init": args.mu_p_init,
+            "mu_r_final": args.mu_r,
+            "mu_p_final": args.mu_p,
+            "alpha_r": args.alpha_r,
+            "alpha_p": args.alpha_p,
+            "warmup_epochs": args.warmup_epochs,
+        }
+
+    constraint_handler = create_constraint_handler(
+        method=args.constraint_method,
+        device=device,
+        **handler_kwargs,
+    )
+
+    print(f"\n{'=' * 60}")
+    print(f"Constraint Method: {args.constraint_method}")
+    print(f"{'=' * 60}\n")
+
+    # Initialize DesignLVAE with dynamic pruning and constraint handler
     # Always use interpretable version (generalizes to regular when perf_dim = latent_dim)
-    # Note: weights parameter is not used with augmented Lagrangian (replaced by constraint thresholds)
     d_lvae = ConfigIDLVAE(
         encoder=enc,
         decoder=dec,
@@ -544,20 +604,16 @@ if __name__ == "__main__":
         ),
         latent_dim=args.latent_dim,
         perf_dim=perf_dim,
-        weights=[1.0, 0.0, 1.0],  # Dummy weights (not used in augmented Lagrangian)
+        weights=[1.0, 0.0, 1.0],  # Dummy weights (not directly used, handler controls loss)
         pruning_epoch=args.pruning_epoch,
         beta=args.beta,
         eta=args.eta,
         pruning_strategy=args.pruning_strategy,
         pruning_params=pruning_params,
         conditional_predictor=args.conditional_predictor,
+        constraint_handler=constraint_handler,
         reconstruction_threshold=args.reconstruction_threshold,
         performance_threshold=args.performance_threshold,
-        alpha_r=args.alpha_r,
-        alpha_p=args.alpha_p,
-        mu_r=args.mu_r,
-        mu_p=args.mu_p,
-        warmup_epochs=args.warmup_epochs,
         min_active_dims=args.min_active_dims,
         max_prune_per_epoch=args.max_prune_per_epoch,
         cooldown_epochs=args.cooldown_epochs,
@@ -627,54 +683,51 @@ if __name__ == "__main__":
             # Compute loss components (rec, perf, vol) for logging
             losses = d_lvae.loss((x_batch, c_batch, p_batch))  # [rec, perf, vol]
 
-            # Compute augmented Lagrangian loss for backprop
-            loss = d_lvae.compute_augmented_lagrangian_loss()
+            # Compute total loss using constraint handler
+            loss = d_lvae.compute_total_loss()
 
             loss.backward()
             d_lvae.optim.step()
 
-            # Update Lagrange multipliers via dual ascent
-            d_lvae.update_lagrange_multipliers()
+            # Update constraint handler state (dual variables, barrier params, etc.)
+            d_lvae.update_constraint_handler()
 
-            bar.set_postfix(
-                {
-                    "rec": f"{losses[0].item():.3f}",
-                    "perf": f"{losses[1].item():.3f}",
-                    "vol": f"{losses[2].item():.3f}",
-                    "dim": d_lvae.dim,
-                    "λ_r": f"{d_lvae.lambda_r.item():.2f}",
-                    "λ_p": f"{d_lvae.lambda_p.item():.2f}",
-                }
-            )
+            # Get handler metrics for display
+            handler_metrics = d_lvae.constraint_handler.get_metrics()
+            postfix_dict = {
+                "rec": f"{losses[0].item():.3f}",
+                "perf": f"{losses[1].item():.3f}",
+                "vol": f"{losses[2].item():.3f}",
+                "dim": d_lvae.dim,
+            }
+            # Add first 2 handler metrics to postfix for display
+            for i, (k, v) in enumerate(handler_metrics.items()):
+                if i < 2:  # Only show first 2 metrics
+                    postfix_dict[k.split("/")[-1]] = f"{v:.2f}"
+            bar.set_postfix(postfix_dict)
 
             # Log to wandb
             if args.track:
                 batches_done = epoch * len(bar) + i
 
-                # Get current penalty coefficients for logging
-                mu_r, mu_p = d_lvae.get_penalty_coefficients()
+                log_dict = {
+                    "rec_loss": losses[0].item(),
+                    "perf_loss": losses[1].item(),
+                    "vol_loss": losses[2].item(),
+                    "total_loss": loss.item(),
+                    "active_dims": d_lvae.dim,
+                    "epoch": epoch,
+                }
+                # Add all handler metrics to log
+                log_dict.update(handler_metrics)
 
-                wandb.log(
-                    {
-                        "rec_loss": losses[0].item(),
-                        "perf_loss": losses[1].item(),
-                        "vol_loss": losses[2].item(),
-                        "total_loss": loss.item(),
-                        "active_dims": d_lvae.dim,
-                        "lambda_r": d_lvae.lambda_r.item(),
-                        "lambda_p": d_lvae.lambda_p.item(),
-                        "reconstruction_violation": d_lvae._reconstruction_violation.item(),
-                        "performance_violation": d_lvae._performance_violation.item(),
-                        "mu_r": mu_r,
-                        "mu_p": mu_p,
-                        "epoch": epoch,
-                    }
-                )
+                wandb.log(log_dict)
+                handler_str = " ".join([f"[{k}: {v:.2f}]" for k, v in list(handler_metrics.items())[:2]])
                 print(
                     f"[Epoch {epoch}/{args.n_epochs}] [Batch {i}/{len(bar)}] "
                     f"[rec loss: {losses[0].item():.4f}] [perf loss: {losses[1].item():.4f}] "
                     f"[vol loss: {losses[2].item():.4f}] [active dims: {d_lvae.dim}] "
-                    f"[λ_r: {d_lvae.lambda_r.item():.2f}] [λ_p: {d_lvae.lambda_p.item():.2f}]"
+                    f"{handler_str}"
                 )
 
                 # Sample and visualize at regular intervals
@@ -803,34 +856,31 @@ if __name__ == "__main__":
         val_perf /= n
         val_vol /= n
 
-        # Compute validation total loss using augmented Lagrangian
-        val_rec_violation = max(0.0, val_rec - args.reconstruction_threshold)
-        val_perf_violation = max(0.0, val_perf - args.performance_threshold)
-        mu_r, mu_p = d_lvae.get_penalty_coefficients()
-        val_total = (
-            val_vol
-            + d_lvae.lambda_r.item() * val_rec_violation
-            + 0.5 * mu_r * val_rec_violation**2
-            + d_lvae.lambda_p.item() * val_perf_violation
-            + 0.5 * mu_p * val_perf_violation**2
+        # Compute validation total loss using constraint handler
+        val_losses = ConstraintLosses(
+            volume=th.tensor(val_vol, device=device),
+            reconstruction=th.tensor(val_rec, device=device),
+            performance=th.tensor(val_perf, device=device),
         )
+        val_thresholds = ConstraintThresholds(
+            reconstruction=args.reconstruction_threshold,
+            performance=args.performance_threshold,
+        )
+        val_total = d_lvae.constraint_handler.compute_loss(val_losses, val_thresholds).item()
 
         # Pass validation reconstruction loss to pruning logic
         d_lvae.epoch_report(epoch=epoch, callbacks=[], batch=None, loss=loss, pbar=None, val_recon=val_rec)
 
         if args.track:
-            wandb.log(
-                {
-                    "epoch": epoch,
-                    "val_rec": val_rec,
-                    "val_perf": val_perf,
-                    "val_vol_loss": val_vol,
-                    "val_total_loss": val_total,
-                    "val_reconstruction_violation": val_rec_violation,
-                    "val_performance_violation": val_perf_violation,
-                },
-                commit=True,
-            )
+            val_log_dict = {
+                "epoch": epoch,
+                "val_rec": val_rec,
+                "val_perf": val_perf,
+                "val_vol_loss": val_vol,
+                "val_total_loss": val_total,
+            }
+            # Add handler-specific validation metrics if needed
+            wandb.log(val_log_dict, commit=True)
 
         th.cuda.empty_cache()
         d_lvae.train()
