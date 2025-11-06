@@ -467,10 +467,13 @@ class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
     def encode(self, x):
         """Encode airfoil design (coords, angle) to latent code."""
         coords, angle = x
-        return self.encoder(coords, angle)
+        z = self.encoder(coords, angle)
+        z[:, self._p] = self._z[self._p]  # Apply pruning mask to freeze pruned dimensions
+        return z
 
     def decode(self, z):
         """Decode latent code to airfoil design (coords, angle)."""
+        z[:, self._p] = self._z[self._p]  # Apply pruning mask to freeze pruned dimensions
         return self.decoder(z)
 
     def loss(self, batch, **kwargs):
