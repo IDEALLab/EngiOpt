@@ -20,6 +20,7 @@ import torch as th
 from torch import nn
 from torch.optim import Adam
 from torch.utils.data import DataLoader, TensorDataset
+from torchvision import transforms
 import tqdm
 import tyro
 import wandb
@@ -237,11 +238,20 @@ if __name__ == "__main__":
         device = th.device("cpu")
 
     print(f"Using device: {device}")
-    print(f"Design dimension: {design_dim}")
+    print(f"Original design shape: {design_shape}")
+    print(f"Original design dimension: {design_dim}")
     print(f"Number of conditions: {n_conds}")
 
-    # Build model
-    flow = NormalizingFlow(design_dim, args.n_flows, args.hidden_dim, n_conds).to(device)
+    # Resize to standardized (100, 100) for consistent performance across problems
+    resize_to_standard = transforms.Resize((100, 100))
+    resize_to_original = transforms.Resize(design_shape)
+    standard_dim = 100 * 100  # 10000
+
+    print(f"Resizing to standard shape: (100, 100)")
+    print(f"Standard design dimension: {standard_dim}")
+
+    # Build model with standard dimensions
+    flow = NormalizingFlow(standard_dim, args.n_flows, args.hidden_dim, n_conds).to(device)
 
     # Optimizer
     optimizer = Adam(flow.parameters(), lr=args.lr)
@@ -250,7 +260,9 @@ if __name__ == "__main__":
     hf = problem.dataset.with_format("torch")
     train_ds = hf["train"]
 
-    x_train = train_ds["optimal_design"][:].flatten(1).to(device)  # Flatten to (N, design_dim)
+    # Resize to (100, 100) and flatten
+    x_train_original = train_ds["optimal_design"][:].unsqueeze(1)  # Add channel dim (N, 1, H, W)
+    x_train = resize_to_standard(x_train_original).flatten(1).to(device)  # (N, 10000)
     conds_train: th.Tensor | None = None
 
     if n_conds > 0:
@@ -323,7 +335,9 @@ if __name__ == "__main__":
                             desired_conds = None
 
                         samples = th.clamp(samples, 0, 1)
-                        samples = samples.view(-1, *design_shape)
+                        # Reshape to (100, 100) then resize to original shape
+                        samples = samples.view(-1, 1, 100, 100)
+                        samples = resize_to_original(samples).squeeze(1)  # Back to (N, H, W)
 
                         # Plot with condition annotations
                         fig, axes = plt.subplots(5, 5, figsize=(12, 12))

@@ -18,6 +18,7 @@ import torch as th
 from torch import nn
 from torch.optim import Adam
 from torch.utils.data import DataLoader, TensorDataset
+from torchvision import transforms
 import tqdm
 import tyro
 import wandb
@@ -272,6 +273,13 @@ if __name__ == "__main__":
         device = th.device("cpu")
 
     print(f"Using device: {device}")
+    print(f"Original design shape: {design_shape}")
+
+    # Resize to standardized (100, 100) - UNet architecture expects this size
+    resize_to_standard = transforms.Resize((100, 100))
+    resize_to_original = transforms.Resize(design_shape)
+
+    print(f"Resizing to standard shape: (100, 100) for UNet")
 
     # Build model and diffusion
     model = SimpleUNet(n_conds).to(device)
@@ -287,7 +295,9 @@ if __name__ == "__main__":
     hf = problem.dataset.with_format("torch")
     train_ds = hf["train"]
 
-    x_train = train_ds["optimal_design"][:].unsqueeze(1).to(device)
+    # Resize to (100, 100)
+    x_train_original = train_ds["optimal_design"][:].unsqueeze(1)  # (N, 1, H, W)
+    x_train = resize_to_standard(x_train_original).to(device)  # (N, 1, 100, 100)
     conds_train = th.stack([train_ds[key][:] for key in problem.conditions_keys], dim=1).to(device)
 
     train_loader = DataLoader(
@@ -349,8 +359,10 @@ if __name__ == "__main__":
                         ]
 
                         desired_conds = th.stack(linspaces, dim=1)
-                        samples = diffusion.sample(model, (25, 1, *design_shape), desired_conds)
+                        # Sample at (100, 100) then resize to original shape
+                        samples = diffusion.sample(model, (25, 1, 100, 100), desired_conds)
                         samples = th.clamp(samples, 0, 1)
+                        samples = resize_to_original(samples)  # Resize to original shape
 
                         # Plot with condition annotations
                         fig, axes = plt.subplots(5, 5, figsize=(12, 12))
