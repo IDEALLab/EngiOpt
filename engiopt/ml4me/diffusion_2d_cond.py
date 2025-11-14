@@ -49,8 +49,8 @@ class Args:
     """Number of training epochs."""
     batch_size: int = 32
     """Batch size for training."""
-    lr: float = 1e-4
-    """Learning rate."""
+    lr: float = 4e-4
+    """Learning rate (increased from 1e-4 for better convergence on sparse structures)."""
 
     # Diffusion parameters
     num_timesteps: int = 250
@@ -68,7 +68,7 @@ class SimpleUNet(nn.Module):
     Outputs predicted noise.
     """
 
-    def __init__(self, n_conds: int, time_emb_dim: int = 32):
+    def __init__(self, n_conds: int, time_emb_dim: int = 128):
         super().__init__()
 
         # Time embedding
@@ -93,9 +93,12 @@ class SimpleUNet(nn.Module):
         # Bottleneck
         self.bottleneck = self._conv_block(256, 512)  # 12x12
 
-        # Decoder (upsampling)
+        # Decoder (upsampling) - learnable transposed convolutions
+        self.up3 = nn.ConvTranspose2d(512, 512, kernel_size=2, stride=2)
         self.dec3 = self._conv_block(512 + 256, 256)  # concat with enc3
+        self.up2 = nn.ConvTranspose2d(256, 256, kernel_size=2, stride=2)
         self.dec2 = self._conv_block(256 + 128, 128)  # concat with enc2
+        self.up1 = nn.ConvTranspose2d(128, 128, kernel_size=2, stride=2)
         self.dec1 = self._conv_block(128 + 64, 64)  # concat with enc1
 
         # Output
@@ -105,7 +108,6 @@ class SimpleUNet(nn.Module):
         self.emb_proj = nn.Linear(time_emb_dim * 2, 512)  # time + cond
 
         self.pool = nn.MaxPool2d(2)
-        self.upsample = nn.Upsample(scale_factor=2, mode="bilinear", align_corners=True)
 
     def _conv_block(self, in_ch: int, out_ch: int) -> nn.Module:
         """Basic convolutional block."""
@@ -145,16 +147,16 @@ class SimpleUNet(nn.Module):
         # Add embedding as bias across spatial dimensions
         b = b + emb.view(-1, 512, 1, 1)
 
-        # Decoder with skip connections
-        d3 = self.upsample(b)  # (B, 512, 24, 24)
+        # Decoder with skip connections and learned upsampling
+        d3 = self.up3(b)  # (B, 512, 24, 24)
         # Crop or pad to match e3 size (25x25)
         d3 = nn.functional.interpolate(d3, size=e3.shape[2:], mode="bilinear", align_corners=True)
         d3 = self.dec3(th.cat([d3, e3], dim=1))  # (B, 256, 25, 25)
 
-        d2 = self.upsample(d3)  # (B, 256, 50, 50)
+        d2 = self.up2(d3)  # (B, 256, 50, 50)
         d2 = self.dec2(th.cat([d2, e2], dim=1))  # (B, 128, 50, 50)
 
-        d1 = self.upsample(d2)  # (B, 128, 100, 100)
+        d1 = self.up1(d2)  # (B, 128, 100, 100)
         d1 = self.dec1(th.cat([d1, e1], dim=1))  # (B, 64, 100, 100)
 
         return self.out(d1)  # (B, 1, 100, 100)
@@ -298,6 +300,13 @@ if __name__ == "__main__":
     # Resize to (100, 100)
     x_train_original = train_ds["optimal_design"][:].unsqueeze(1)  # (N, 1, H, W)
     x_train = resize_to_standard(x_train_original).to(device)  # (N, 1, 100, 100)
+
+    # Normalize designs to [0, 1] range (critical for stable training)
+    x_train_min = x_train.min()
+    x_train_max = x_train.max()
+    x_train = (x_train - x_train_min) / (x_train_max - x_train_min + 1e-8)
+    print(f"Normalized designs: min={x_train.min():.4f}, max={x_train.max():.4f}")
+
     conds_train = th.stack([train_ds[key][:] for key in problem.conditions_keys], dim=1).to(device)
 
     train_loader = DataLoader(
