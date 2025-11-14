@@ -55,12 +55,10 @@ class Args:
     """Learning rate."""
 
     # Model architecture
-    n_flows: int = 8
+    n_flows: int = 12
     """Number of coupling layers."""
-    hidden_dim: int = 256
+    hidden_dim: int = 512
     """Hidden dimension for coupling networks."""
-    n_conds: int = 0
-    """Number of conditions (0 for unconditional)."""
 
 
 class CouplingLayer(nn.Module):
@@ -206,9 +204,6 @@ if __name__ == "__main__":
     design_shape = problem.design_space.shape
     design_dim = np.prod(design_shape)
     n_conds = len(problem.conditions_keys)
-
-    # Override args if conditions are present
-    args.n_conds = n_conds
 
     # Initialize W&B tracking
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"

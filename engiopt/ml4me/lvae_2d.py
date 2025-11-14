@@ -55,7 +55,7 @@ class Args:
     """Learning rate for the optimizer."""
 
     # LVAE-specific
-    latent_dim: int = 64
+    latent_dim: int = 32
     """Dimensionality of the latent space."""
     w_rec: float = 1.0
     """Weight for reconstruction loss."""
@@ -441,7 +441,6 @@ if __name__ == "__main__":
                     "val/vol_loss": val_vol_loss,
                 }
             )
-
 
         print(
             f"Epoch {epoch}/{args.n_epochs} - "

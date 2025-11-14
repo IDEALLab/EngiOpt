@@ -234,9 +234,7 @@ if __name__ == "__main__":
     # Get conditions
     conds_train = th.stack([train_ds[key][:] for key in problem.conditions_keys], dim=1).to(device)
 
-    train_loader = DataLoader(
-        TensorDataset(x_train, conds_train), batch_size=args.batch_size, shuffle=True, drop_last=True
-    )
+    train_loader = DataLoader(TensorDataset(x_train, conds_train), batch_size=args.batch_size, shuffle=True, drop_last=True)
 
     # Training loop
     batches_done = 0
