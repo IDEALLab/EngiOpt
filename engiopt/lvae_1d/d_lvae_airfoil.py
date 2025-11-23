@@ -204,22 +204,22 @@ class AirfoilEncoder(nn.Module):
         # 192 -> 96 -> 48 -> 24 -> 12 -> 6 -> 3
         self.conv = nn.Sequential(
             nn.Conv1d(2, 64, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.BatchNorm1d(64),
+            nn.GroupNorm(num_groups=8, num_channels=64),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv1d(64, 128, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.BatchNorm1d(128),
+            nn.GroupNorm(num_groups=8, num_channels=128),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv1d(128, 256, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.BatchNorm1d(256),
+            nn.GroupNorm(num_groups=8, num_channels=256),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv1d(256, 512, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.BatchNorm1d(512),
+            nn.GroupNorm(num_groups=8, num_channels=512),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv1d(512, 1024, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.BatchNorm1d(1024),
+            nn.GroupNorm(num_groups=8, num_channels=1024),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Conv1d(1024, 2048, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.BatchNorm1d(2048),
+            nn.GroupNorm(num_groups=8, num_channels=2048),
             nn.LeakyReLU(0.2, inplace=True),
         )
 
@@ -371,7 +371,7 @@ class SNBezierDecoder(nn.Module):
             deconv_layers.extend(
                 [
                     spectral_norm(nn.ConvTranspose1d(deconv_channels[i], deconv_channels[i + 1], 4, 2, 1)),
-                    nn.BatchNorm1d(deconv_channels[i + 1]),
+                    nn.GroupNorm(num_groups=8, num_channels=deconv_channels[i + 1]),
                     nn.ReLU(),
                 ]
             )
