@@ -226,34 +226,40 @@ class AirfoilEncoder(nn.Module):
         # After 6 stride-2 convs: 192 / 2^6 = 3
         conv_output_size = 2048 * 3
 
-        # MLP to combine conv features + angle_of_attack -> latent
-        self.mlp = nn.Sequential(
-            nn.Linear(conv_output_size + 1, 1024),  # +1 for angle_of_attack
+        # Split latent encoding: geometry (latent_dim-1) + angle (1)
+        # Geometry path: coords -> latent features
+        self.mlp_geom = nn.Sequential(
+            nn.Linear(conv_output_size, 1024),
             nn.LeakyReLU(0.2),
             nn.Linear(1024, 512),
             nn.LeakyReLU(0.2),
-            nn.Linear(512, latent_dim),
+            nn.Linear(512, latent_dim - 1),  # All but last dimension
         )
 
+        # Angle path: simple linear encoding to dedicated dimension
+        self.mlp_angle = nn.Linear(1, 1)
+
     def forward(self, coords: th.Tensor, angle: th.Tensor) -> th.Tensor:
-        """Encode airfoil design.
+        """Encode airfoil design with split geometry/angle representation.
 
         Args:
             coords: (B, 2, 192) airfoil coordinates
             angle: (B, 1) angle of attack
 
         Returns:
-            z: (B, latent_dim) latent code
+            z: (B, latent_dim) latent code where z[:, :-1] encodes geometry
+               and z[:, -1:] encodes angle
         """
-        # Encode coords
+        # Encode coords to geometry features
         h = self.conv(coords)  # (B, 2048, 3)
         h = h.flatten(1)  # (B, 2048*3)
 
-        # Concatenate with angle_of_attack
-        combined = th.cat([h, angle], dim=1)  # (B, 2048*3 + 1)
+        # Encode geometry and angle separately
+        z_geom = self.mlp_geom(h)  # (B, latent_dim-1)
+        z_angle = self.mlp_angle(angle)  # (B, 1)
 
-        # Project to latent space
-        return self.mlp(combined)
+        # Concatenate: [geometry dimensions | angle dimension]
+        return th.cat([z_geom, z_angle], dim=1)  # (B, latent_dim)
 
 
 class BezierLayer(nn.Module):
@@ -340,16 +346,16 @@ class SNBezierDecoder(nn.Module):
 
         m_features = 256
 
-        # Feature generator for Bezier layer
+        # Feature generator for Bezier layer (uses geometry dimensions only)
         self.feature_generator = nn.Sequential(
-            spectral_norm(nn.Linear(latent_dim, 1024)),
+            spectral_norm(nn.Linear(latent_dim - 1, 1024)),  # Geometry only
             nn.LeakyReLU(0.2),
             spectral_norm(nn.Linear(1024, 512)),
             nn.LeakyReLU(0.2),
             spectral_norm(nn.Linear(512, m_features)),
         )
 
-        # Control point and weight generator
+        # Control point and weight generator (uses geometry dimensions only)
         # Dense layers
         deconv_channels = [768, 384, 192, 96]
         n_layers = len(deconv_channels) - 1
@@ -357,7 +363,7 @@ class SNBezierDecoder(nn.Module):
         in_channels = deconv_channels[0]
 
         self.cpw_dense = nn.Sequential(
-            spectral_norm(nn.Linear(latent_dim, 1024)),
+            spectral_norm(nn.Linear(latent_dim - 1, 1024)),  # Geometry only
             nn.LeakyReLU(0.2),
             spectral_norm(nn.Linear(1024, in_channels * in_width)),
         )
@@ -384,24 +390,28 @@ class SNBezierDecoder(nn.Module):
         # Bezier layer
         self.bezier_layer = BezierLayer(m_features, n_control_points, n_data_points)
 
-        # Separate head for angle_of_attack
-        self.angle_head = spectral_norm(nn.Linear(latent_dim, 1))
+        # Separate head for angle_of_attack (operates on last latent dim only)
+        self.angle_head = spectral_norm(nn.Linear(1, 1))
 
     def forward(self, z: th.Tensor) -> tuple[th.Tensor, th.Tensor]:
-        """Generate airfoil coordinates and angle from latent code.
+        """Generate airfoil coordinates and angle from split latent code.
 
         Args:
-            z: (B, latent_dim)
+            z: (B, latent_dim) where z[:, :-1] is geometry, z[:, -1:] is angle
 
         Returns:
             coords: (B, 2, n_data_points) airfoil coordinates
             angle: (B, 1) angle of attack (normalized to [0, 1])
         """
-        # Generate features for Bezier
-        features = self.feature_generator(z)
+        # Split latent into geometry and angle components
+        z_geom = z[:, :-1]  # Geometry dimensions
+        z_angle = z[:, -1:]  # Angle dimension
 
-        # Generate control points and weights
-        x = self.cpw_dense(z).view(-1, self.in_channels, self.in_width)
+        # Generate features for Bezier (from geometry only)
+        features = self.feature_generator(z_geom)
+
+        # Generate control points and weights (from geometry only)
+        x = self.cpw_dense(z_geom).view(-1, self.in_channels, self.in_width)
         x = self.deconv(x)
         cp = self.cp_gen(x)  # (B, 2, n_cp)
         w = self.w_gen(x)  # (B, 1, n_cp)
@@ -410,8 +420,8 @@ class SNBezierDecoder(nn.Module):
         coords, _, _ = self.bezier_layer(features, cp, w)
         coords = coords * self.lipschitz_scale
 
-        # Generate angle_of_attack (normalized [0, 1])
-        angle_norm = th.sigmoid(self.angle_head(z))  # (B, 1) in [0, 1]
+        # Generate angle_of_attack from dedicated angle dimension
+        angle_norm = th.sigmoid(self.angle_head(z_angle))  # (B, 1) in [0, 1]
 
         return coords, angle_norm
 
@@ -485,14 +495,20 @@ class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
         z = self.encode((coords, angle))
         coords_hat, angle_hat = self.decode(z)
 
-        # Update moving mean for pruning statistics
+        # Update moving mean for pruning statistics (geometry only)
         self._update_moving_mean(z)
 
-        # Only the first pdim dimensions are used for performance prediction
-        pz = z[:, : self.pdim]
+        # Split latent for prediction: geometry + angle
+        # Geometry dimensions (subject to pruning)
+        pz_geom = z[:, : self.pdim - 1]  # First pdim-1 geometry dimensions
+        # Angle dimension (never pruned, always at last position)
+        z_angle = z[:, -1:]  # Last dimension
 
-        # Conditional or unconditional predictor
-        p_hat = self.predictor(th.cat([pz, c], dim=-1)) if self.conditional_predictor else self.predictor(pz)
+        # Predictor input: geometry features + angle + optional external conditions
+        if self.conditional_predictor and c.shape[1] > 0:
+            p_hat = self.predictor(th.cat([pz_geom, z_angle, c], dim=-1))
+        else:
+            p_hat = self.predictor(th.cat([pz_geom, z_angle], dim=-1))
 
         # Compute individual loss components
         # Reconstruction loss combines coords and angle
@@ -501,8 +517,14 @@ class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
         reconstruction_loss = coords_mse + angle_mse
 
         performance_loss = nn.functional.mse_loss(p, p_hat)
-        active_ratio = self.dim / len(self._p)
-        volume_loss = active_ratio * self.loss_vol(z[:, ~self._p])
+
+        # Volume loss: only on geometry dimensions (exclude angle)
+        z_geom = z[:, :-1]  # All but last dimension
+        pruning_mask_geom = self._p[:-1]  # Pruning mask for geometry only
+        n_active_geom = (~pruning_mask_geom).sum().item()
+        n_total_geom = len(self._p) - 1  # Total geometry dims
+        active_ratio_geom = n_active_geom / n_total_geom if n_total_geom > 0 else 1.0
+        volume_loss = active_ratio_geom * self.loss_vol(z_geom[:, ~pruning_mask_geom])
 
         # Store components for handler
         self._loss_components = ConstraintLosses(
@@ -540,6 +562,43 @@ class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
         """Update current epoch for constraint handler."""
         super().epoch_hook(epoch, *args, **kwargs)
         self.constraint_handler.epoch_hook(epoch)
+
+    @th.no_grad()
+    def _update_moving_mean(self, z):
+        """Update moving statistics for geometry dimensions only (exclude angle)."""
+        # Only track statistics for geometry dimensions
+        z_geom = z[:, :-1]  # All but last dimension
+
+        if not hasattr(self, "_zstd") or not hasattr(self, "_zmean"):
+            self._zstd = z_geom.std(0)
+            self._zmean = z_geom.mean(0)
+        else:
+            self._zstd = th.lerp(self._zstd, z_geom.std(0), 1 - self._beta)
+            self._zmean = th.lerp(self._zmean, z_geom.mean(0), 1 - self._beta)
+
+    @property
+    def dim(self):
+        """Number of active dimensions (geometry + angle).
+
+        Angle dimension is always active (never pruned), so we count it separately.
+        """
+        # Count active geometry dimensions (subject to pruning)
+        n_active_geom = (~self._p[:-1]).sum().item()
+        # Add 1 for angle dimension (always active)
+        return n_active_geom + 1
+
+    @th.no_grad()
+    def _prune_step(self, epoch, val_recon=None):
+        """Pruning for geometry dimensions only (protects angle dimension).
+
+        Overrides parent to ensure angle dimension (last dim) is never pruned.
+        """
+        # Call parent pruning logic
+        super()._prune_step(epoch, val_recon)
+
+        # Ensure angle dimension (last) is NEVER marked for pruning
+        # This is a safety measure in case parent logic touches it
+        self._p[-1] = False
 
 
 if __name__ == "__main__":
