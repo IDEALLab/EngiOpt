@@ -424,7 +424,7 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         weights=None,
         eta=1,
         beta=0.9,
-        ratio_threshold=0.02,
+        ratio_threshold=0.02,  # noqa: ARG002 - kept for backward compatibility, use pruning_params instead
         pruning_epoch=500,
         pruning_strategy="plummet",
         pruning_params=None,
@@ -445,10 +445,11 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
             weights: Loss weights [reconstruction, volume]
             eta: Smoothing parameter for volume loss
             beta: EMA momentum for latent statistics
-            ratio_threshold: Ratio threshold for pruning (dimensions with ratio < threshold are pruned)
+            ratio_threshold: DEPRECATED - kept for backward compatibility only.
+                Use pruning_params instead to pass strategy-specific parameters.
             pruning_epoch: Epoch to start pruning
             pruning_strategy: Strategy name (plummet, pca_cdf, lognorm, probabilistic)
-            pruning_params: Strategy-specific parameters dict
+            pruning_params: Strategy-specific parameters dict (replaces ratio_threshold)
             min_active_dims: Never prune below this many dimensions (default: 0 = no limit)
             max_prune_per_epoch: Max dimensions to prune per epoch (default: None = no limit)
             cooldown_epochs: Epochs to wait between pruning events (default: 0 = no cooldown)
@@ -462,7 +463,6 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         self.register_buffer("_z", torch.zeros(latent_dim))
 
         self._beta = beta
-        self._r_threshold = ratio_threshold
         self.pruning_epoch = pruning_epoch
 
         # Policy --> pca_cdf | lognorm | probabilistic | plummet
@@ -514,35 +514,14 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         m = self.dim / len(self._p)
         return torch.stack([self.loss_rec(x, x_hat), m * self.loss_vol(z[:, ~self._p])])
 
-    def _plummet_ratio(self, z_std):
-        """Calculate ratio of each dimension relative to the plummet point.
-
-        Args:
-            z_std: Standard deviation per dimension
-
-        Returns:
-            Ratio of each std relative to the reference at the steepest drop
-        """
-        z_std_srt, idx = torch.sort(z_std, descending=True)
-        log_std = (z_std_srt[: self.dim] + 1e-12).log()  # exclude pruned dimensions, add epsilon
-        d_log = log_std[1:] - log_std[:-1]  # Negative values = drops
-
-        self._p_idx = d_log.argmin().item()  # plummet idx, sorted (steepest drop)
-        _p_idx = idx[self._p_idx]  # plummet idx, original ordering
-        ratio = z_std / (z_std[_p_idx] + 1e-12)  # Add epsilon for stability
-        return ratio
-
     @torch.no_grad()
     def _update_moving_mean(self, z):
         if not hasattr(self, "_zstd") or not hasattr(self, "_zmean"):
             self._zstd = z.std(0)
             self._zmean = z.mean(0)
-            self._ratio = self._plummet_ratio(self._zstd)
         else:
             self._zstd = torch.lerp(self._zstd, z.std(0), 1 - self._beta)
             self._zmean = torch.lerp(self._zmean, z.mean(0), 1 - self._beta)
-            ratio = self._plummet_ratio(self._zstd)
-            self._ratio = torch.lerp(self._ratio, ratio, 1 - self._beta)
 
     @torch.no_grad()
     def _prune_step(self, epoch, val_recon=None):
