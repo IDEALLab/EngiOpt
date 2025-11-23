@@ -116,6 +116,8 @@ class Args:
     """Final penalty coefficient for performance constraint (augmented Lagrangian)."""
     warmup_epochs: int = 100
     """Number of epochs to linearly ramp up penalty coefficients (mu_r, mu_p) from init to final values."""
+    volume_warmup_epochs: int = 50
+    """Number of epochs to ignore volume loss and only minimize reconstruction+performance (prevents early collapse)."""
 
     # Softplus AL parameters (used when constraint_method='softplus_al')
     softplus_beta: float = 10.0
@@ -538,6 +540,7 @@ if __name__ == "__main__":
             "w_volume": args.w_volume,
             "w_reconstruction": args.w_reconstruction,
             "w_performance": args.w_performance,
+            "volume_warmup_epochs": args.volume_warmup_epochs,
         }
     elif args.constraint_method == "augmented_lagrangian":
         handler_kwargs = {
@@ -548,6 +551,7 @@ if __name__ == "__main__":
             "alpha_r": args.alpha_r,
             "alpha_p": args.alpha_p,
             "warmup_epochs": args.warmup_epochs,
+            "volume_warmup_epochs": args.volume_warmup_epochs,
         }
     elif args.constraint_method == "log_barrier":
         handler_kwargs = {
@@ -556,11 +560,13 @@ if __name__ == "__main__":
             "t_max": args.t_max,
             "epsilon": args.barrier_epsilon,
             "fallback_penalty": args.fallback_penalty,
+            "volume_warmup_epochs": args.volume_warmup_epochs,
         }
     elif args.constraint_method == "primal_dual":
         handler_kwargs = {
             "lr_dual": args.lr_dual,
             "clip_lambda": args.clip_lambda,
+            "volume_warmup_epochs": args.volume_warmup_epochs,
         }
     elif args.constraint_method == "adaptive":
         handler_kwargs = {
@@ -569,6 +575,7 @@ if __name__ == "__main__":
             "w_performance_init": args.w_performance,
             "adaptation_lr": args.adaptation_lr,
             "update_frequency": args.update_frequency,
+            "volume_warmup_epochs": args.volume_warmup_epochs,
         }
     elif args.constraint_method == "softplus_al":
         handler_kwargs = {
@@ -580,6 +587,7 @@ if __name__ == "__main__":
             "alpha_r": args.alpha_r,
             "alpha_p": args.alpha_p,
             "warmup_epochs": args.warmup_epochs,
+            "volume_warmup_epochs": args.volume_warmup_epochs,
         }
 
     constraint_handler = create_constraint_handler(

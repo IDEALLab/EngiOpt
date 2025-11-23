@@ -40,6 +40,7 @@ from engiopt.lvae_2d.constraint_handlers import ConstraintThresholds
 from engiopt.lvae_2d.constraint_handlers import create_constraint_handler
 from engiopt.lvae_2d.aes import InterpretableDesignLeastVolumeAE_DP
 from engiopt.lvae_2d.utils import SNLinearCombo
+from sklearn.preprocessing import RobustScaler
 
 
 @dataclass
@@ -81,6 +82,8 @@ class Args:
     # Constraint optimization method
     constraint_method: str = "augmented_lagrangian"
     """Constraint method: weighted_sum, augmented_lagrangian, log_barrier, primal_dual, adaptive, softplus_al"""
+    volume_warmup_epochs: int = 50
+    """Number of epochs to ignore volume loss before applying constraint method."""
 
     # Constraint thresholds (used by all methods except weighted_sum)
     reconstruction_threshold: float = 0.0001
@@ -600,9 +603,6 @@ if __name__ == "__main__":
     )
     p_val = val_ds[problem.objectives_keys[0]][:].unsqueeze(-1)
 
-    # Scale performance values
-    from sklearn.preprocessing import RobustScaler
-
     p_scaler = RobustScaler()
     p_train_scaled = th.from_numpy(p_scaler.fit_transform(p_train.numpy())).to(p_train.dtype)
     p_val_scaled = th.from_numpy(p_scaler.transform(p_val.numpy())).to(p_val.dtype)
@@ -693,6 +693,7 @@ if __name__ == "__main__":
             "w_volume": args.w_volume,
             "w_reconstruction": args.w_reconstruction,
             "w_performance": args.w_performance,
+            "volume_warmup_epochs": args.volume_warmup_epochs,
         }
     elif args.constraint_method == "augmented_lagrangian":
         handler_kwargs = {
@@ -703,6 +704,7 @@ if __name__ == "__main__":
             "alpha_r": args.alpha_r,
             "alpha_p": args.alpha_p,
             "warmup_epochs": args.warmup_epochs,
+            "volume_warmup_epochs": args.volume_warmup_epochs,
         }
     elif args.constraint_method == "log_barrier":
         handler_kwargs = {
@@ -711,11 +713,13 @@ if __name__ == "__main__":
             "t_max": args.t_max,
             "epsilon": args.barrier_epsilon,
             "fallback_penalty": args.fallback_penalty,
+            "volume_warmup_epochs": args.volume_warmup_epochs,
         }
     elif args.constraint_method == "primal_dual":
         handler_kwargs = {
             "lr_dual": args.lr_dual,
             "clip_lambda": args.clip_lambda,
+            "volume_warmup_epochs": args.volume_warmup_epochs,
         }
     elif args.constraint_method == "adaptive":
         handler_kwargs = {
@@ -724,6 +728,7 @@ if __name__ == "__main__":
             "w_performance_init": args.w_performance,
             "adaptation_lr": args.adaptation_lr,
             "update_frequency": args.update_frequency,
+            "volume_warmup_epochs": args.volume_warmup_epochs,
         }
     elif args.constraint_method == "softplus_al":
         handler_kwargs = {
@@ -735,6 +740,7 @@ if __name__ == "__main__":
             "alpha_r": args.alpha_r,
             "alpha_p": args.alpha_p,
             "warmup_epochs": args.warmup_epochs,
+            "volume_warmup_epochs": args.volume_warmup_epochs,
         }
     else:
         raise ValueError(f"Unknown constraint method: {args.constraint_method}")

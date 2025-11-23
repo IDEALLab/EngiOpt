@@ -51,14 +51,21 @@ class ConstraintHandler(ABC):
         - get_metrics(): Returns logging metrics for wandb
     """
 
-    def __init__(self, device: torch.device = torch.device("cpu")):
+    def __init__(self, device: torch.device = torch.device("cpu"), volume_warmup_epochs: int = 0):
         """Initialize constraint handler.
 
         Args:
             device: Device to store tensors on
+            volume_warmup_epochs: Number of epochs to ignore volume loss (default: 0)
         """
         self.device = device
+        self.volume_warmup_epochs = volume_warmup_epochs
         self._epoch = 0
+
+    @property
+    def _volume_warmup_active(self) -> bool:
+        """Check if volume warmup is active (volume loss should be ignored)."""
+        return self._epoch < self.volume_warmup_epochs
 
     @abstractmethod
     def compute_loss(
@@ -128,8 +135,9 @@ class WeightedSumHandler(ConstraintHandler):
         w_reconstruction: float = 1.0,
         w_performance: float = 1.0,
         device: torch.device = torch.device("cpu"),
+        volume_warmup_epochs: int = 0,
     ):
-        super().__init__(device)
+        super().__init__(device, volume_warmup_epochs)
         self.w_v = w_volume
         self.w_r = w_reconstruction
         self.w_p = w_performance
@@ -139,6 +147,10 @@ class WeightedSumHandler(ConstraintHandler):
         losses: ConstraintLosses,
         thresholds: ConstraintThresholds,
     ) -> torch.Tensor:
+        # During warmup, only minimize reconstruction + performance
+        if self._volume_warmup_active:
+            return self.w_r * losses.reconstruction + self.w_p * losses.performance
+        # After warmup, include volume loss
         return self.w_v * losses.volume + self.w_r * losses.reconstruction + self.w_p * losses.performance
 
     def step(self, losses: ConstraintLosses, thresholds: ConstraintThresholds) -> None:
@@ -182,8 +194,9 @@ class AugmentedLagrangianHandler(ConstraintHandler):
         alpha_p: float = 0.1,
         warmup_epochs: int = 100,
         device: torch.device = torch.device("cpu"),
+        volume_warmup_epochs: int = 0,
     ):
-        super().__init__(device)
+        super().__init__(device, volume_warmup_epochs)
         self.mu_r_init = mu_r_init
         self.mu_p_init = mu_p_init
         self.mu_r_final = mu_r_final
@@ -212,6 +225,10 @@ class AugmentedLagrangianHandler(ConstraintHandler):
         losses: ConstraintLosses,
         thresholds: ConstraintThresholds,
     ) -> torch.Tensor:
+        # During volume warmup, only minimize reconstruction + performance
+        if self._volume_warmup_active:
+            return losses.reconstruction + losses.performance
+
         mu_r, mu_p = self._get_penalty_coefficients()
 
         # Compute violations
@@ -283,8 +300,9 @@ class LogBarrierHandler(ConstraintHandler):
         epsilon: float = 1e-6,
         fallback_penalty: float = 1e6,
         device: torch.device = torch.device("cpu"),
+        volume_warmup_epochs: int = 0,
     ):
-        super().__init__(device)
+        super().__init__(device, volume_warmup_epochs)
         self.t = torch.tensor(t_init, device=device)
         self.t_growth = t_growth
         self.t_max = t_max
@@ -296,6 +314,10 @@ class LogBarrierHandler(ConstraintHandler):
         losses: ConstraintLosses,
         thresholds: ConstraintThresholds,
     ) -> torch.Tensor:
+        # During volume warmup, only minimize reconstruction + performance
+        if self._volume_warmup_active:
+            return losses.reconstruction + losses.performance
+
         # Compute slack (how far we are from constraint boundary)
         rec_slack = thresholds.reconstruction - losses.reconstruction - self.epsilon
         perf_slack = thresholds.performance - losses.performance - self.epsilon
@@ -347,8 +369,9 @@ class PrimalDualHandler(ConstraintHandler):
         lr_dual: float = 0.01,
         clip_lambda: float = 100.0,
         device: torch.device = torch.device("cpu"),
+        volume_warmup_epochs: int = 0,
     ):
-        super().__init__(device)
+        super().__init__(device, volume_warmup_epochs)
         self.lr_dual = lr_dual
         self.clip_lambda = clip_lambda
 
@@ -361,6 +384,10 @@ class PrimalDualHandler(ConstraintHandler):
         losses: ConstraintLosses,
         thresholds: ConstraintThresholds,
     ) -> torch.Tensor:
+        # During volume warmup, only minimize reconstruction + performance
+        if self._volume_warmup_active:
+            return losses.reconstruction + losses.performance
+
         # Simple Lagrangian (linear penalty only)
         rec_violation = losses.reconstruction - thresholds.reconstruction
         perf_violation = losses.performance - thresholds.performance
@@ -422,8 +449,9 @@ class AdaptiveWeightHandler(ConstraintHandler):
         adaptation_lr: float = 0.01,
         update_frequency: int = 10,
         device: torch.device = torch.device("cpu"),
+        volume_warmup_epochs: int = 0,
     ):
-        super().__init__(device)
+        super().__init__(device, volume_warmup_epochs)
         # Store weights in log-space for numerical stability
         self.log_w_v = torch.tensor(torch.log(torch.tensor(w_volume_init)), device=device)
         self.log_w_r = torch.tensor(torch.log(torch.tensor(w_reconstruction_init)), device=device)
@@ -441,6 +469,12 @@ class AdaptiveWeightHandler(ConstraintHandler):
         losses: ConstraintLosses,
         thresholds: ConstraintThresholds,
     ) -> torch.Tensor:
+        # During volume warmup, only minimize reconstruction + performance
+        if self._volume_warmup_active:
+            w_r = torch.exp(self.log_w_r)
+            w_p = torch.exp(self.log_w_p)
+            return w_r * losses.reconstruction + w_p * losses.performance
+
         # Convert from log-space
         w_v = torch.exp(self.log_w_v)
         w_r = torch.exp(self.log_w_r)
@@ -543,8 +577,9 @@ class SoftplusALHandler(ConstraintHandler):
         alpha_p: float = 0.1,
         warmup_epochs: int = 100,
         device: torch.device = torch.device("cpu"),
+        volume_warmup_epochs: int = 0,
     ):
-        super().__init__(device)
+        super().__init__(device, volume_warmup_epochs)
         self.beta = beta
         self.mu_r_init = mu_r_init
         self.mu_p_init = mu_p_init
@@ -574,6 +609,10 @@ class SoftplusALHandler(ConstraintHandler):
         losses: ConstraintLosses,
         thresholds: ConstraintThresholds,
     ) -> torch.Tensor:
+        # During volume warmup, only minimize reconstruction + performance
+        if self._volume_warmup_active:
+            return losses.reconstruction + losses.performance
+
         mu_r, mu_p = self._get_penalty_coefficients()
 
         # Compute smooth violations using softplus
