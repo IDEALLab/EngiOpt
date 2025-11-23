@@ -565,16 +565,35 @@ class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
 
     @th.no_grad()
     def _update_moving_mean(self, z):
-        """Update moving statistics for geometry dimensions only (exclude angle)."""
-        # Only track statistics for geometry dimensions
-        z_geom = z[:, :-1]  # All but last dimension
+        """Update moving statistics for geometry dimensions only (exclude angle).
+
+        Maintains full latent_dim shape for compatibility with parent pruning logic,
+        but only updates geometry statistics. Angle dimension stats are tracked
+        separately but NOT used in pruning decisions.
+        """
+        z_geom = z[:, :-1]  # Geometry dimensions
+        z_angle = z[:, -1:]  # Angle dimension
 
         if not hasattr(self, "_zstd") or not hasattr(self, "_zmean"):
-            self._zstd = z_geom.std(0)
-            self._zmean = z_geom.mean(0)
+            # Initialize with full latent_dim shape
+            self._zstd = th.zeros(z.shape[1], device=z.device)
+            self._zmean = th.zeros(z.shape[1], device=z.device)
+
+            # Set geometry statistics
+            self._zstd[:-1] = z_geom.std(0)
+            self._zmean[:-1] = z_geom.mean(0)
+
+            # Set angle statistics (tracked but excluded from pruning)
+            self._zstd[-1] = z_angle.std()
+            self._zmean[-1] = z_angle.mean()
         else:
-            self._zstd = th.lerp(self._zstd, z_geom.std(0), 1 - self._beta)
-            self._zmean = th.lerp(self._zmean, z_geom.mean(0), 1 - self._beta)
+            # Update geometry statistics
+            self._zstd[:-1] = th.lerp(self._zstd[:-1], z_geom.std(0), 1 - self._beta)
+            self._zmean[:-1] = th.lerp(self._zmean[:-1], z_geom.mean(0), 1 - self._beta)
+
+            # Update angle statistics (tracked but excluded from pruning)
+            self._zstd[-1] = th.lerp(self._zstd[-1], z_angle.std(), 1 - self._beta)
+            self._zmean[-1] = th.lerp(self._zmean[-1], z_angle.mean(), 1 - self._beta)
 
     @property
     def dim(self):
@@ -591,14 +610,57 @@ class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
     def _prune_step(self, epoch, val_recon=None):
         """Pruning for geometry dimensions only (protects angle dimension).
 
-        Overrides parent to ensure angle dimension (last dim) is never pruned.
+        Overrides parent to ensure pruning policy only considers geometry dimensions,
+        excluding the angle dimension from all statistical analysis and candidate selection.
         """
-        # Call parent pruning logic
-        super()._prune_step(epoch, val_recon)
+        # --- Safeguards (same as parent) ---
+        if self.dim <= self.cfg.min_active_dims:
+            return
+        if epoch < self._next_prune_epoch:
+            return
+        if (
+            val_recon is not None
+            and self._best_val_recon < float("inf")
+            and (val_recon - self._best_val_recon) / self._best_val_recon > self.cfg.recon_tol
+        ):
+            return
 
-        # Ensure angle dimension (last) is NEVER marked for pruning
-        # This is a safety measure in case parent logic touches it
-        self._p[-1] = False
+        # --- Candidate selection from policy (GEOMETRY ONLY) ---
+        # Exclude angle dimension from policy evaluation
+        z_std_geom = self._zstd[:-1]  # Only geometry dimensions
+        p_geom = self._p[:-1]  # Only geometry pruning mask
+
+        # Only consider active (unpruned) geometry dimensions
+        z_std_active_geom = z_std_geom[~p_geom]
+        cand_active_geom = self.policy(z_std_active_geom).to(self._below_counts.device)
+
+        # Map back to full geometry dimension space
+        cand_geom = th.zeros_like(p_geom, dtype=th.bool)
+        cand_geom[~p_geom] = cand_active_geom
+
+        # Pad with False for angle dimension to maintain full latent_dim shape
+        cand = th.cat([cand_geom, th.tensor([False], device=cand_geom.device)])
+
+        # --- Debounce with consecutive evidence (same logic as parent) ---
+        if self.cfg.K_consecutive <= 1:
+            stable = cand
+            self._below_counts.zero_()
+        else:
+            self._below_counts = (self._below_counts + cand.long()) * cand.long()
+            stable = self._below_counts >= self.cfg.K_consecutive
+
+        # Filter to active dims only (exclude already pruned + angle dimension)
+        candidates = th.where(stable & (~self._p))[0]
+        if len(candidates) == 0:
+            return
+
+        # --- Cap how many dims we prune at once ---
+        prune_idx = candidates[: self.cfg.max_prune_per_epoch]
+
+        # --- Commit pruning ---
+        self._p[prune_idx] = True
+        self._z[prune_idx] = self._zmean[prune_idx]
+        self._next_prune_epoch = epoch + self.cfg.cooldown_epochs
 
 
 if __name__ == "__main__":
