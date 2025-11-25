@@ -491,11 +491,14 @@ if __name__ == "__main__":
 
             # Encode
             z = lvae.encoder(coords_batch, angle_batch)
-            # Decode
-            coords_hat, angle_hat = lvae.decoder(z)
+            # Apply pruning mask (set pruned dimensions to fixed values)
+            z[:, lvae._p] = lvae._z[lvae._p]
 
             # Update moving mean for pruning statistics
             lvae._update_moving_mean(z)
+
+            # Decode
+            coords_hat, angle_hat = lvae.decoder(z)
 
             # Compute reconstruction loss (coords + angle)
             coords_mse = nn.functional.mse_loss(coords_batch, coords_hat)
@@ -543,6 +546,8 @@ if __name__ == "__main__":
                         Xs_coords = coords_train.to(device)
                         Xs_angle_norm = angle_train_norm.to(device)
                         z = lvae.encoder(Xs_coords, Xs_angle_norm)
+                        # Apply pruning mask (set pruned dimensions to fixed values)
+                        z[:, lvae._p] = lvae._z[lvae._p]
                         z_std, idx = th.sort(z.std(0), descending=True)
                         z_mean = z.mean(0)
                         N = (z_std > 0).sum().item()
@@ -691,6 +696,8 @@ if __name__ == "__main__":
                 angle_v = batch_v[1].to(device)
                 # Encode
                 z_v = lvae.encoder(coords_v, angle_v)
+                # Apply pruning mask (set pruned dimensions to fixed values)
+                z_v[:, lvae._p] = lvae._z[lvae._p]
                 # Decode
                 coords_hat_v, angle_hat_v = lvae.decoder(z_v)
                 # Compute reconstruction loss (coords + angle)
