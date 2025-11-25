@@ -488,16 +488,24 @@ if __name__ == "__main__":
             angle_batch = batch[1].to(device)  # (B, 1)
 
             lvae.optim.zero_grad()
+
             # Encode
             z = lvae.encoder(coords_batch, angle_batch)
             # Decode
             coords_hat, angle_hat = lvae.decoder(z)
+
+            # Update moving mean for pruning statistics
+            lvae._update_moving_mean(z)
+
             # Compute reconstruction loss (coords + angle)
             coords_mse = nn.functional.mse_loss(coords_batch, coords_hat)
             angle_mse = nn.functional.mse_loss(angle_batch, angle_hat)
             rec_loss = coords_mse + angle_mse
-            # Volume loss
-            vol_loss = lvae.loss_vol(z[:, ~lvae._p])
+
+            # Volume loss with active dimension scaling
+            active_ratio = lvae.dim / len(lvae._p)
+            vol_loss = active_ratio * lvae.loss_vol(z[:, ~lvae._p])
+
             losses = th.stack([rec_loss, vol_loss])
             loss = (losses * lvae.w).sum()
             loss.backward()
@@ -689,8 +697,9 @@ if __name__ == "__main__":
                 coords_mse_v = nn.functional.mse_loss(coords_v, coords_hat_v)
                 angle_mse_v = nn.functional.mse_loss(angle_v, angle_hat_v)
                 rec_loss_v = coords_mse_v + angle_mse_v
-                # Volume loss
-                vol_loss_v = lvae.loss_vol(z_v[:, ~lvae._p])
+                # Volume loss with active dimension scaling
+                active_ratio_v = lvae.dim / len(lvae._p)
+                vol_loss_v = active_ratio_v * lvae.loss_vol(z_v[:, ~lvae._p])
                 bsz = coords_v.size(0)
                 val_rec += rec_loss_v.item() * bsz
                 val_vol += vol_loss_v.item() * bsz
