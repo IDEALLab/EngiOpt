@@ -625,8 +625,8 @@ if __name__ == "__main__":
                     angle_orig = Xs_angle_cpu[:5]
                     coords_recon, angle_recon_norm = lvae.decoder(z[:5])
                     angle_recon = lvae.decoder.denormalize_angle(angle_recon_norm)
-                    coords_recon_np = coords_recon.cpu().numpy()
-                    angle_recon_np = angle_recon.cpu().numpy()
+                    coords_recon_np = coords_recon.detach().cpu().numpy()
+                    angle_recon_np = angle_recon.detach().cpu().numpy()
 
                     for k in range(5):
                         # Original
