@@ -1,7 +1,23 @@
-"""LVAE_DP for airfoil designs with Bezier-based encoder/decoder architecture.
+"""LVAE_DP for airfoil designs with constrained volume minimization.
 
-This implementation uses a Bezier curve generator architecture for the airfoil problem.
-The encoder/decoder operates on both the airfoil geometry (coords) AND angle_of_attack.
+This implementation uses constraint-based optimization to minimize latent volume
+subject to reconstruction accuracy constraints. The encoder/decoder operates on
+both the airfoil geometry (coords) AND angle_of_attack.
+
+Optimization Problem:
+    minimize: volume_loss (number of active latent dimensions)
+    subject to: reconstruction_loss ≤ reconstruction_threshold
+
+No performance constraints since datasets lack performance information.
+
+Architecture:
+- Conv1DEncoder: Encodes (coords, angle) → latent code
+- SNBezierDecoder: Decodes latent → (coords, angle) using Bezier curves
+- LeastVolumeAE_DynamicPruning: Dynamically prunes low-variance dimensions
+
+Supported constraint methods:
+- augmented_lagrangian (recommended)
+- log_barrier, primal_dual, adaptive, softplus_al, weighted_sum
 
 Note: The EngiBench airfoil problem has a Dict design space with:
   - 'coords': (2, 192) - x,y coordinates of airfoil shape
@@ -31,7 +47,12 @@ import tyro
 import wandb
 
 from engiopt.lvae_2d.aes import LeastVolumeAE_DynamicPruning
-from engiopt.lvae_2d.utils import polynomial_schedule
+from engiopt.lvae_2d.constraint_handlers import (
+    ConstraintHandler,
+    ConstraintLosses,
+    ConstraintThresholds,
+    create_constraint_handler,
+)
 
 
 @dataclass
@@ -65,18 +86,64 @@ class Args:
     # LVAE-specific
     latent_dim: int = 250
     """Dimensionality of the latent space (overestimate)."""
-    w_v: float = 0.01
-    """Weight for the volume loss."""
-    polynomial_schedule_n: int = 100
-    """Number of epochs for the polynomial schedule."""
-    polynomial_schedule_p: int = 2
-    """Polynomial exponent for the schedule."""
     pruning_epoch: int = 500
     """Epoch to start pruning dimensions."""
     beta: float = 0.9
     """Momentum for EMA of latent statistics."""
     eta: float = 1e-4
     """Scaling factor for the volume loss."""
+
+    # Constraint optimization
+    constraint_method: str = "augmented_lagrangian"
+    """Constraint method: weighted_sum, augmented_lagrangian, log_barrier, primal_dual, adaptive, softplus_al"""
+    reconstruction_threshold: float = 0.001
+    """Constraint threshold for reconstruction MSE."""
+    volume_warmup_epochs: int = 50
+    """Number of epochs to ignore volume loss (prevents early collapse)."""
+
+    # Weighted sum parameters (if using weighted_sum method)
+    w_volume: float = 1.0
+    """Weight for volume loss in weighted sum method."""
+    w_reconstruction: float = 1.0
+    """Weight for reconstruction loss in weighted sum method."""
+
+    # Augmented Lagrangian parameters
+    alpha_r: float = 0.1
+    """Learning rate for reconstruction Lagrange multiplier."""
+    mu_r_init: float = 1.0
+    """Initial penalty coefficient for reconstruction constraint."""
+    mu_r: float = 10.0
+    """Final penalty coefficient for reconstruction constraint."""
+    warmup_epochs: int = 100
+    """Epochs to ramp up penalty coefficients."""
+
+    # Log barrier parameters
+    t_init: float = 1.0
+    """Initial barrier parameter."""
+    t_growth: float = 1.05
+    """Barrier parameter growth rate per epoch."""
+    t_max: float = 1000.0
+    """Maximum barrier parameter."""
+    barrier_epsilon: float = 1e-6
+    """Safety margin from constraint boundary."""
+    fallback_penalty: float = 1e6
+    """Penalty when constraints violated."""
+
+    # Primal-dual parameters
+    lr_dual: float = 0.01
+    """Learning rate for dual variable updates."""
+    clip_lambda: float = 100.0
+    """Maximum value for dual variables."""
+
+    # Adaptive weight parameters
+    adaptation_lr: float = 0.01
+    """Learning rate for weight adaptation."""
+    update_frequency: int = 10
+    """Update weights every N steps."""
+
+    # Softplus AL parameters
+    softplus_beta: float = 10.0
+    """Smoothness parameter for softplus."""
 
     # Bezier architecture parameters
     n_control_points: int = 64
@@ -348,6 +415,110 @@ class SNBezierDecoder(nn.Module):
 
 
 # ============================================================================
+# Constrained LVAE Wrapper
+# ============================================================================
+
+
+class ConstrainedLVAE_Airfoil(LeastVolumeAE_DynamicPruning):
+    """Airfoil LVAE with constraint-based volume minimization.
+
+    Wraps LeastVolumeAE_DynamicPruning to support constrained optimization:
+        minimize: volume_loss
+        subject to: reconstruction_loss ≤ reconstruction_threshold
+
+    No performance constraints since datasets lack performance information.
+    Performance loss is set to 0.0 and threshold to infinity.
+    """
+
+    def __init__(
+        self,
+        *args,
+        constraint_handler: ConstraintHandler,
+        reconstruction_threshold: float,
+        **kwargs,
+    ):
+        """Initialize constrained LVAE for airfoil designs.
+
+        Args:
+            constraint_handler: Constraint optimization method handler
+            reconstruction_threshold: Constraint on reconstruction MSE
+            *args, **kwargs: Passed to parent LeastVolumeAE_DynamicPruning
+        """
+        super().__init__(*args, **kwargs)
+        self.constraint_handler = constraint_handler
+        self.reconstruction_threshold = reconstruction_threshold
+        self.performance_threshold = float("inf")  # Not used (no performance data)
+
+    def loss(self, batch, **kwargs):
+        """Compute loss components and store for constraint handler.
+
+        Args:
+            batch: Tuple of (coords, angle) tensors
+
+        Returns:
+            torch.Tensor: [reconstruction_loss, volume_loss] for logging
+        """
+        coords, angle = batch
+
+        # Encode with pruning mask
+        z = self.encoder(coords, angle)
+        z[:, self._p] = self._z[self._p]
+
+        # Update moving mean for pruning statistics
+        self._update_moving_mean(z)
+
+        # Decode
+        coords_hat, angle_hat = self.decoder(z)
+
+        # Compute reconstruction loss (coords + angle)
+        coords_mse = nn.functional.mse_loss(coords, coords_hat)
+        angle_mse = nn.functional.mse_loss(angle, angle_hat)
+        rec_loss = coords_mse + angle_mse
+
+        # Volume loss with active dimension scaling
+        active_ratio = self.dim / len(self._p)
+        vol_loss = active_ratio * self.loss_vol(z[:, ~self._p])
+
+        # Store for constraint handler (performance=0 since no performance data)
+        self._loss_components = ConstraintLosses(
+            volume=vol_loss, reconstruction=rec_loss, performance=th.tensor(0.0, device=vol_loss.device)
+        )
+
+        # Return for logging
+        return th.stack([rec_loss, vol_loss])
+
+    def compute_total_loss(self):
+        """Compute total loss using constraint handler for backprop.
+
+        Returns:
+            torch.Tensor: Total loss for optimization
+        """
+        thresholds = ConstraintThresholds(
+            reconstruction=self.reconstruction_threshold,
+            performance=self.performance_threshold,  # inf, effectively ignored
+        )
+        return self.constraint_handler.compute_loss(self._loss_components, thresholds)
+
+    def update_constraint_handler(self):
+        """Update constraint handler state (dual variables, barrier params, etc.)."""
+        thresholds = ConstraintThresholds(
+            reconstruction=self.reconstruction_threshold, performance=self.performance_threshold
+        )
+        # Detach for handler updates
+        detached = ConstraintLosses(
+            volume=self._loss_components.volume.detach(),
+            reconstruction=self._loss_components.reconstruction.detach(),
+            performance=self._loss_components.performance.detach(),
+        )
+        self.constraint_handler.step(detached, thresholds)
+
+    def epoch_hook(self, epoch, *args, **kwargs):
+        """Propagate epoch to constraint handler for warmup/scheduling."""
+        super().epoch_hook(epoch, *args, **kwargs)
+        self.constraint_handler.epoch_hook(epoch)
+
+
+# ============================================================================
 # Main Training Script
 # ============================================================================
 
@@ -451,18 +622,61 @@ if __name__ == "__main__":
     else:
         raise ValueError(f"Unknown pruning_strategy: {args.pruning_strategy}")
 
-    # Initialize LVAE with dynamic pruning
-    lvae = LeastVolumeAE_DynamicPruning(
+    # Create constraint handler
+    handler_kwargs = {"device": device, "volume_warmup_epochs": args.volume_warmup_epochs}
+
+    if args.constraint_method == "weighted_sum":
+        handler_kwargs.update({
+            "w_volume": args.w_volume,
+            "w_reconstruction": args.w_reconstruction,
+            "w_performance": 0.0,  # Not used
+        })
+    elif args.constraint_method in ["augmented_lagrangian", "softplus_al"]:
+        handler_kwargs.update({
+            "alpha_r": args.alpha_r,
+            "alpha_p": 0.0,  # Not used (no performance)
+            "mu_r_init": args.mu_r_init,
+            "mu_p_init": 0.0,
+            "mu_r_final": args.mu_r,
+            "mu_p_final": 0.0,
+            "warmup_epochs": args.warmup_epochs,
+        })
+        if args.constraint_method == "softplus_al":
+            handler_kwargs["beta"] = args.softplus_beta
+    elif args.constraint_method == "log_barrier":
+        handler_kwargs.update({
+            "t_init": args.t_init,
+            "t_growth": args.t_growth,
+            "t_max": args.t_max,
+            "epsilon": args.barrier_epsilon,
+            "fallback_penalty": args.fallback_penalty,
+        })
+    elif args.constraint_method == "primal_dual":
+        handler_kwargs.update({
+            "lr_dual": args.lr_dual,
+            "clip_lambda": args.clip_lambda,
+        })
+    elif args.constraint_method == "adaptive":
+        handler_kwargs.update({
+            "w_volume_init": 1.0,
+            "w_reconstruction_init": 1.0,
+            "w_performance_init": 0.0,
+            "adaptation_lr": args.adaptation_lr,
+            "update_frequency": args.update_frequency,
+        })
+    else:
+        raise ValueError(f"Unknown constraint_method: {args.constraint_method}")
+
+    constraint_handler = create_constraint_handler(args.constraint_method, **handler_kwargs)
+
+    # Initialize LVAE with dynamic pruning and constraint handler
+    lvae = ConstrainedLVAE_Airfoil(
         encoder=enc,
         decoder=dec,
         optimizer=Adam(list(enc.parameters()) + list(dec.parameters()), lr=args.lr),
         latent_dim=args.latent_dim,
-        weights=polynomial_schedule(
-            [1.0, args.w_v],
-            N=args.polynomial_schedule_n,
-            p=args.polynomial_schedule_p,
-            w_init=[1.0, 0],
-        ),
+        constraint_handler=constraint_handler,
+        reconstruction_threshold=args.reconstruction_threshold,
         pruning_epoch=args.pruning_epoch,
         beta=args.beta,
         eta=args.eta,
@@ -489,30 +703,21 @@ if __name__ == "__main__":
 
             lvae.optim.zero_grad()
 
-            # Encode
-            z = lvae.encoder(coords_batch, angle_batch)
-            # Apply pruning mask (set pruned dimensions to fixed values)
-            z[:, lvae._p] = lvae._z[lvae._p]
+            # Compute loss components (handled internally by wrapper)
+            losses = lvae.loss((coords_batch, angle_batch))  # [rec, vol] for logging
 
-            # Update moving mean for pruning statistics
-            lvae._update_moving_mean(z)
+            # Get total loss from constraint handler
+            loss = lvae.compute_total_loss()
 
-            # Decode
-            coords_hat, angle_hat = lvae.decoder(z)
-
-            # Compute reconstruction loss (coords + angle)
-            coords_mse = nn.functional.mse_loss(coords_batch, coords_hat)
-            angle_mse = nn.functional.mse_loss(angle_batch, angle_hat)
-            rec_loss = coords_mse + angle_mse
-
-            # Volume loss with active dimension scaling
-            active_ratio = lvae.dim / len(lvae._p)
-            vol_loss = active_ratio * lvae.loss_vol(z[:, ~lvae._p])
-
-            losses = th.stack([rec_loss, vol_loss])
-            loss = (losses * lvae.w).sum()
+            # Backprop
             loss.backward()
             lvae.optim.step()
+
+            # Update constraint handler state
+            lvae.update_constraint_handler()
+
+            # Get handler metrics for logging
+            handler_metrics = lvae.constraint_handler.get_metrics()
 
             bar.set_postfix(
                 {
@@ -532,6 +737,7 @@ if __name__ == "__main__":
                         "total_loss": loss.item(),
                         "active_dims": lvae.dim,
                         "epoch": epoch,
+                        **handler_metrics,  # Add constraint handler metrics
                     }
                 )
                 print(
@@ -713,7 +919,17 @@ if __name__ == "__main__":
                 n += bsz
         val_rec /= n
         val_vol /= n
-        val_total = val_rec + args.w_v * val_vol
+
+        # Compute validation total loss using constraint handler
+        val_loss_components = ConstraintLosses(
+            volume=th.tensor(val_vol, device=device),
+            reconstruction=th.tensor(val_rec, device=device),
+            performance=th.tensor(0.0, device=device),
+        )
+        val_thresholds = ConstraintThresholds(
+            reconstruction=args.reconstruction_threshold, performance=float("inf")
+        )
+        val_total = lvae.constraint_handler.compute_loss(val_loss_components, val_thresholds).item()
 
         # Pass validation reconstruction loss to pruning logic
         lvae.epoch_report(epoch=epoch, callbacks=[], batch=None, loss=loss, pbar=None, val_recon=val_rec)
