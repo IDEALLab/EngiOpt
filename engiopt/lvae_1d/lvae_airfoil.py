@@ -475,6 +475,10 @@ class ConstrainedLVAE_Airfoil(LeastVolumeAE_DynamicPruning):
         angle_mse = nn.functional.mse_loss(angle, angle_hat)
         rec_loss = coords_mse + angle_mse
 
+        # Store individual components for separate logging
+        self._coords_mse = coords_mse
+        self._angle_mse = angle_mse
+
         # Volume loss with active dimension scaling
         active_ratio = self.dim / len(self._p)
         vol_loss = active_ratio * self.loss_vol(z[:, ~self._p])
@@ -733,6 +737,8 @@ if __name__ == "__main__":
                 wandb.log(
                     {
                         "rec_loss": losses[0].item(),
+                        "coords_mse": lvae._coords_mse.item(),  # Track coords separately
+                        "angle_mse": lvae._angle_mse.item(),  # Track angle separately
                         "vol_loss": losses[1].item(),
                         "total_loss": loss.item(),
                         "active_dims": lvae.dim,
