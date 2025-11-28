@@ -435,6 +435,10 @@ class ConstrainedLVAE_Airfoil(LeastVolumeAE_DynamicPruning):
         *args,
         constraint_handler: ConstraintHandler,
         reconstruction_threshold: float,
+        coords_mean: th.Tensor,
+        coords_std: th.Tensor,
+        angle_mean: th.Tensor,
+        angle_std: th.Tensor,
         **kwargs,
     ):
         """Initialize constrained LVAE for airfoil designs.
@@ -442,12 +446,22 @@ class ConstrainedLVAE_Airfoil(LeastVolumeAE_DynamicPruning):
         Args:
             constraint_handler: Constraint optimization method handler
             reconstruction_threshold: Constraint on reconstruction MSE
+            coords_mean: Mean for coords normalization (1, 2, 192)
+            coords_std: Std for coords normalization (1, 2, 192)
+            angle_mean: Mean for angle normalization (1, 1)
+            angle_std: Std for angle normalization (1, 1)
             *args, **kwargs: Passed to parent LeastVolumeAE_DynamicPruning
         """
         super().__init__(*args, **kwargs)
         self.constraint_handler = constraint_handler
         self.reconstruction_threshold = reconstruction_threshold
         self.performance_threshold = float("inf")  # Not used (no performance data)
+
+        # Store normalization parameters as buffers (moved to device with model)
+        self.register_buffer("coords_mean", coords_mean)
+        self.register_buffer("coords_std", coords_std)
+        self.register_buffer("angle_mean", angle_mean)
+        self.register_buffer("angle_std", angle_std)
 
     def loss(self, batch, **kwargs):
         """Compute loss components and store for constraint handler.
@@ -470,22 +484,27 @@ class ConstrainedLVAE_Airfoil(LeastVolumeAE_DynamicPruning):
         # Decode
         coords_hat, angle_hat = self.decoder(z)
 
-        # Compute reconstruction loss (coords + angle)
-        # Weight by element count for balanced contribution
-        # coords: (B, 2, 192) = 384 elements
-        # angle: (B, 1) = 1 element
-        # Total: 385 elements
-        coords_mse = nn.functional.mse_loss(coords, coords_hat)
-        angle_mse = nn.functional.mse_loss(angle, angle_hat)
+        # Compute reconstruction loss with joint normalization
+        # Normalize both coords and angle using the same statistics computed from concatenated vector
+        # This ensures all elements are on the same scale for fair MSE comparison
+        coords_norm = (coords - self.coords_mean) / self.coords_std  # (B, 2, 192)
+        coords_hat_norm = (coords_hat - self.coords_mean) / self.coords_std  # (B, 2, 192)
+        angle_norm = (angle - self.angle_mean) / self.angle_std  # (B, 1)
+        angle_hat_norm = (angle_hat - self.angle_mean) / self.angle_std  # (B, 1)
 
-        coords_weight = 384.0 / 385.0  # ≈ 0.997
-        angle_weight = 1.0 / 385.0      # ≈ 0.003
+        # Flatten and concatenate into single vector: (B, 385)
+        coords_norm_flat = coords_norm.reshape(coords.shape[0], -1)  # (B, 384)
+        coords_hat_norm_flat = coords_hat_norm.reshape(coords_hat.shape[0], -1)  # (B, 384)
 
-        rec_loss = coords_weight * coords_mse + angle_weight * angle_mse
+        target_vec = th.cat([coords_norm_flat, angle_norm], dim=1)  # (B, 385)
+        recon_vec = th.cat([coords_hat_norm_flat, angle_hat_norm], dim=1)  # (B, 385)
 
-        # Store individual components for separate logging
-        self._coords_mse = coords_mse
-        self._angle_mse = angle_mse
+        # Single MSE on normalized concatenated vector
+        rec_loss = nn.functional.mse_loss(recon_vec, target_vec)
+
+        # Store individual components for separate logging (unnormalized MSE)
+        self._coords_mse = nn.functional.mse_loss(coords, coords_hat)
+        self._angle_mse = nn.functional.mse_loss(angle, angle_hat)
 
         # Volume loss with active dimension scaling
         active_ratio = self.dim / len(self._p)
@@ -600,11 +619,32 @@ if __name__ == "__main__":
     angle_val_norm = (angle_val - angle_min) / (angle_max - angle_min + eps_angle)
     angle_test_norm = (angle_test - angle_min) / (angle_max - angle_min + eps_angle)
 
+    # Compute normalization statistics for concatenated coords+angle vector
+    # This ensures coords and angle are on the same scale for MSE computation
+    # Concatenate: coords (B, 2, 192) flattened to (B, 384) + angle (B, 1) -> (B, 385)
+    coords_train_flat = coords_train.reshape(coords_train.shape[0], -1)  # (N, 384)
+    concat_train = th.cat([coords_train_flat, angle_train_norm], dim=1)  # (N, 385)
+
+    # Compute mean and std for standardization
+    concat_mean = concat_train.mean(dim=0, keepdim=True)  # (1, 385)
+    concat_std = concat_train.std(dim=0, keepdim=True) + 1e-7  # (1, 385)
+
+    # Store for use in loss computation
+    # Reshape back to match coords (2, 192) and angle (1) shapes
+    coords_mean = concat_mean[:, :384].reshape(1, 2, 192)  # (1, 2, 192)
+    coords_std = concat_std[:, :384].reshape(1, 2, 192)  # (1, 2, 192)
+    angle_mean = concat_mean[:, 384:]  # (1, 1)
+    angle_std = concat_std[:, 384:]  # (1, 1)
+
     print(f"{'=' * 60}")
-    print("Angle of Attack Normalization Statistics")
+    print("Normalization Statistics (for MSE computation)")
     print(f"{'=' * 60}")
-    print(f"Original range:      [{angle_min:.6f}, {angle_max:.6f}]")
-    print(f"Normalized range:    [{angle_train_norm.min():.6f}, {angle_train_norm.max():.6f}]")
+    print(f"Coords mean range:   [{coords_mean.min():.6f}, {coords_mean.max():.6f}]")
+    print(f"Coords std range:    [{coords_std.min():.6f}, {coords_std.max():.6f}]")
+    print(f"Angle mean:          {angle_mean.item():.6f}")
+    print(f"Angle std:           {angle_std.item():.6f}")
+    print(f"Angle of Attack original range: [{angle_min:.6f}, {angle_max:.6f}]")
+    print(f"Angle of Attack normalized range: [{angle_train_norm.min():.6f}, {angle_train_norm.max():.6f}]")
     print(f"{'=' * 60}\n")
 
     # Build encoder and decoder
@@ -689,6 +729,10 @@ if __name__ == "__main__":
         latent_dim=args.latent_dim,
         constraint_handler=constraint_handler,
         reconstruction_threshold=args.reconstruction_threshold,
+        coords_mean=coords_mean,
+        coords_std=coords_std,
+        angle_mean=angle_mean,
+        angle_std=angle_std,
         pruning_epoch=args.pruning_epoch,
         beta=args.beta,
         eta=args.eta,
