@@ -148,6 +148,8 @@ class Args:
     # Bezier architecture parameters
     n_control_points: int = 64
     """Number of control points for Bezier curve generation."""
+    decoder_lipschitz_scale: float = 1.0
+    """Lipschitz constant multiplier for decoder output."""
 
     # Dynamic pruning
     pruning_strategy: str = "lognorm"
@@ -307,6 +309,7 @@ class SNBezierDecoder(nn.Module):
     """Spectral normalized Bezier decoder.
 
     Generates airfoil coords (B, 2, 192) and angle_of_attack (B, 1) from latent (B, latent_dim).
+    Applies Lipschitz scaling to entire output (coords + angle) to ensure unified constraint.
     """
 
     def __init__(
@@ -314,6 +317,7 @@ class SNBezierDecoder(nn.Module):
         latent_dim: int,
         n_control_points: int,
         n_data_points: int,
+        lipschitz_scale: float = 1.0,
         angle_min: float = 0.0,
         angle_max: float = 1.0,
         eps: float = 1e-7,
@@ -322,6 +326,7 @@ class SNBezierDecoder(nn.Module):
         self.latent_dim = latent_dim
         self.n_control_points = n_control_points
         self.n_data_points = n_data_points
+        self.lipschitz_scale = lipschitz_scale
         self.register_buffer("angle_min", th.tensor(angle_min))
         self.register_buffer("angle_max", th.tensor(angle_max))
         self.eps = eps
@@ -396,9 +401,11 @@ class SNBezierDecoder(nn.Module):
 
         # Generate Bezier curve
         coords, _, _ = self.bezier_layer(features, cp, w)
+        coords = coords * self.lipschitz_scale
 
         # Generate angle_of_attack (normalized [0, 1])
         angle_norm = th.sigmoid(self.angle_head(z))  # (B, 1) in [0, 1]
+        angle_norm = angle_norm * self.lipschitz_scale
 
         return coords, angle_norm
 
@@ -653,11 +660,12 @@ if __name__ == "__main__":
         latent_dim=args.latent_dim,
         n_control_points=args.n_control_points,
         n_data_points=n_data_points,
+        lipschitz_scale=args.decoder_lipschitz_scale,
         angle_min=angle_min.item(),
         angle_max=angle_max.item(),
     )
 
-    print(f"Using Bezier-based decoder with {args.n_control_points} control points")
+    print(f"Using Bezier-based decoder with {args.n_control_points} control points (Lipschitz scale: {args.decoder_lipschitz_scale})")
     print(f"Coords shape: {coords_shape}")
 
     # Build pruning parameters
