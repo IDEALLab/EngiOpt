@@ -4,7 +4,9 @@ import os
 import tyro
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import torch as th
+import torch.nn.functional as F
 from torch import nn
+from torch.nn.utils import weight_norm
 import numpy as np
 import random
 import tqdm
@@ -63,12 +65,7 @@ class Args:
     """Nonlinearity to use in the ResNet blocks. One of 'concat_elu', 'elu', 'relu'."""
 
 
-# IMPLEMENT PIXELCNN++ HERE
-class PixelCNNpp(nn.Module):
-    def __init__(self):
-        super().__init__()
-
-    def discretized_mix_logistic_loss(x, l):
+def discretized_mix_logistic_loss(x, l):
         pass
         # """ log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval """
         # xs = int_shape(x) # true image (i.e. labels) to regress to, e.g. (B,32,32,3)
@@ -112,6 +109,284 @@ class PixelCNNpp(nn.Module):
         # else:
         #     return -tf.reduce_sum(log_sum_exp(log_probs),[1,2])
 
+def concat_elu(x):
+    """Like concatenated ReLU (http://arxiv.org/abs/1603.05201), but then with ELU."""
+    # Pytorch ordering
+    axis = len(x.size()) - 3
+    #print(axis)
+    return F.elu(th.cat([x, -x], dim=axis))
+
+class nin(nn.Module):
+    def __init__(self, nr_filters_in, nr_filters_out):
+        super().__init__()
+        self.lin_a = weight_norm(nn.Linear(nr_filters_in, nr_filters_out))
+        self.nr_filters_out = nr_filters_out
+
+    def forward(self, x):
+        x = x.permute(0, 2, 3, 1)  # BCHW -> BHWC
+        xs = list(x.shape)
+        x = x.reshape(-1, xs[3])  # -> [B*H*W, C]
+        out = self.lin_a(x)
+        out = out.view(xs[0], xs[1], xs[2], self.nr_filters_out)
+        return out.permute(0, 3, 1, 2)  # BHWC -> BCHW
+
+class GatedResnet(nn.Module):
+    def __init__(self, nr_filters, conv_op, resnet_nonlinearity=concat_elu, skip_connection=0, dropout_p=0.5):
+        super().__init__()
+        self.skip_connection = skip_connection
+        self.resnet_nonlinearity = resnet_nonlinearity
+
+        if resnet_nonlinearity == "concat_elu":
+            self.filter_doubling = 2
+        else:
+            self.filter_doubling = 1
+
+        self.conv_input = conv_op(self.filter_doubling * nr_filters, nr_filters)
+
+        if skip_connection != 0:
+            self.nin_skip = nin(self.filter_doubling * skip_connection * nr_filters, nr_filters)
+
+        self.dropout = nn.Dropout2d(dropout_p)
+        self.conv_out = conv_op(self.filter_doubling * nr_filters, 2 * nr_filters) # output has to be doubled for gating
+
+        self.h_lin = nn.Linear(nr_conditions, 2 * nr_filters)
+
+
+    def forward(self, x, a=None, h=None):
+        c1 = self.conv_input(self.resnet_nonlinearity(x))
+        if a is not None :
+            c1 += self.nin_skip(self.resnet_nonlinearity(a))
+        c1 = self.resnet_nonlinearity(c1)
+        c1 = self.dropout(c1)
+        c2 = self.conv_out(c1)
+        if h is not None:
+            # in forward, when `h` is [B, nr_conditions, 1, 1]
+            h_flat = h.view(h.size(0), -1)                        # [B, nr_conditions]
+            h_proj = self.h_lin(h_flat).unsqueeze(-1).unsqueeze(-1)  # [B, 2*nr_filters, 1, 1]
+            c2 += h_proj
+        a, b = th.chunk(c2, 2, dim=1)
+        c3 = a * F.sigmoid(b)
+        return x + c3
+
+def downShift(x, pad):
+    x = pad(x)
+    return x
+
+def downRightShift(x, pad):
+    pad(x)
+    return x
+
+class DownShiftedConv2d(nn.Module):
+    def __init__(self,
+                 nr_filters_in,
+                 nr_filters_out,
+                 filter_size=(2,3),
+                 stride=(1,1),
+                 shift_output_down=False):
+
+        super().__init__()
+        self.pad = nn.ZeroPad2d((int((filter_size[1] - 1) / 2), int((filter_size[1] - 1) / 2), filter_size[0]-1, 0)) # padding left, right, top, bottom
+        self.conv = weight_norm(nn.Conv2d(nr_filters_in, nr_filters_out, filter_size, stride))
+        self.shift_output_down = shift_output_down
+        self.down_shift = downShift
+        self.down_shift_pad = nn.ZeroPad2d((0,0,1,0))
+
+    def forward(self, x):
+        x = self.pad(x)
+        x = self.conv(x)
+        if self.shift_output_down:
+            x = self.down_shift(x, pad=self.down_shift_pad)
+        return x
+
+class DownShiftedDeconv2d(nn.Module):
+    def __init__(self,
+                 nr_filters_in,
+                 nr_filters_out,
+                 filter_size=(2,3),
+                 stride=(1,1)):
+
+        super().__init__()
+        self.deconv = weight_norm(nn.ConvTranspose2d(nr_filters_in, nr_filters_out, filter_size, stride, output_padding=1))
+        self.filter_size = filter_size
+        self.stride = stride
+
+    def forward(self, x):
+        x = self.deconv(x)
+        xs = list(x.shape)
+        return x[:, :, :(xs[2] - self.filter_size[0] + 1), int((self.filter_size[1] - 1) / 2):(xs[3] - int((self.filter_size[1] - 1) / 2))]
+
+class DownRightShiftedConv2d(nn.Module):
+    def __init__(self,
+                 nr_filters_in,
+                 nr_filters_out,
+                 filter_size=(2,2),
+                 stride=(1,1),
+                 shift_output_right_down=False):
+
+        super().__init__()
+        self.pad = nn.ZeroPad2d((filter_size[1] - 1, 0, filter_size[0]-1, 0)) # padding left, right, top, bottom
+        self.conv = weight_norm(nn.Conv2d(nr_filters_in, nr_filters_out, filter_size, stride))
+        self.shift_output_right_down = shift_output_right_down
+        self.down_right_shift = downRightShift
+        self.down_right_shift_pad = nn.ZeroPad2d((1,0,0,0))
+
+    def forward(self, x):
+        x = self.pad(x)
+        x = self.conv(x)
+        if self.shift_output_right_down:
+            x = self.down_right_shift(x, pad=self.down_right_shift_pad)
+        return x
+
+class DownRightShiftedDeconv2d(nn.Module):
+    def __init__(self,
+                 nr_filters_in,
+                 nr_filters_out,
+                 filter_size=(2,2),
+                 stride=(1,1)):
+
+        super().__init__()
+        self.deconv = weight_norm(nn.ConvTranspose2d(nr_filters_in, nr_filters_out, filter_size, stride, output_padding=1))
+        self.filter_size = filter_size
+        self.stride = stride
+
+    def forward(self, x):
+        x = self.deconv(x)
+        xs = list(x.shape)
+        return x[:, :, :(xs[2] - self.filter_size[0] + 1), :(xs[3] - self.filter_size[1] + 1)]
+
+
+# IMPLEMENT PIXELCNN++ HERE
+class PixelCNNpp(nn.Module):
+    def __init__(self,
+                 nr_resnet: int,
+                 nr_filters: int,
+                 nr_logistic_mix: int,
+                 resnet_nonlinearity: str,
+                 dropout_p: float,
+                 input_channels: int = 1):
+
+        super().__init__()
+        if resnet_nonlinearity == "concat_elu" :
+            self.resnet_nonlinearity = concat_elu
+        elif resnet_nonlinearity == "elu" :
+            self.resnet_nonlinearity = F.elu
+        elif resnet_nonlinearity == "relu" :
+            self.resnet_nonlinearity = F.relu
+        else:
+            raise Exception("Only concat elu, elu and relu are supported as resnet nonlinearity.")  # noqa: TRY002
+
+        self.nr_resnet = nr_resnet
+        self.nr_filters = nr_filters
+        self.nr_logistic_mix = nr_logistic_mix
+        self.dropout_p = dropout_p
+        self.input_channels = input_channels
+
+
+        # UP PASS blocks
+        self.u_init = DownShiftedConv2d(input_channels + 1, nr_filters, filter_size=(2,3), stride=(1,1), shift_output_down=True)
+        self.ul_init = nn.ModuleList([DownShiftedConv2d(input_channels + 1, nr_filters, filter_size=(1,3), stride=(1,1), shift_output_down=True),
+                                      DownRightShiftedConv2d(input_channels + 1, nr_filters, filter_size=(2,1), stride=(1,1), shift_output_right_down=True)])
+
+        self.gated_resnet_block_u_up_1 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=0) for _ in range(nr_resnet)])
+        self.gated_resnet_block_ul_up_1 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=1) for _ in range(nr_resnet)])
+
+        self.downsize_u_1 = DownShiftedConv2d(nr_filters, nr_filters, filter_size=(2,3), stride=(2,2))
+        self.downsize_ul_1 = DownRightShiftedConv2d(nr_filters, nr_filters, filter_size=(2,2), stride=(2,2))
+
+        self.gated_resnet_block_u_up_2 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=0) for _ in range(nr_resnet)])
+        self.gated_resnet_block_ul_up_2 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=1) for _ in range(nr_resnet)])
+
+        self.downsize_u_2 = DownShiftedConv2d(nr_filters, nr_filters, filter_size=(2,3), stride=(2,2))
+        self.downsize_ul_2 = DownRightShiftedConv2d(nr_filters, nr_filters, filter_size=(2,2), stride=(2,2))
+
+        self.gated_resnet_block_u_up_3 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=0) for _ in range(nr_resnet)])
+        self.gated_resnet_block_ul_up_3 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=1) for _ in range(nr_resnet)])
+
+
+        # DOWN PASS blocks
+        self.gated_resnet_block_u_down_1 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=1) for _ in range(nr_resnet)])
+        self.gated_resnet_block_ul_down_1 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=2) for _ in range(nr_resnet)])
+
+        self.upsize_u_1 = DownShiftedDeconv2d(nr_filters, nr_filters, filter_size=(2,3), stride=(2,2))
+        self.upsize_ul_1 = DownRightShiftedDeconv2d(nr_filters, nr_filters, filter_size=(2,2), stride=(2,2))
+
+        self.gated_resnet_block_u_down_2 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=1) for _ in range(nr_resnet)])
+        self.gated_resnet_block_ul_down_2 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=2) for _ in range(nr_resnet)])
+
+        self.upsize_u_2 = DownShiftedDeconv2d(nr_filters, nr_filters, filter_size=(2,3), stride=(2,2))
+        self.upsize_ul_2 = DownRightShiftedDeconv2d(nr_filters, nr_filters, filter_size=(2,2), stride=(2,2))
+
+        self.gated_resnet_block_u_down_3 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=1) for _ in range(nr_resnet)])
+        self.gated_resnet_block_ul_down_3 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=2) for _ in range(nr_resnet)])
+
+        num_mix = 3 if self.input_channels == 1 else 10
+        self.nin_out = nin(nr_filters, num_mix * nr_logistic_mix)
+
+    def forward(self, x: th.Tensor, c: th.Tensor) -> th.Tensor:
+        xs = list(x.shape)
+        padding = th.ones(xs[0], 1, xs[2], xs[3], device=x.device)
+        x = th.cat((x, padding), dim=1)  # add extra channel for padding
+
+        # UP PASS ("encoder")
+        u_list = [self.u_init(x)]
+        ul_list = [self.ul_init[0](x) + self.ul_init[1](x)]
+
+        for i in range(self.nr_resnet):
+            u_list.append(self.gated_resnet_block_u_up_1[i](u_list[-1], a=None, h=c))
+            ul_list.append(self.gated_resnet_block_ul_up_1[i](ul_list[-1], a=u_list[-1], h=c))
+
+        u_list.append(self.downsize_u_1(u_list[-1]))
+        ul_list.append(self.downsize_ul_1(ul_list[-1]))
+
+        for i in range(self.nr_resnet):
+            u_list.append(self.gated_resnet_block_u_up_2[i](u_list[-1], a=None, h=c))
+            ul_list.append(self.gated_resnet_block_ul_up_2[i](ul_list[-1], a=u_list[-1], h=c))
+
+        u_list.append(self.downsize_u_2(u_list[-1]))
+        ul_list.append(self.downsize_ul_2(ul_list[-1]))
+
+        for i in range(self.nr_resnet):
+            u_list.append(self.gated_resnet_block_u_up_3[i](u_list[-1], a=None, h=c))
+            ul_list.append(self.gated_resnet_block_ul_up_3[i](ul_list[-1], a=u_list[-1], h=c))
+
+        # DOWN PASS ("decoder")
+        u  = u_list.pop()
+        ul = ul_list.pop()
+
+        for i in range(self.nr_resnet):
+            u = self.gated_resnet_block_u_down_1[i](u, a=u_list.pop(), h=c)
+            ul = self.gated_resnet_block_ul_down_1[i](ul, a=th.cat((u, ul_list.pop()), dim=1), h=c)
+
+        u = self.upsize_u_1(u)
+        ul = self.upsize_ul_1(ul)
+
+        for i in range(self.nr_resnet):
+            u = self.gated_resnet_block_u_down_2[i](u, a=u_list.pop(), h=c)
+            ul = self.gated_resnet_block_ul_down_2[i](ul, a=th.cat((u, ul_list.pop()), dim=1), h=c)
+
+        u = self.upsize_u_2(u)
+        ul = self.upsize_ul_2(ul)
+
+        for i in range(self.nr_resnet):
+            u = self.gated_resnet_block_u_down_3[i](u, a=u_list.pop(), h=c)
+            ul = self.gated_resnet_block_ul_down_3[i](ul, a=th.cat((u, ul_list.pop()), dim=1), h=c)
+
+
+        x_out = self.nin_out(F.elu(ul))
+
+        assert len(u_list) == 0
+        assert len(ul_list) == 0
+
+        return x_out
+
+def log_sum_exp(x):
+    """Numerically stable log_sum_exp implementation that prevents overflow."""
+    # TF ordering
+    axis  = len(x.size()) - 1
+    m, _  = th.max(x, dim=axis)
+    m2, _ = th.max(x, dim=axis, keepdim=True)
+    return m + th.log(th.sum(th.exp(x - m2), dim=axis))
+
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
@@ -121,7 +396,7 @@ if __name__ == "__main__":
 
     design_shape = problem.design_space.shape
     print(f"Design shape: {design_shape}")
-    conditions = problem.conditions
+    conditions = problem.conditions_keys
     nr_conditions = len(conditions)
 
 
@@ -144,9 +419,10 @@ if __name__ == "__main__":
         device = th.device("cuda")
     else:
         device = th.device("cpu")
+    device = th.device("cpu")
 
     # Loss function
-    loss = PixelCNNpp.discretized_mix_logistic_loss
+    loss = discretized_mix_logistic_loss
 
     # Initialize model
     # ... implement
@@ -158,7 +434,7 @@ if __name__ == "__main__":
     training_ds = problem.dataset.with_format("torch", device=device)["train"]
     condition_tensors = [training_ds[key][:] for key in problem.conditions_keys]
 
-    training_ds = th.utils.data.TensorDataset(training_ds["optimal_design"][:].flatten(1), *condition_tensors)
+    training_ds = th.utils.data.TensorDataset(training_ds["optimal_design"][:], *condition_tensors) # .flatten(1) ?
 
     dataloader = th.utils.data.DataLoader(
         training_ds,
@@ -195,10 +471,31 @@ if __name__ == "__main__":
     # ----------
     for epoch in tqdm.trange(args.n_epochs):
         for i, data in enumerate(dataloader):
-            print(data[0])
-            print(data[1:])
+            designs = data[0].unsqueeze(dim=1) # add channel dim (for concat_elu)
+
+            print(designs.shape)
+            #print(data[1:])
+
+            # reshape needed?
+            conds = th.stack((data[1:]), dim=1).reshape(-1, nr_conditions, 1, 1)
+            #print(conds.shape)
+            #print(conds)
+            # in PixelCNNpp.__init__
+            h_lin = nn.Linear(nr_conditions, 2 * args.nr_filters)
+
+            # in forward, when `h` is [B, nr_conditions, 1, 1]
+            h_flat = conds.view(conds.size(0), -1)                        # [B, nr_conditions]
+            h_proj = h_lin(h_flat).unsqueeze(-1).unsqueeze(-1)  # [B, 2*nr_filters, 1, 1]
+            print(h_proj.shape)
+            print(h_proj)
+
+            # conds = th.stack((data[1:]), dim=1).reshape(-1, nr_conditions, 1, 1)
+            # print(conds.shape)
+            # print(conds)
+
             batch_start_time = time.time()
             # ... implement
+            # optimizer.zero_grad()
 
             # Backpropagation
             # loss.backward()
