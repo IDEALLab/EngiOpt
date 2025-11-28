@@ -471,9 +471,17 @@ class ConstrainedLVAE_Airfoil(LeastVolumeAE_DynamicPruning):
         coords_hat, angle_hat = self.decoder(z)
 
         # Compute reconstruction loss (coords + angle)
+        # Weight by element count for balanced contribution
+        # coords: (B, 2, 192) = 384 elements
+        # angle: (B, 1) = 1 element
+        # Total: 385 elements
         coords_mse = nn.functional.mse_loss(coords, coords_hat)
         angle_mse = nn.functional.mse_loss(angle, angle_hat)
-        rec_loss = coords_mse + angle_mse
+
+        coords_weight = 384.0 / 385.0  # ≈ 0.997
+        angle_weight = 1.0 / 385.0      # ≈ 0.003
+
+        rec_loss = coords_weight * coords_mse + angle_weight * angle_mse
 
         # Store individual components for separate logging
         self._coords_mse = coords_mse
