@@ -5,6 +5,7 @@ import tyro
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import torch as th
 import torch.nn.functional as F
+from torch.autograd import Variable
 from torch import nn
 from torch.nn.utils import weight_norm
 import numpy as np
@@ -43,18 +44,8 @@ class Args:
     """number of epochs of training"""
     batch_size: int = 32
     """size of the batches"""
-    lr: float = 0.0001
+    lr: float = 0.001
     """learning rate"""
-    # b1: float = 0.5
-    # """decay of first order momentum of gradient"""
-    # b2: float = 0.999
-    # """decay of first order momentum of gradient"""
-    # n_cpu: int = 8
-    # """number of cpu threads to use during batch generation"""
-    # latent_dim: int = 32
-    # """dimensionality of the latent space"""
-    # sample_interval: int = 400
-    # """interval between image samples"""
     nr_resnet: int = 5
     """Number of residual blocks per stage of the model."""
     nr_filters: int = 160
@@ -63,51 +54,9 @@ class Args:
     """Number of logistic components in the mixture. Higher = more flexible model."""
     resnet_nonlinearity: str = "concat_elu"
     """Nonlinearity to use in the ResNet blocks. One of 'concat_elu', 'elu', 'relu'."""
+    dropout_p: float = 0.5
+    """Dropout probability."""
 
-
-def discretized_mix_logistic_loss(x, l):
-        pass
-        # """ log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval """
-        # xs = int_shape(x) # true image (i.e. labels) to regress to, e.g. (B,32,32,3)
-        # ls = int_shape(l) # predicted distribution, e.g. (B,32,32,100)
-        # nr_mix = int(ls[-1] / 10) # here and below: unpacking the params of the mixture of logistics
-        # logit_probs = l[:,:,:,:nr_mix]
-        # l = tf.reshape(l[:,:,:,nr_mix:], xs + [nr_mix*3])
-        # means = l[:,:,:,:,:nr_mix]
-        # log_scales = tf.maximum(l[:,:,:,:,nr_mix:2*nr_mix], -7.)
-        # coeffs = tf.nn.tanh(l[:,:,:,:,2*nr_mix:3*nr_mix])
-        # x = tf.reshape(x, xs + [1]) + tf.zeros(xs + [nr_mix]) # here and below: getting the means and adjusting them based on preceding sub-pixels
-        # m2 = tf.reshape(means[:,:,:,1,:] + coeffs[:, :, :, 0, :] * x[:, :, :, 0, :], [xs[0],xs[1],xs[2],1,nr_mix])
-        # m3 = tf.reshape(means[:, :, :, 2, :] + coeffs[:, :, :, 1, :] * x[:, :, :, 0, :] + coeffs[:, :, :, 2, :] * x[:, :, :, 1, :], [xs[0],xs[1],xs[2],1,nr_mix])
-        # means = tf.concat([tf.reshape(means[:,:,:,0,:], [xs[0],xs[1],xs[2],1,nr_mix]), m2, m3],3)
-        # centered_x = x - means
-        # inv_stdv = tf.exp(-log_scales)
-        # plus_in = inv_stdv * (centered_x + 1./255.)
-        # cdf_plus = tf.nn.sigmoid(plus_in)
-        # min_in = inv_stdv * (centered_x - 1./255.)
-        # cdf_min = tf.nn.sigmoid(min_in)
-        # log_cdf_plus = plus_in - tf.nn.softplus(plus_in) # log probability for edge case of 0 (before scaling)
-        # log_one_minus_cdf_min = -tf.nn.softplus(min_in) # log probability for edge case of 255 (before scaling)
-        # cdf_delta = cdf_plus - cdf_min # probability for all other cases
-        # mid_in = inv_stdv * centered_x
-        # log_pdf_mid = mid_in - log_scales - 2.*tf.nn.softplus(mid_in) # log probability in the center of the bin, to be used in extreme cases (not actually used in our code)
-
-        # # now select the right output: left edge case, right edge case, normal case, extremely low prob case (doesn't actually happen for us)
-
-        # # this is what we are really doing, but using the robust version below for extreme cases in other applications and to avoid NaN issue with tf.select()
-        # # log_probs = tf.select(x < -0.999, log_cdf_plus, tf.select(x > 0.999, log_one_minus_cdf_min, tf.log(cdf_delta)))
-
-        # # robust version, that still works if probabilities are below 1e-5 (which never happens in our code)
-        # # tensorflow backpropagates through tf.select() by multiplying with zero instead of selecting: this requires use to use some ugly tricks to avoid potential NaNs
-        # # the 1e-12 in tf.maximum(cdf_delta, 1e-12) is never actually used as output, it's purely there to get around the tf.select() gradient issue
-        # # if the probability on a sub-pixel is below 1e-5, we use an approximation based on the assumption that the log-density is constant in the bin of the observed sub-pixel value
-        # log_probs = tf.where(x < -0.999, log_cdf_plus, tf.where(x > 0.999, log_one_minus_cdf_min, tf.where(cdf_delta > 1e-5, tf.log(tf.maximum(cdf_delta, 1e-12)), log_pdf_mid - np.log(127.5))))
-
-        # log_probs = tf.reduce_sum(log_probs,3) + log_prob_from_logits(logit_probs)
-        # if sum_all:
-        #     return -tf.reduce_sum(log_sum_exp(log_probs))
-        # else:
-        #     return -tf.reduce_sum(log_sum_exp(log_probs),[1,2])
 
 def concat_elu(x):
     """Like concatenated ReLU (http://arxiv.org/abs/1603.05201), but then with ELU."""
@@ -387,6 +336,71 @@ def log_sum_exp(x):
     m2, _ = th.max(x, dim=axis, keepdim=True)
     return m + th.log(th.sum(th.exp(x - m2), dim=axis))
 
+def log_prob_from_logits(x):
+    """Numerically stable log_softmax implementation that prevents overflow."""
+    # TF ordering
+    axis = len(x.size()) - 1
+    m, _ = th.max(x, dim=axis, keepdim=True)
+    return x - m - th.log(th.sum(th.exp(x - m), dim=axis, keepdim=True))
+
+
+def discretized_mix_logistic_loss(x, l):
+        """Log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval."""
+        # Pytorch ordering
+        x = x.permute(0, 2, 3, 1)
+        l = l.permute(0, 2, 3, 1)
+        xs = list(x.shape) # true image (i.e. labels) to regress to, e.g. (B,32,32,3)
+        ls = list(l.shape) # predicted distribution, e.g. (B,32,32,100)
+        # different for 3 channels: / 10
+        nr_mix = int(ls[-1] / 3) # here and below: unpacking the params of the mixture of logistics
+        logit_probs = l[:,:,:,:nr_mix]
+        # different for 3 channels: nr_mix * 3 #, coeff
+        l = l[:, :, :, nr_mix:].contiguous().view([*xs, nr_mix * 2]) # 3 for mean, scale
+        means = l[:,:,:,:,:nr_mix]
+        log_scales = th.clamp(l[:, :, :, :, nr_mix:2 * nr_mix], min=-7.)
+        # for 3 channels:
+        # coeffs = F.tanh(l[:, :, :, :, 2 * nr_mix:3 * nr_mix])
+        x = x.contiguous()
+        x = x.unsqueeze(-1) + Variable(th.zeros([*xs, nr_mix]).cuda(), requires_grad=False)
+        # for 3 channels:
+        # m2 = (means[:, :, :, 1, :] + coeffs[:, :, :, 0, :]
+        #             * x[:, :, :, 0, :]).view(xs[0], xs[1], xs[2], 1, nr_mix)
+
+        # m3 = (means[:, :, :, 2, :] + coeffs[:, :, :, 1, :] * x[:, :, :, 0, :] +
+        #             coeffs[:, :, :, 2, :] * x[:, :, :, 1, :]).view(xs[0], xs[1], xs[2], 1, nr_mix)
+        # means = th.cat((means[:, :, :, 0, :].unsqueeze(3), m2, m3), dim=3)
+
+        centered_x = x - means
+        inv_stdv = th.exp(-log_scales)
+        plus_in = inv_stdv * (centered_x + 1./255.)
+        cdf_plus = F.sigmoid(plus_in)
+        min_in = inv_stdv * (centered_x - 1./255.)
+        cdf_min = F.sigmoid(min_in)
+        # log probability for edge case of 0 (before scaling)
+        log_cdf_plus = plus_in - F.softplus(plus_in)
+        # log probability for edge case of 255 (before scaling)
+        log_one_minus_cdf_min = -F.softplus(min_in)
+        cdf_delta = cdf_plus - cdf_min # probability for all other cases
+        mid_in = inv_stdv * centered_x
+        # log probability in the center of the bin, to be used in extreme cases
+        # (not actually used in this code)
+        log_pdf_mid = mid_in - log_scales - 2.*F.softplus(mid_in)
+
+        # now select the right output: left edge case, right edge case, normal case, extremely low prob case (doesn't actually happen here)
+
+        # this is what is really done, but using the robust version below for extreme cases in other applications and to avoid NaN issue with tf.select()
+        # log_probs = tf.select(x < -0.999, log_cdf_plus, tf.select(x > 0.999, log_one_minus_cdf_min, tf.log(cdf_delta)))
+
+        # robust version, that still works if probabilities are below 1e-5 (which never happens in our code)
+        # tensorflow backpropagates through tf.select() by multiplying with zero instead of selecting: this requires use to use some ugly tricks to avoid potential NaNs
+        # the 1e-12 in tf.maximum(cdf_delta, 1e-12) is never actually used as output, it's purely there to get around the tf.select() gradient issue
+        # if the probability on a sub-pixel is below 1e-5, we use an approximation based on the assumption that the log-density is constant in the bin of the observed sub-pixel value
+
+        # log_probs = tf.where(x < -0.999, log_cdf_plus, tf.where(x > 0.999, log_one_minus_cdf_min, tf.where(cdf_delta > 1e-5, tf.log(tf.maximum(cdf_delta, 1e-12)), log_pdf_mid - np.log(127.5))))
+        log_probs = th.where(x < -0.999, log_cdf_plus, th.where(x > 0.999, log_one_minus_cdf_min, th.where(cdf_delta > 1e-5, th.log(th.clamp(cdf_delta, min=1e-12)), log_pdf_mid - np.log(127.5))))  # noqa: PLR2004
+        log_probs = th.sum(log_probs, dim=3) + log_prob_from_logits(logit_probs)
+        return -th.sum(log_sum_exp(log_probs))
+
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
@@ -425,10 +439,17 @@ if __name__ == "__main__":
     loss = discretized_mix_logistic_loss
 
     # Initialize model
-    # ... implement
+    model = PixelCNNpp(
+        nr_resnet=args.nr_resnet,
+        nr_filters=args.nr_filters,
+        nr_logistic_mix=args.nr_logistic_mix,
+        resnet_nonlinearity=args.resnet_nonlinearity,
+        dropout_p=args.dropout_p,
+        input_channels=1
+    )
 
-    # model.to(device)
-    # loss.to(device)
+    model.to(device)
+    loss.to(device)
 
     # Configure data loader
     training_ds = problem.dataset.with_format("torch", device=device)["train"]
@@ -443,7 +464,7 @@ if __name__ == "__main__":
     )
 
     # Optimzer
-    # optimizer = th.optim.Adam(model.parameters(), lr=args.lr) # add other args if necessary
+    optimizer = th.optim.Adam(model.parameters(), lr=args.lr) # add other args if necessary
 
     @th.no_grad()
     def sample_designs(n_designs: int) -> tuple[th.Tensor, th.Tensor]:
@@ -495,11 +516,11 @@ if __name__ == "__main__":
 
             batch_start_time = time.time()
             # ... implement
-            # optimizer.zero_grad()
+            optimizer.zero_grad()
 
             # Backpropagation
-            # loss.backward()
-            # optimizer.step()
+            loss.backward()
+            optimizer.step()
 
 
             # ----------
@@ -509,13 +530,13 @@ if __name__ == "__main__":
                 batches_done = epoch * len(dataloader) + i
                 wandb.log(
                     {
-                        "loss": None,  #loss.item(),
+                        "loss": loss.item(),
                         "epoch": epoch,
                         "batch": batches_done,
                     }
                 )
                 print(
-                    f"[Epoch {epoch}/{args.n_epochs}] [Batch {i}/{len(dataloader)}] [loss: {None}]] [{time.time() - batch_start_time:.2f} sec]" #loss.item()
+                    f"[Epoch {epoch}/{args.n_epochs}] [Batch {i}/{len(dataloader)}] [loss: {loss.item()}]] [{time.time() - batch_start_time:.2f} sec]"
                 )
 
                 # This saves a grid image of 25 generated designs every sample_interval
@@ -552,9 +573,9 @@ if __name__ == "__main__":
                     ckpt_model = {
                         "epoch": epoch,
                         "batches_done": batches_done,
-                        "model": None, # model.state_dict(),
-                        "optimizer_generator": None, # optimizer.state_dict(),
-                        "loss": None,  # loss.item(),
+                        "model": model.state_dict(),
+                        "optimizer_generator": optimizer.state_dict(),
+                        "loss": loss.item(),
                     }
 
                     th.save(ckpt_model, "model.pth")
