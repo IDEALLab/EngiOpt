@@ -44,7 +44,7 @@ class Args:
     """Saves the model to disk."""
 
     # Algorithm specific
-    n_epochs: int = 200
+    n_epochs: int = 2
     """number of epochs of training"""
     batch_size: int = 32
     """size of the batches"""
