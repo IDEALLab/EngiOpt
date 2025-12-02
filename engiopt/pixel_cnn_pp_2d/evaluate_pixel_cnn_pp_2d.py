@@ -8,6 +8,7 @@ import tyro
 import wandb
 from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
+from engiopt.pixel_cnn_pp_2d.pixel_cnn_pp_2d import PixelCNNpp
 
 
 @dataclass
@@ -60,13 +61,13 @@ if __name__ == "__main__":
 
     # --------------------------------------------------------
     # adapt to PixelCNN++ input shape requirements
-    conditions_tensor = conditions_tensor.unsqueeze(1)
+    conditions_tensor = conditions_tensor.unsqueeze(-1).unsqueeze(-1)
 
-    ### Set Up Diffusion Model ###
+    ### Set Up PixelCNN++ Model ###
     if args.wandb_entity is not None:
-        artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_diffusion_2d_cond_model:seed_{seed}"
+        artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_pixel_cnn_pp_2d_model:seed_{seed}"
     else:
-        artifact_path = f"{args.wandb_project}/{args.problem_id}_diffusion_2d_cond_model:seed_{seed}"
+        artifact_path = f"{args.wandb_project}/{args.problem_id}_pixel_cnn_pp_2d_model:seed_{seed}"
 
     api = wandb.Api()
     artifact = api.artifact(artifact_path, type="model")
@@ -85,13 +86,27 @@ if __name__ == "__main__":
 
 
     # Build PixelCNN++ Model
-    # ...
+    model = PixelCNNpp(
+        nr_resnet=run.config["nr_resnet"],
+        nr_filters=run.config["nr_filters"],
+        nr_logistic_mix=run.config["nr_logistic_mix"],
+        resnet_nonlinearity=run.config["resnet_nonlinearity"],
+        dropout_p=run.config["dropout_p"],
+        input_channels=1
+    )
 
+    model.load_state_dict(ckpt["generator"])
+    model.eval()  # Set to evaluation mode
+    model.to(device)
+
+    # Sample noise as generator input
+    z = th.randn((args.n_samples, run.config["latent_dim"], 1, 1), device=device, dtype=th.float)
 
     # Generate a batch of designs
-    # ...
+    gen_designs = model(z, conditions_tensor)
 
-    gen_designs_np = None, #gen_designs.detach().cpu().numpy().reshape(args.n_samples, *problem.design_space.shape)
+    gen_designs_np = gen_designs.detach().cpu().numpy()
+    gen_designs_np = gen_designs_np.reshape(args.n_samples, *problem.design_space.shape)
     # Clip to boundaries for running THIS IS PROBLEM DEPENDENT
     gen_designs_np = np.clip(gen_designs_np, 1e-3, 1.0)
 

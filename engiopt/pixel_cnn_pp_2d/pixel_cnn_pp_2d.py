@@ -1,19 +1,22 @@
-from dataclasses import dataclass
-from email import generator
-import os
-import tyro
-from engibench.utils.all_problems import BUILTIN_PROBLEMS
-import torch as th
-import torch.nn.functional as F
-from torch.autograd import Variable
-from torch import nn
-from torch.nn.utils import weight_norm
-import numpy as np
-import random
-import tqdm
-import time
-import matplotlib.pyplot as plt
+"""PixelCNN++ 2D model implementation.
 
+Provides the model classes, shifted convolutional blocks, and the
+discretized mixture of logistics loss used for training and sampling.
+"""
+from dataclasses import dataclass
+import os
+import random
+import time
+
+from engibench.utils.all_problems import BUILTIN_PROBLEMS
+import matplotlib.pyplot as plt
+import numpy as np
+import torch as th
+from torch import nn
+import torch.nn.functional as F
+from torch.nn.utils.parametrizations import weight_norm
+import tqdm
+import tyro
 import wandb
 
 
@@ -27,7 +30,7 @@ class Args:
     """The name of this algorithm."""
 
     # Tracking
-    track: bool = False
+    track: bool = True
     """Track the experiment with wandb."""
     wandb_project: str = "engiopt"
     """Wandb project name."""
@@ -40,12 +43,18 @@ class Args:
 
     # CHANGE!
     # Algorithm specific
-    n_epochs: int = 1
+    n_epochs: int = 2
     """number of epochs of training"""
+    sample_interval: int = 1
+    """interval between image samples"""
     batch_size: int = 32
     """size of the batches"""
     lr: float = 0.001
     """learning rate"""
+    b1: float = 0.95
+    """decay of first order momentum of gradient"""
+    b2: float = 0.9995
+    """decay of first order momentum of gradient"""
     nr_resnet: int = 5
     """Number of residual blocks per stage of the model."""
     nr_filters: int = 160
@@ -62,7 +71,6 @@ def concat_elu(x):
     """Like concatenated ReLU (http://arxiv.org/abs/1603.05201), but then with ELU."""
     # Pytorch ordering
     axis = len(x.size()) - 3
-    #print(axis)
     return F.elu(th.cat([x, -x], dim=axis))
 
 class nin(nn.Module):
@@ -85,7 +93,7 @@ class GatedResnet(nn.Module):
         self.skip_connection = skip_connection
         self.resnet_nonlinearity = resnet_nonlinearity
 
-        if resnet_nonlinearity == "concat_elu":
+        if resnet_nonlinearity is concat_elu:
             self.filter_doubling = 2
         else:
             self.filter_doubling = 1
@@ -103,7 +111,9 @@ class GatedResnet(nn.Module):
 
     def forward(self, x, a=None, h=None):
         c1 = self.conv_input(self.resnet_nonlinearity(x))
+        # print(f"c1 shape: {c1.shape}")
         if a is not None :
+            # print(f"a shape: {a.shape}")
             c1 += self.nin_skip(self.resnet_nonlinearity(a))
         c1 = self.resnet_nonlinearity(c1)
         c1 = self.dropout(c1)
@@ -117,12 +127,17 @@ class GatedResnet(nn.Module):
         c3 = a * F.sigmoid(b)
         return x + c3
 
+
 def downShift(x, pad):
+    xs = list(x.shape)
+    x = x[:, :, :xs[2] - 1, :]
     x = pad(x)
     return x
 
 def downRightShift(x, pad):
-    pad(x)
+    xs = list(x.shape)
+    x = x[:, :, :, :xs[3] - 1]
+    x = pad(x)
     return x
 
 class DownShiftedConv2d(nn.Module):
@@ -152,15 +167,31 @@ class DownShiftedDeconv2d(nn.Module):
                  nr_filters_in,
                  nr_filters_out,
                  filter_size=(2,3),
-                 stride=(1,1)):
+                 stride=(1,1),
+                 output_padding=(0,1)):
 
         super().__init__()
-        self.deconv = weight_norm(nn.ConvTranspose2d(nr_filters_in, nr_filters_out, filter_size, stride, output_padding=1))
+        self.deconv = weight_norm(nn.ConvTranspose2d(nr_filters_in, nr_filters_out, filter_size, stride, output_padding=output_padding))
         self.filter_size = filter_size
         self.stride = stride
 
-    def forward(self, x):
-        x = self.deconv(x)
+    def forward(self, x, output_padding=None):
+        # Allow callers to pass a dynamic `output_padding` (some callers compute
+        # this to handle odd/even spatial sizes). If not provided, use the
+        # configured ConvTranspose2d module directly.
+        if output_padding is None:
+            x = self.deconv(x)
+        else:
+            x = F.conv_transpose2d(
+                x,
+                self.deconv.weight,
+                self.deconv.bias,
+                stride=self.stride,
+                padding=self.deconv.padding,
+                output_padding=output_padding,
+                dilation=self.deconv.dilation,
+                groups=self.deconv.groups,
+            )
         xs = list(x.shape)
         return x[:, :, :(xs[2] - self.filter_size[0] + 1), int((self.filter_size[1] - 1) / 2):(xs[3] - int((self.filter_size[1] - 1) / 2))]
 
@@ -191,15 +222,28 @@ class DownRightShiftedDeconv2d(nn.Module):
                  nr_filters_in,
                  nr_filters_out,
                  filter_size=(2,2),
-                 stride=(1,1)):
+                 stride=(1,1),
+                 output_padding=(1,0)):
 
         super().__init__()
-        self.deconv = weight_norm(nn.ConvTranspose2d(nr_filters_in, nr_filters_out, filter_size, stride, output_padding=1))
+        self.deconv = weight_norm(nn.ConvTranspose2d(nr_filters_in, nr_filters_out, filter_size, stride, output_padding=output_padding))
         self.filter_size = filter_size
         self.stride = stride
 
-    def forward(self, x):
-        x = self.deconv(x)
+    def forward(self, x, output_padding=None):
+        if output_padding is None:
+            x = self.deconv(x)
+        else:
+            x = F.conv_transpose2d(
+                x,
+                self.deconv.weight,
+                self.deconv.bias,
+                stride=self.stride,
+                padding=self.deconv.padding,
+                output_padding=output_padding,
+                dilation=self.deconv.dilation,
+                groups=self.deconv.groups,
+            )
         xs = list(x.shape)
         return x[:, :, :(xs[2] - self.filter_size[0] + 1), :(xs[3] - self.filter_size[1] + 1)]
 
@@ -259,14 +303,14 @@ class PixelCNNpp(nn.Module):
         self.upsize_u_1 = DownShiftedDeconv2d(nr_filters, nr_filters, filter_size=(2,3), stride=(2,2))
         self.upsize_ul_1 = DownRightShiftedDeconv2d(nr_filters, nr_filters, filter_size=(2,2), stride=(2,2))
 
-        self.gated_resnet_block_u_down_2 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=1) for _ in range(nr_resnet)])
-        self.gated_resnet_block_ul_down_2 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=2) for _ in range(nr_resnet)])
+        self.gated_resnet_block_u_down_2 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=1) for _ in range(nr_resnet + 1)])
+        self.gated_resnet_block_ul_down_2 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=2) for _ in range(nr_resnet + 1)])
 
         self.upsize_u_2 = DownShiftedDeconv2d(nr_filters, nr_filters, filter_size=(2,3), stride=(2,2))
         self.upsize_ul_2 = DownRightShiftedDeconv2d(nr_filters, nr_filters, filter_size=(2,2), stride=(2,2))
 
-        self.gated_resnet_block_u_down_3 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=1) for _ in range(nr_resnet)])
-        self.gated_resnet_block_ul_down_3 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=2) for _ in range(nr_resnet)])
+        self.gated_resnet_block_u_down_3 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=1) for _ in range(nr_resnet + 1)])
+        self.gated_resnet_block_ul_down_3 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=2) for _ in range(nr_resnet + 1)])
 
         num_mix = 3 if self.input_channels == 1 else 10
         self.nin_out = nin(nr_filters, num_mix * nr_logistic_mix)
@@ -275,6 +319,8 @@ class PixelCNNpp(nn.Module):
         xs = list(x.shape)
         padding = th.ones(xs[0], 1, xs[2], xs[3], device=x.device)
         x = th.cat((x, padding), dim=1)  # add extra channel for padding
+
+        output_padding_list = []
 
         # UP PASS ("encoder")
         u_list = [self.u_init(x)]
@@ -287,6 +333,16 @@ class PixelCNNpp(nn.Module):
         u_list.append(self.downsize_u_1(u_list[-1]))
         ul_list.append(self.downsize_ul_1(ul_list[-1]))
 
+        # Handle images with odd height/width
+        # print(f"Before first downsize: u.shape[2]: {u_list[-1].shape[2]}, u.shape[3]: {u_list[-1].shape[3]}, u.shape[2]: {u_list[-2].shape[2]}, u.shape[3]: {u_list[-2].shape[3]}")
+        pad_height = 1
+        pad_width = 1
+        if u_list[-2].shape[2] % u_list[-1].shape[2] != 0:
+            pad_height = 0
+        if u_list[-2].shape[3] % u_list[-1].shape[3] != 0:
+            pad_width = 0
+        output_padding_list.append((pad_height, pad_width))
+
         for i in range(self.nr_resnet):
             u_list.append(self.gated_resnet_block_u_up_2[i](u_list[-1], a=None, h=c))
             ul_list.append(self.gated_resnet_block_ul_up_2[i](ul_list[-1], a=u_list[-1], h=c))
@@ -294,10 +350,24 @@ class PixelCNNpp(nn.Module):
         u_list.append(self.downsize_u_2(u_list[-1]))
         ul_list.append(self.downsize_ul_2(ul_list[-1]))
 
+        # Handle images with odd height/width
+        pad_height = 1
+        pad_width = 1
+        if u_list[-2].shape[2] % u_list[-1].shape[2] != 0:
+            pad_height = 0
+        if u_list[-2].shape[3] % u_list[-1].shape[3] != 0:
+            pad_width = 0
+        output_padding_list.append((pad_height, pad_width))
+
         for i in range(self.nr_resnet):
             u_list.append(self.gated_resnet_block_u_up_3[i](u_list[-1], a=None, h=c))
             ul_list.append(self.gated_resnet_block_ul_up_3[i](ul_list[-1], a=u_list[-1], h=c))
 
+        # for i, u in enumerate(u_list):
+        #     print(f"u_list[{i}] shape: {u.shape}")
+        # for i, ul in enumerate(ul_list):
+        #     print(f"ul_list[{i}] shape: {ul.shape}")
+        # print(f"output_padding_list: {output_padding_list}")
         # DOWN PASS ("decoder")
         u  = u_list.pop()
         ul = ul_list.pop()
@@ -306,17 +376,21 @@ class PixelCNNpp(nn.Module):
             u = self.gated_resnet_block_u_down_1[i](u, a=u_list.pop(), h=c)
             ul = self.gated_resnet_block_ul_down_1[i](ul, a=th.cat((u, ul_list.pop()), dim=1), h=c)
 
-        u = self.upsize_u_1(u)
-        ul = self.upsize_ul_1(ul)
+        #print(f"After first down pass: u shape: {u.shape}, ul shape: {ul.shape}")
+        u = self.upsize_u_1(u, output_padding=output_padding_list[-1])
+        ul = self.upsize_ul_1(ul, output_padding=output_padding_list[-1])
+        # print(f"After first upsize: u shape: {u.shape}, ul shape: {ul.shape}")
 
-        for i in range(self.nr_resnet):
+        for i in range(self.nr_resnet + 1):
             u = self.gated_resnet_block_u_down_2[i](u, a=u_list.pop(), h=c)
             ul = self.gated_resnet_block_ul_down_2[i](ul, a=th.cat((u, ul_list.pop()), dim=1), h=c)
 
-        u = self.upsize_u_2(u)
-        ul = self.upsize_ul_2(ul)
+        # print(f"After second down pass: u shape: {u.shape}, ul shape: {ul.shape}")
+        u = self.upsize_u_2(u, output_padding=output_padding_list[-2])
+        ul = self.upsize_ul_2(ul, output_padding=output_padding_list[-2])
+        # print(f"After second upsize: u shape: {u.shape}, ul shape: {ul.shape}")
 
-        for i in range(self.nr_resnet):
+        for i in range(self.nr_resnet + 1):
             u = self.gated_resnet_block_u_down_3[i](u, a=u_list.pop(), h=c)
             ul = self.gated_resnet_block_ul_down_3[i](ul, a=th.cat((u, ul_list.pop()), dim=1), h=c)
 
@@ -361,7 +435,8 @@ def discretized_mix_logistic_loss(x, l):
         # for 3 channels:
         # coeffs = F.tanh(l[:, :, :, :, 2 * nr_mix:3 * nr_mix])
         x = x.contiguous()
-        x = x.unsqueeze(-1) + Variable(th.zeros([*xs, nr_mix]).cuda(), requires_grad=False)
+        zeros = th.zeros([*xs, nr_mix], device=x.device)
+        x = x.unsqueeze(-1) + zeros
         # for 3 channels:
         # m2 = (means[:, :, :, 1, :] + coeffs[:, :, :, 0, :]
         #             * x[:, :, :, 0, :]).view(xs[0], xs[1], xs[2], 1, nr_mix)
@@ -402,6 +477,41 @@ def discretized_mix_logistic_loss(x, l):
         return -th.sum(log_sum_exp(log_probs))
 
 
+def to_one_hot(tensor, n, fill_with=1.):
+    # we perform one hot encore with respect to the last axis
+    one_hot = th.zeros((*tensor.size(), n), device=tensor.device)
+    one_hot.scatter_(len(tensor.size()), tensor.unsqueeze(-1), fill_with)
+    return one_hot
+
+
+def sample_from_discretized_mix_logistic(l, nr_mix):
+    # Pytorch ordering
+    l = l.permute(0, 2, 3, 1)
+    ls = list(l.shape)
+    xs = [*ls[:-1], 1] #[3]
+
+    # unpack parameters
+    logit_probs = l[:, :, :, :nr_mix]
+    l = l[:, :, :, nr_mix:].contiguous().view([*xs, nr_mix * 2]) # for mean, scale
+
+    # sample mixture indicator from softmax
+    temp = th.empty_like(logit_probs).uniform_(1e-5, 1. - 1e-5)
+    temp = logit_probs.detach() - th.log(- th.log(temp))
+    _, argmax = temp.max(dim=3)
+
+    one_hot = to_one_hot(argmax, nr_mix)
+    sel = one_hot.view([*xs[:-1], 1, nr_mix])
+    # select logistic parameters
+    means = th.sum(l[:, :, :, :, :nr_mix] * sel, dim=4) 
+    log_scales = th.clamp(th.sum(
+        l[:, :, :, :, nr_mix:2 * nr_mix] * sel, dim=4), min=-7.)
+    u = th.empty_like(means).uniform_(1e-5, 1. - 1e-5)
+    x = means + th.exp(log_scales) * (th.log(u) - th.log(1. - u))
+    x0 = th.clamp(th.clamp(x[:, :, :, 0], min=-1.), max=1.)
+    out = x0.unsqueeze(1)
+    return out
+
+
 if __name__ == "__main__":
     args = tyro.cli(Args)
 
@@ -436,7 +546,7 @@ if __name__ == "__main__":
     device = th.device("cpu")
 
     # Loss function
-    loss = discretized_mix_logistic_loss
+    loss_operator = discretized_mix_logistic_loss
 
     # Initialize model
     model = PixelCNNpp(
@@ -449,7 +559,7 @@ if __name__ == "__main__":
     )
 
     model.to(device)
-    loss.to(device)
+    # loss.to(device)
 
     # Configure data loader
     training_ds = problem.dataset.with_format("torch", device=device)["train"]
@@ -464,26 +574,66 @@ if __name__ == "__main__":
     )
 
     # Optimzer
-    optimizer = th.optim.Adam(model.parameters(), lr=args.lr) # add other args if necessary
+    optimizer = th.optim.Adam(model.parameters(), lr=args.lr, betas=(args.b1, args.b2)) # add other args if necessary
+
+    # @th.no_grad()
+    # def sample_designs(model: PixelCNNpp, design_shape: tuple[int, int, int], n_designs: int = 25) -> tuple[th.Tensor, th.Tensor]:
+    #     """Samples n_designs designs."""
+    #     model.eval()
+    #     data = torch.zeros(n_designs, design_shape[0], design_shape[1], design_shape[2])
+    #     data = data.cuda()
+    #     with torch.no_grad():
+    #         for i in range(design_shape[1]):
+    #             for j in range(design_shape[2]):
+    #                 out = model(data, sample=True)
+    #                 out_sample = sample_from_discretized_mix_logistic(out, args.nr_logistic_mix)
+    #                 data[:, :, i, j] = out_sample.data[:, :, i, j]
+    #     return data
+
 
     @th.no_grad()
-    def sample_designs(n_designs: int) -> tuple[th.Tensor, th.Tensor]:
-        """Sample designs from trained model."""
-        # Is that needed?
-        # z = th.randn((n_designs, args.latent_dim), device=device, dtype=th.float)
+    def sample_designs(model: PixelCNNpp, design_shape: tuple[int, int, int], dim: int = 1, n_designs: int = 25) -> tuple[th.Tensor, th.Tensor]:
+        """Samples n_designs designs using dataset conditions.
 
-        # Create condition grid
-        all_conditions = th.stack(condition_tensors, dim=1)
-        linspaces = [
-            th.linspace(all_conditions[:, i].min(), all_conditions[:, i].max(), n_designs, device=device)
-            for i in range(all_conditions.shape[1])
-        ]
-        desired_conds = th.stack(linspaces, dim=1)
+        This builds `encoder_hidden_states` by linearly interpolating each
+        condition between its dataset min and max, returns the sampled
+        designs and the `encoder_hidden_states` used.
+        """
+        model.eval()
+        device = next(model.parameters()).device
 
-        # implement sampling from model here
-        gen_imgs = None
+        # Build per-condition min/max from the dataset tensors (device-safe)
+        # `condition_tensors` is defined in the outer scope above when the
+        # dataset is prepared: it's a list of 1-D tensors (one per condition).
+        all_conditions = th.stack(condition_tensors, dim=1).to(device)  # [N_examples, nr_conditions]
+        conds_min = all_conditions.amin(dim=0)
+        conds_max = all_conditions.amax(dim=0)
 
-        return desired_conds, gen_imgs
+        # Create a sweep of condition vectors between min and max (diagonal sweep)
+        steps = th.linspace(0.0, 1.0, n_designs, device=device).unsqueeze(1)  # [n_designs, 1]
+        encoder_hidden_states = conds_min.unsqueeze(0) + steps * (conds_max - conds_min).unsqueeze(0)
+        # reshape to [B, nr_conditions, 1, 1] as expected by the model's conditional input
+        encoder_hidden_states = encoder_hidden_states.view(n_designs, len(problem.conditions_keys), 1, 1).to(device)
+
+        # Prepare an empty image batch on the same device as the model
+        data = th.zeros((n_designs, dim, *design_shape), device=device)
+        print(f"final data shape: {data.shape}")
+        print(f"encoder_hidden_states shape: {encoder_hidden_states.shape}")
+
+        # Autoregressive pixel sampling: iterate spatial positions and condition on
+        # previously sampled pixels and the encoder_hidden_states.
+        with th.no_grad():
+            for i in range(design_shape[0]):
+                for j in range(design_shape[1]):
+                    print(f"Sampling pixel ({i}, {j})")
+                    #out = model(data, encoder_hidden_states)
+                    print(f"out shape: {out.shape}")
+                    #out_sample = sample_from_discretized_mix_logistic(out, args.nr_logistic_mix)
+                    #print(f"out_sample shape: {out_sample.shape}")
+                    # `out_sample` has shape [B, 1, H, W]; copy the sampled value for (i,j)
+                    data[:, :, i, j] = None #out_sample[:, :, i, j] # out_sample.data[:, :, i, j]
+
+        return data, encoder_hidden_states
 
 
 
@@ -491,33 +641,36 @@ if __name__ == "__main__":
     #  Training
     # ----------
     for epoch in tqdm.trange(args.n_epochs):
+        model.train()
         for i, data in enumerate(dataloader):
             designs = data[0].unsqueeze(dim=1) # add channel dim (for concat_elu)
 
             print(designs.shape)
             #print(data[1:])
 
-            # reshape needed?
             conds = th.stack((data[1:]), dim=1).reshape(-1, nr_conditions, 1, 1)
-            #print(conds.shape)
+            print(f"conds.shape: {conds.shape}")
             #print(conds)
-            # in PixelCNNpp.__init__
-            h_lin = nn.Linear(nr_conditions, 2 * args.nr_filters)
 
-            # in forward, when `h` is [B, nr_conditions, 1, 1]
-            h_flat = conds.view(conds.size(0), -1)                        # [B, nr_conditions]
-            h_proj = h_lin(h_flat).unsqueeze(-1).unsqueeze(-1)  # [B, 2*nr_filters, 1, 1]
-            print(h_proj.shape)
-            print(h_proj)
+
+            # in PixelCNNpp.__init__
+            # h_lin = nn.Linear(nr_conditions, 2 * args.nr_filters)
+
+            # # in forward, when `h` is [B, nr_conditions, 1, 1]
+            # h_flat = conds.view(conds.size(0), -1)                        # [B, nr_conditions]
+            # h_proj = h_lin(h_flat).unsqueeze(-1).unsqueeze(-1)  # [B, 2*nr_filters, 1, 1]
+            # print(h_proj.shape)
+            # print(h_proj)
 
             # conds = th.stack((data[1:]), dim=1).reshape(-1, nr_conditions, 1, 1)
             # print(conds.shape)
             # print(conds)
 
             batch_start_time = time.time()
-            # ... implement
+            out = model(designs, conds)
+            # Compute loss
+            loss = loss_operator(designs, out)
             optimizer.zero_grad()
-
             # Backpropagation
             loss.backward()
             optimizer.step()
@@ -543,7 +696,7 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval == 0:
                     # Extract 25 designs
 
-                    designs, hidden_states = None #sample_designs(model, 25)
+                    designs, hidden_states = sample_designs(model, design_shape, dim=1, n_designs=25)
                     fig, axes = plt.subplots(5, 5, figsize=(12, 12))
 
                     # Flatten axes for easy indexing
