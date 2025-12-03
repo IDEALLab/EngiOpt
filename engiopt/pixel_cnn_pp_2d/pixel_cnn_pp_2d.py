@@ -42,10 +42,12 @@ class Args:
     """Saves the model to disk."""
 
     # Algorithm specific
-    n_epochs: int = 2
+    n_epochs: int = 4
     """number of epochs of training"""
     sample_interval: int = 500
     """interval between image samples"""
+    model_storage_interval: int = 2
+    """interval between model storage"""
     batch_size: int = 8
     """size of the batches"""
     lr: float = 0.001
@@ -724,7 +726,8 @@ if __name__ == "__main__":
                 # --------------
                 #  Save models
                 # --------------
-                if args.save_model and epoch == args.n_epochs - 1 and i == len(dataloader) - 1:
+                #if args.save_model and epoch == args.n_epochs - 1 and i == len(dataloader) - 1:
+                if args.save_model and (((epoch + 1) % args.model_storage_interval == 0) or (epoch == args.n_epochs - 1)) and i == len(dataloader) - 1:
                     ckpt_model = {
                         "epoch": epoch,
                         "batches_done": batches_done,
@@ -733,10 +736,10 @@ if __name__ == "__main__":
                         "loss": loss.item(),
                     }
 
-                    th.save(ckpt_model, "model.pth")
+                    th.save(ckpt_model, f"model_epoch{epoch+1}.pth")
                     if args.track:
                         artifact_model = wandb.Artifact(f"{args.problem_id}_{args.algo}_model", type="model")
-                        artifact_model.add_file("model.pth")
+                        artifact_model.add_file(f"model_epoch{epoch+1}.pth")
 
                         wandb.log_artifact(artifact_model, aliases=[f"seed_{args.seed}"])
 
