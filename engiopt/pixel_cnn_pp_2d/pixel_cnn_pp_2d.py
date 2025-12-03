@@ -41,13 +41,12 @@ class Args:
     save_model: bool = False
     """Saves the model to disk."""
 
-    # CHANGE!
     # Algorithm specific
     n_epochs: int = 2
     """number of epochs of training"""
-    sample_interval: int = 1
+    sample_interval: int = 500
     """interval between image samples"""
-    batch_size: int = 32
+    batch_size: int = 8
     """size of the batches"""
     lr: float = 0.001
     """learning rate"""
@@ -55,11 +54,11 @@ class Args:
     """decay of first order momentum of gradient"""
     b2: float = 0.9995
     """decay of first order momentum of gradient"""
-    nr_resnet: int = 5
+    nr_resnet: int = 2
     """Number of residual blocks per stage of the model."""
-    nr_filters: int = 160
+    nr_filters: int = 40
     """Number of filters to use across the model. Higher = larger model."""
-    nr_logistic_mix: int = 10
+    nr_logistic_mix: int = 5
     """Number of logistic components in the mixture. Higher = more flexible model."""
     resnet_nonlinearity: str = "concat_elu"
     """Nonlinearity to use in the ResNet blocks. One of 'concat_elu', 'elu', 'relu'."""
@@ -502,7 +501,7 @@ def sample_from_discretized_mix_logistic(l, nr_mix):
     one_hot = to_one_hot(argmax, nr_mix)
     sel = one_hot.view([*xs[:-1], 1, nr_mix])
     # select logistic parameters
-    means = th.sum(l[:, :, :, :, :nr_mix] * sel, dim=4) 
+    means = th.sum(l[:, :, :, :, :nr_mix] * sel, dim=4)
     log_scales = th.clamp(th.sum(
         l[:, :, :, :, nr_mix:2 * nr_mix] * sel, dim=4), min=-7.)
     u = th.empty_like(means).uniform_(1e-5, 1. - 1e-5)
@@ -519,7 +518,7 @@ if __name__ == "__main__":
     problem.reset(seed=args.seed)
 
     design_shape = problem.design_space.shape
-    print(f"Design shape: {design_shape}")
+    #print(f"Design shape: {design_shape}")
     conditions = problem.conditions_keys
     nr_conditions = len(conditions)
 
@@ -543,7 +542,7 @@ if __name__ == "__main__":
         device = th.device("cuda")
     else:
         device = th.device("cpu")
-    device = th.device("cpu")
+    #device = th.device("cpu")
 
     # Loss function
     loss_operator = discretized_mix_logistic_loss
@@ -593,47 +592,48 @@ if __name__ == "__main__":
 
     @th.no_grad()
     def sample_designs(model: PixelCNNpp, design_shape: tuple[int, int, int], dim: int = 1, n_designs: int = 25) -> tuple[th.Tensor, th.Tensor]:
-        """Samples n_designs designs using dataset conditions.
-
-        This builds `encoder_hidden_states` by linearly interpolating each
-        condition between its dataset min and max, returns the sampled
-        designs and the `encoder_hidden_states` used.
-        """
+        """Samples n_designs designs using dataset conditions."""
         model.eval()
         device = next(model.parameters()).device
 
-        # Build per-condition min/max from the dataset tensors (device-safe)
-        # `condition_tensors` is defined in the outer scope above when the
-        # dataset is prepared: it's a list of 1-D tensors (one per condition).
-        all_conditions = th.stack(condition_tensors, dim=1).to(device)  # [N_examples, nr_conditions]
-        conds_min = all_conditions.amin(dim=0)
-        conds_max = all_conditions.amax(dim=0)
+        linspaces = [
+            th.linspace(conds[:, i].min(), conds[:, i].max(), n_designs, device=device) for i in range(conds.shape[1])
+        ]
 
-        # Create a sweep of condition vectors between min and max (diagonal sweep)
-        steps = th.linspace(0.0, 1.0, n_designs, device=device).unsqueeze(1)  # [n_designs, 1]
-        encoder_hidden_states = conds_min.unsqueeze(0) + steps * (conds_max - conds_min).unsqueeze(0)
-        # reshape to [B, nr_conditions, 1, 1] as expected by the model's conditional input
-        encoder_hidden_states = encoder_hidden_states.view(n_designs, len(problem.conditions_keys), 1, 1).to(device)
+        desired_conds = th.stack(linspaces, dim=1).reshape(-1, nr_conditions, 1, 1)
+
+        # # Build per-condition min/max from the dataset tensors (device-safe)
+        # # `condition_tensors` is defined in the outer scope above when the
+        # # dataset is prepared: it's a list of 1-D tensors (one per condition).
+        # all_conditions = th.stack(condition_tensors, dim=1).to(device)  # [N_examples, nr_conditions]
+        # conds_min = all_conditions.amin(dim=0)
+        # conds_max = all_conditions.amax(dim=0)
+
+        # # Create a sweep of condition vectors between min and max (diagonal sweep)
+        # steps = th.linspace(0.0, 1.0, n_designs, device=device).unsqueeze(1)  # [n_designs, 1]
+        # encoder_hidden_states = conds_min.unsqueeze(0) + steps * (conds_max - conds_min).unsqueeze(0)
+        # # reshape to [B, nr_conditions, 1, 1] as expected by the model's conditional input
+        # encoder_hidden_states = encoder_hidden_states.view(n_designs, len(problem.conditions_keys), 1, 1).to(device)
 
         # Prepare an empty image batch on the same device as the model
         data = th.zeros((n_designs, dim, *design_shape), device=device)
-        print(f"final data shape: {data.shape}")
-        print(f"encoder_hidden_states shape: {encoder_hidden_states.shape}")
 
         # Autoregressive pixel sampling: iterate spatial positions and condition on
-        # previously sampled pixels and the encoder_hidden_states.
-        with th.no_grad():
-            for i in range(design_shape[0]):
-                for j in range(design_shape[1]):
-                    print(f"Sampling pixel ({i}, {j})")
-                    #out = model(data, encoder_hidden_states)
-                    print(f"out shape: {out.shape}")
-                    #out_sample = sample_from_discretized_mix_logistic(out, args.nr_logistic_mix)
-                    #print(f"out_sample shape: {out_sample.shape}")
-                    # `out_sample` has shape [B, 1, H, W]; copy the sampled value for (i,j)
-                    data[:, :, i, j] = None #out_sample[:, :, i, j] # out_sample.data[:, :, i, j]
+        # previously sampled pixels and the desired_conds.
+        for i in range(design_shape[0]):
+            for j in range(design_shape[1]):
+                # print(f"Sampling pixel ({i}, {j})")
+                out = model(data, desired_conds)
+                # print(f"out shape: {out.shape}")
+                out_sample = sample_from_discretized_mix_logistic(out, args.nr_logistic_mix)
+                # print(f"out_sample shape: {out_sample.shape}")
+                # `out_sample` has shape [B, 1, H, W]; copy the sampled value for (i,j)
+                data[:, :, i, j] = out_sample.data[:, :, i, j] #out_sample[:, :, i, j] # out_sample.data[:, :, i, j]
+            #print(f"Completed row {i+1}/{design_shape[0]}")
 
-        return data, encoder_hidden_states
+        #print(f"final data shape: {data.shape}")
+        #print(f"desired_conds shape: {desired_conds.shape}")
+        return data, desired_conds
 
 
 
@@ -643,13 +643,13 @@ if __name__ == "__main__":
     for epoch in tqdm.trange(args.n_epochs):
         model.train()
         for i, data in enumerate(dataloader):
-            designs = data[0].unsqueeze(dim=1) # add channel dim (for concat_elu)
+            designs = data[0].unsqueeze(dim=1) # add channel dim
 
-            print(designs.shape)
+            #print(designs.shape)
             #print(data[1:])
 
             conds = th.stack((data[1:]), dim=1).reshape(-1, nr_conditions, 1, 1)
-            print(f"conds.shape: {conds.shape}")
+            # print(f"conds.shape: {conds.shape}")
             #print(conds)
 
 
@@ -696,18 +696,20 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval == 0:
                     # Extract 25 designs
 
-                    designs, hidden_states = sample_designs(model, design_shape, dim=1, n_designs=25)
-                    fig, axes = plt.subplots(5, 5, figsize=(12, 12))
+                    designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=5)
+                    fig, axes = plt.subplots(1, 5, figsize=(12, 12))
 
                     # Flatten axes for easy indexing
                     axes = axes.flatten()
 
                     # Plot the image created by each output
                     for j, tensor in enumerate(designs):
-                        img = tensor.cpu().numpy()  # Extract x and y coordinates
-                        dc = hidden_states[j, 0, :].cpu()
-                        axes[j].imshow(img[0])  # image plot
-                        title = [(problem.conditions[i][0], f"{dc[i]:.2f}") for i in range(len(problem.conditions))]
+                        img = tensor.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
+                        #print(f"img shape: {img.shape}")
+                        dc = desired_conds[j].cpu().squeeze() # Extract design conditions
+                        #print(f"dc shape: {dc.shape}")
+                        axes[j].imshow(img)  # image plot
+                        title = [(problem.conditions_keys[i][0], f"{dc[i]:.2f}") for i in range(nr_conditions)]
                         title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
                         axes[j].title.set_text(title_string)  # Set title
                         axes[j].set_xticks([])  # Hide x ticks
