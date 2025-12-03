@@ -56,15 +56,33 @@ class ConstraintHandler(ABC):
 
         Args:
             device: Device to store tensors on
-            volume_warmup_epochs: Number of epochs to ignore volume loss (default: 0)
+            volume_warmup_epochs: Number of epochs to ramp up volume loss from 0 to 1 using a 2nd order polynomial (default: 0)
         """
         self.device = device
         self.volume_warmup_epochs = volume_warmup_epochs
         self._epoch = 0
 
+    def _get_volume_weight(self) -> float:
+        """Get current volume loss weight based on polynomial warmup schedule.
+
+        Returns a weight in [0, 1] that smoothly ramps up from 0 to 1 over volume_warmup_epochs
+        using a 2nd order polynomial: weight = (epoch / N)^2 where N = volume_warmup_epochs.
+
+        Returns:
+            Volume weight in range [0, 1]
+        """
+        if self.volume_warmup_epochs == 0:
+            return 1.0  # No warmup, always use full volume weight
+
+        if self._epoch >= self.volume_warmup_epochs:
+            return 1.0  # Warmup complete
+
+        # 2nd order polynomial: weight = (epoch / N)^2
+        return (self._epoch / self.volume_warmup_epochs) ** 2
+
     @property
     def _volume_warmup_active(self) -> bool:
-        """Check if volume warmup is active (volume loss should be ignored)."""
+        """Check if volume warmup is still ramping up (not yet at full weight)."""
         return self._epoch < self.volume_warmup_epochs
 
     @abstractmethod
@@ -147,11 +165,13 @@ class WeightedSumHandler(ConstraintHandler):
         losses: ConstraintLosses,
         thresholds: ConstraintThresholds,
     ) -> torch.Tensor:
-        # During warmup, only minimize reconstruction + performance
-        if self._volume_warmup_active:
-            return self.w_r * losses.reconstruction + self.w_p * losses.performance
-        # After warmup, include volume loss
-        return self.w_v * losses.volume + self.w_r * losses.reconstruction + self.w_p * losses.performance
+        # Apply polynomial warmup schedule to volume weight
+        volume_weight = self._get_volume_weight()
+        return (
+            volume_weight * self.w_v * losses.volume
+            + self.w_r * losses.reconstruction
+            + self.w_p * losses.performance
+        )
 
     def step(self, losses: ConstraintLosses, thresholds: ConstraintThresholds) -> None:
         pass  # No state to update
@@ -161,6 +181,7 @@ class WeightedSumHandler(ConstraintHandler):
             "constraint/w_volume": self.w_v,
             "constraint/w_reconstruction": self.w_r,
             "constraint/w_performance": self.w_p,
+            "constraint/volume_warmup_weight": self._get_volume_weight(),
         }
 
 
@@ -225,19 +246,18 @@ class AugmentedLagrangianHandler(ConstraintHandler):
         losses: ConstraintLosses,
         thresholds: ConstraintThresholds,
     ) -> torch.Tensor:
-        # During volume warmup, only minimize reconstruction + performance
-        if self._volume_warmup_active:
-            return losses.reconstruction + losses.performance
-
         mu_r, mu_p = self._get_penalty_coefficients()
 
         # Compute violations
         rec_violation = torch.clamp(losses.reconstruction - thresholds.reconstruction, min=0.0)
         perf_violation = torch.clamp(losses.performance - thresholds.performance, min=0.0)
 
-        # Augmented Lagrangian formulation
+        # Apply polynomial warmup schedule to volume loss
+        volume_weight = self._get_volume_weight()
+
+        # Augmented Lagrangian formulation with polynomial volume warmup
         total_loss = (
-            losses.volume
+            volume_weight * losses.volume
             + self.lambda_r * rec_violation
             + 0.5 * mu_r * rec_violation**2
             + self.lambda_p * perf_violation
@@ -262,6 +282,7 @@ class AugmentedLagrangianHandler(ConstraintHandler):
             "constraint/lambda_p": self.lambda_p.item(),
             "constraint/mu_r": mu_r,
             "constraint/mu_p": mu_p,
+            "constraint/volume_warmup_weight": self._get_volume_weight(),
         }
 
 
@@ -314,24 +335,23 @@ class LogBarrierHandler(ConstraintHandler):
         losses: ConstraintLosses,
         thresholds: ConstraintThresholds,
     ) -> torch.Tensor:
-        # During volume warmup, only minimize reconstruction + performance
-        if self._volume_warmup_active:
-            return losses.reconstruction + losses.performance
-
         # Compute slack (how far we are from constraint boundary)
         rec_slack = thresholds.reconstruction - losses.reconstruction - self.epsilon
         perf_slack = thresholds.performance - losses.performance - self.epsilon
+
+        # Apply polynomial warmup schedule to volume loss
+        volume_weight = self._get_volume_weight()
 
         # Check feasibility
         if rec_slack <= 0 or perf_slack <= 0:
             # Infeasible: fall back to large penalty
             rec_violation = torch.clamp(-rec_slack, min=0.0)
             perf_violation = torch.clamp(-perf_slack, min=0.0)
-            return losses.volume + self.fallback_penalty * (rec_violation + perf_violation)
+            return volume_weight * losses.volume + self.fallback_penalty * (rec_violation + perf_violation)
 
         # Feasible: use log barrier
         barrier_term = -(1.0 / self.t) * (torch.log(rec_slack) + torch.log(perf_slack))
-        return losses.volume + barrier_term
+        return volume_weight * losses.volume + barrier_term
 
     def step(self, losses: ConstraintLosses, thresholds: ConstraintThresholds) -> None:
         """Increase barrier parameter to tighten constraints."""
@@ -341,6 +361,7 @@ class LogBarrierHandler(ConstraintHandler):
         return {
             "constraint/t": self.t.item(),
             "constraint/barrier_strength": 1.0 / self.t.item(),
+            "constraint/volume_warmup_weight": self._get_volume_weight(),
         }
 
 
@@ -384,15 +405,16 @@ class PrimalDualHandler(ConstraintHandler):
         losses: ConstraintLosses,
         thresholds: ConstraintThresholds,
     ) -> torch.Tensor:
-        # During volume warmup, only minimize reconstruction + performance
-        if self._volume_warmup_active:
-            return losses.reconstruction + losses.performance
-
         # Simple Lagrangian (linear penalty only)
         rec_violation = losses.reconstruction - thresholds.reconstruction
         perf_violation = losses.performance - thresholds.performance
 
-        total_loss = losses.volume + self.lambda_r * rec_violation + self.lambda_p * perf_violation
+        # Apply polynomial warmup schedule to volume loss
+        volume_weight = self._get_volume_weight()
+
+        total_loss = (
+            volume_weight * losses.volume + self.lambda_r * rec_violation + self.lambda_p * perf_violation
+        )
 
         return total_loss
 
@@ -409,6 +431,7 @@ class PrimalDualHandler(ConstraintHandler):
         return {
             "constraint/lambda_r": self.lambda_r.item(),
             "constraint/lambda_p": self.lambda_p.item(),
+            "constraint/volume_warmup_weight": self._get_volume_weight(),
         }
 
 
@@ -469,18 +492,15 @@ class AdaptiveWeightHandler(ConstraintHandler):
         losses: ConstraintLosses,
         thresholds: ConstraintThresholds,
     ) -> torch.Tensor:
-        # During volume warmup, only minimize reconstruction + performance
-        if self._volume_warmup_active:
-            w_r = torch.exp(self.log_w_r)
-            w_p = torch.exp(self.log_w_p)
-            return w_r * losses.reconstruction + w_p * losses.performance
-
         # Convert from log-space
         w_v = torch.exp(self.log_w_v)
         w_r = torch.exp(self.log_w_r)
         w_p = torch.exp(self.log_w_p)
 
-        return w_v * losses.volume + w_r * losses.reconstruction + w_p * losses.performance
+        # Apply polynomial warmup schedule to volume loss
+        volume_weight = self._get_volume_weight()
+
+        return volume_weight * w_v * losses.volume + w_r * losses.reconstruction + w_p * losses.performance
 
     def step(self, losses: ConstraintLosses, thresholds: ConstraintThresholds) -> None:
         """Update weights based on cached gradient norms."""
@@ -529,6 +549,7 @@ class AdaptiveWeightHandler(ConstraintHandler):
             "constraint/w_volume": torch.exp(self.log_w_v).item(),
             "constraint/w_reconstruction": torch.exp(self.log_w_r).item(),
             "constraint/w_performance": torch.exp(self.log_w_p).item(),
+            "constraint/volume_warmup_weight": self._get_volume_weight(),
         }
 
         # Include gradient norms if available
@@ -609,10 +630,6 @@ class SoftplusALHandler(ConstraintHandler):
         losses: ConstraintLosses,
         thresholds: ConstraintThresholds,
     ) -> torch.Tensor:
-        # During volume warmup, only minimize reconstruction + performance
-        if self._volume_warmup_active:
-            return losses.reconstruction + losses.performance
-
         mu_r, mu_p = self._get_penalty_coefficients()
 
         # Compute smooth violations using softplus
@@ -622,9 +639,12 @@ class SoftplusALHandler(ConstraintHandler):
         rec_violation = F.softplus(rec_violation_raw, beta=self.beta)
         perf_violation = F.softplus(perf_violation_raw, beta=self.beta)
 
-        # Augmented Lagrangian with smooth violations
+        # Apply polynomial warmup schedule to volume loss
+        volume_weight = self._get_volume_weight()
+
+        # Augmented Lagrangian with smooth violations and polynomial volume warmup
         total_loss = (
-            losses.volume
+            volume_weight * losses.volume
             + self.lambda_r * rec_violation
             + 0.5 * mu_r * rec_violation**2
             + self.lambda_p * perf_violation
@@ -654,6 +674,7 @@ class SoftplusALHandler(ConstraintHandler):
             "constraint/mu_r": mu_r,
             "constraint/mu_p": mu_p,
             "constraint/beta": self.beta,
+            "constraint/volume_warmup_weight": self._get_volume_weight(),
         }
 
 
