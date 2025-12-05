@@ -1,14 +1,18 @@
+"""Evaluation of the PixelCNN++."""
 from dataclasses import dataclass
-import pandas as pd
 import os
+
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import numpy as np
+import pandas as pd
 import torch as th
 import tyro
 import wandb
+
 from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.pixel_cnn_pp_2d.pixel_cnn_pp_2d import PixelCNNpp
+from engiopt.pixel_cnn_pp_2d.pixel_cnn_pp_2d import sample_from_discretized_mix_logistic
 
 
 @dataclass
@@ -21,7 +25,7 @@ class Args:
     """Random seed to run."""
     wandb_project: str = "engiopt"
     """Wandb project name."""
-    wandb_entity: str | None = None
+    wandb_entity: str = "jstehlin-eth-z-rich" #| None = None
     """Wandb entity name."""
     n_samples: int = 50
     """Number of generated samples per seed."""
@@ -52,7 +56,7 @@ if __name__ == "__main__":
         device = th.device("cpu")
 
     ### Set up testing conditions ###
-    conditions_tensor, sampled_conditions, sampled_designs_np, _ = sample_conditions(
+    conditions_tensor, sampled_conditions, sampled_designs_np, selected_indices = sample_conditions(
         problem=problem,
         n_samples=args.n_samples,
         device=device,
@@ -62,6 +66,14 @@ if __name__ == "__main__":
     # --------------------------------------------------------
     # adapt to PixelCNN++ input shape requirements
     conditions_tensor = conditions_tensor.unsqueeze(-1).unsqueeze(-1)
+    # print(f"Conditions tensor shape: {conditions_tensor.shape}")
+    # print(conditions_tensor)
+    # print(f"Sampled conditions shape: {sampled_conditions.shape}")
+    # print(sampled_conditions)
+    # print(f"Sampled designs shape: {sampled_designs_np.shape}")
+    # print(sampled_designs_np)
+    # print(f"Selected indices: {selected_indices}")
+    design_shape = (problem.design_space.shape[0], problem.design_space.shape[1])
 
     ### Set Up PixelCNN++ Model ###
     if args.wandb_entity is not None:
@@ -81,7 +93,7 @@ if __name__ == "__main__":
         raise RunRetrievalError
 
     artifact_dir = artifact.download()
-    ckpt_path = os.path.join(artifact_dir, "model.pth") # change model.pth if necessary
+    ckpt_path = os.path.join(artifact_dir, "model_epoch400.pth") # change model.pth if necessary
     ckpt = th.load(ckpt_path, map_location=device) # or th.device(device)
 
 
@@ -92,18 +104,27 @@ if __name__ == "__main__":
         nr_logistic_mix=run.config["nr_logistic_mix"],
         resnet_nonlinearity=run.config["resnet_nonlinearity"],
         dropout_p=run.config["dropout_p"],
-        input_channels=1
+        input_channels=1,
+        nr_conditions=conditions_tensor.shape[1]
     )
 
-    model.load_state_dict(ckpt["generator"])
+    model.load_state_dict(ckpt["model"])
     model.eval()  # Set to evaluation mode
     model.to(device)
 
-    # Sample noise as generator input
-    z = th.randn((args.n_samples, run.config["latent_dim"], 1, 1), device=device, dtype=th.float)
+    # input
+    gen_designs = th.zeros((args.n_samples, 1, *design_shape), device=device)
 
     # Generate a batch of designs
-    gen_designs = model(z, conditions_tensor)
+    # Autoregressive pixel sampling: iterate spatial positions and condition on
+    # previously sampled pixels and the desired_conds.
+    for i in range(design_shape[0]):
+        for j in range(design_shape[1]):
+            out = model(gen_designs, conditions_tensor)
+            out_sample = sample_from_discretized_mix_logistic(out, run.config["nr_logistic_mix"])
+            # `out_sample` has shape [B, 1, H, W]; copy the sampled value for (i,j)
+            gen_designs[:, :, i, j] = out_sample.data[:, :, i, j] #out_sample[:, :, i, j] # out_sample.data[:, :, i, j]
+
 
     gen_designs_np = gen_designs.detach().cpu().numpy()
     gen_designs_np = gen_designs_np.reshape(args.n_samples, *problem.design_space.shape)

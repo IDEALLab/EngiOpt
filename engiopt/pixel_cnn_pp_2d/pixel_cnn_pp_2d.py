@@ -89,7 +89,7 @@ class nin(nn.Module):
         return out.permute(0, 3, 1, 2)  # BHWC -> BCHW
 
 class GatedResnet(nn.Module):
-    def __init__(self, nr_filters, conv_op, resnet_nonlinearity=concat_elu, skip_connection=0, dropout_p=0.5):
+    def __init__(self, nr_filters, conv_op, resnet_nonlinearity=concat_elu, skip_connection=0, dropout_p=0.5, nr_conditions=0):
         super().__init__()
         self.skip_connection = skip_connection
         self.resnet_nonlinearity = resnet_nonlinearity
@@ -257,7 +257,8 @@ class PixelCNNpp(nn.Module):
                  nr_logistic_mix: int,
                  resnet_nonlinearity: str,
                  dropout_p: float,
-                 input_channels: int = 1):
+                 input_channels: int = 1,
+                 nr_conditions: int = 0):
 
         super().__init__()
         if resnet_nonlinearity == "concat_elu" :
@@ -272,7 +273,6 @@ class PixelCNNpp(nn.Module):
         self.nr_resnet = nr_resnet
         self.nr_filters = nr_filters
         self.nr_logistic_mix = nr_logistic_mix
-        self.dropout_p = dropout_p
         self.input_channels = input_channels
 
 
@@ -281,37 +281,37 @@ class PixelCNNpp(nn.Module):
         self.ul_init = nn.ModuleList([DownShiftedConv2d(input_channels + 1, nr_filters, filter_size=(1,3), stride=(1,1), shift_output_down=True),
                                       DownRightShiftedConv2d(input_channels + 1, nr_filters, filter_size=(2,1), stride=(1,1), shift_output_right_down=True)])
 
-        self.gated_resnet_block_u_up_1 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=0) for _ in range(nr_resnet)])
-        self.gated_resnet_block_ul_up_1 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=1) for _ in range(nr_resnet)])
+        self.gated_resnet_block_u_up_1 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=0, dropout_p=dropout_p, nr_conditions=nr_conditions) for _ in range(nr_resnet)])
+        self.gated_resnet_block_ul_up_1 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=1, dropout_p=dropout_p, nr_conditions=nr_conditions) for _ in range(nr_resnet)])
 
         self.downsize_u_1 = DownShiftedConv2d(nr_filters, nr_filters, filter_size=(2,3), stride=(2,2))
         self.downsize_ul_1 = DownRightShiftedConv2d(nr_filters, nr_filters, filter_size=(2,2), stride=(2,2))
 
-        self.gated_resnet_block_u_up_2 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=0) for _ in range(nr_resnet)])
-        self.gated_resnet_block_ul_up_2 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=1) for _ in range(nr_resnet)])
+        self.gated_resnet_block_u_up_2 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=0, dropout_p=dropout_p, nr_conditions=nr_conditions) for _ in range(nr_resnet)])
+        self.gated_resnet_block_ul_up_2 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=1, dropout_p=dropout_p, nr_conditions=nr_conditions) for _ in range(nr_resnet)])
 
         self.downsize_u_2 = DownShiftedConv2d(nr_filters, nr_filters, filter_size=(2,3), stride=(2,2))
         self.downsize_ul_2 = DownRightShiftedConv2d(nr_filters, nr_filters, filter_size=(2,2), stride=(2,2))
 
-        self.gated_resnet_block_u_up_3 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=0) for _ in range(nr_resnet)])
-        self.gated_resnet_block_ul_up_3 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=1) for _ in range(nr_resnet)])
+        self.gated_resnet_block_u_up_3 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=0, dropout_p=dropout_p, nr_conditions=nr_conditions) for _ in range(nr_resnet)])
+        self.gated_resnet_block_ul_up_3 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=1, dropout_p=dropout_p, nr_conditions=nr_conditions) for _ in range(nr_resnet)])
 
 
         # DOWN PASS blocks
-        self.gated_resnet_block_u_down_1 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=1) for _ in range(nr_resnet)])
-        self.gated_resnet_block_ul_down_1 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=2) for _ in range(nr_resnet)])
+        self.gated_resnet_block_u_down_1 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=1, dropout_p=dropout_p, nr_conditions=nr_conditions) for _ in range(nr_resnet)])
+        self.gated_resnet_block_ul_down_1 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=2, dropout_p=dropout_p, nr_conditions=nr_conditions) for _ in range(nr_resnet)])
 
         self.upsize_u_1 = DownShiftedDeconv2d(nr_filters, nr_filters, filter_size=(2,3), stride=(2,2))
         self.upsize_ul_1 = DownRightShiftedDeconv2d(nr_filters, nr_filters, filter_size=(2,2), stride=(2,2))
 
-        self.gated_resnet_block_u_down_2 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=1) for _ in range(nr_resnet + 1)])
-        self.gated_resnet_block_ul_down_2 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=2) for _ in range(nr_resnet + 1)])
+        self.gated_resnet_block_u_down_2 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=1, dropout_p=dropout_p, nr_conditions=nr_conditions) for _ in range(nr_resnet + 1)])
+        self.gated_resnet_block_ul_down_2 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=2, dropout_p=dropout_p, nr_conditions=nr_conditions) for _ in range(nr_resnet + 1)])
 
         self.upsize_u_2 = DownShiftedDeconv2d(nr_filters, nr_filters, filter_size=(2,3), stride=(2,2))
         self.upsize_ul_2 = DownRightShiftedDeconv2d(nr_filters, nr_filters, filter_size=(2,2), stride=(2,2))
 
-        self.gated_resnet_block_u_down_3 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=1) for _ in range(nr_resnet + 1)])
-        self.gated_resnet_block_ul_down_3 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=2) for _ in range(nr_resnet + 1)])
+        self.gated_resnet_block_u_down_3 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=1, dropout_p=dropout_p, nr_conditions=nr_conditions) for _ in range(nr_resnet + 1)])
+        self.gated_resnet_block_ul_down_3 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=2, dropout_p=dropout_p, nr_conditions=nr_conditions) for _ in range(nr_resnet + 1)])
 
         num_mix = 3 if self.input_channels == 1 else 10
         self.nin_out = nin(nr_filters, num_mix * nr_logistic_mix)
@@ -556,7 +556,8 @@ if __name__ == "__main__":
         nr_logistic_mix=args.nr_logistic_mix,
         resnet_nonlinearity=args.resnet_nonlinearity,
         dropout_p=args.dropout_p,
-        input_channels=1
+        input_channels=1,
+        nr_conditions=nr_conditions
     )
 
     model.to(device)
@@ -732,7 +733,7 @@ if __name__ == "__main__":
                         "epoch": epoch,
                         "batches_done": batches_done,
                         "model": model.state_dict(),
-                        "optimizer_generator": optimizer.state_dict(),
+                        "optimizer": optimizer.state_dict(),
                         "loss": loss.item(),
                     }
 
