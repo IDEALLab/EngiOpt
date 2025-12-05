@@ -639,7 +639,7 @@ if __name__ == "__main__":
             ngpus = th.cuda.device_count()
 
         assert n_designs % ngpus == 0, "n_designs must divide evenly across GPUs"
-
+        print(f"Sampling {n_designs} designs across {ngpus} GPUs...")
         # Share model weights with workers
         model_state = model.state_dict()
 
