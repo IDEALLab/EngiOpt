@@ -42,9 +42,9 @@ class Args:
     """Saves the model to disk."""
 
     # Algorithm specific
-    n_epochs: int = 4
+    n_epochs: int = 100
     """number of epochs of training"""
-    sample_interval: int = 500
+    sample_interval: int = 400
     """interval between image samples"""
     model_storage_interval: int = 2
     """interval between model storage"""
@@ -578,45 +578,28 @@ if __name__ == "__main__":
     # Optimzer
     optimizer = th.optim.Adam(model.parameters(), lr=args.lr, betas=(args.b1, args.b2)) # add other args if necessary
 
-    # @th.no_grad()
-    # def sample_designs(model: PixelCNNpp, design_shape: tuple[int, int, int], n_designs: int = 25) -> tuple[th.Tensor, th.Tensor]:
-    #     """Samples n_designs designs."""
-    #     model.eval()
-    #     data = torch.zeros(n_designs, design_shape[0], design_shape[1], design_shape[2])
-    #     data = data.cuda()
-    #     with torch.no_grad():
-    #         for i in range(design_shape[1]):
-    #             for j in range(design_shape[2]):
-    #                 out = model(data, sample=True)
-    #                 out_sample = sample_from_discretized_mix_logistic(out, args.nr_logistic_mix)
-    #                 data[:, :, i, j] = out_sample.data[:, :, i, j]
-    #     return data
 
 
     @th.no_grad()
     def sample_designs(model: PixelCNNpp, design_shape: tuple[int, int, int], dim: int = 1, n_designs: int = 25) -> tuple[th.Tensor, th.Tensor]:
-        """Samples n_designs designs using dataset conditions."""
+        """Samples n_designs designs using dataset conditions, parallelized across up to 5 GPUs."""
         model.eval()
         device = next(model.parameters()).device
+
+        # Wrap model with DataParallel if multiple GPUs are available
+        num_gpus = th.cuda.device_count()
+        if num_gpus > 1 and device.type == "cuda":
+            num_gpus = min(num_gpus, 5)  # Use at most 5 GPUs
+            parallel_model = nn.DataParallel(model, device_ids=list(range(num_gpus)))
+            print(f"Using {num_gpus} GPUs for sampling")
+        else:
+            parallel_model = model
 
         linspaces = [
             th.linspace(conds[:, i].min(), conds[:, i].max(), n_designs, device=device) for i in range(conds.shape[1])
         ]
 
         desired_conds = th.stack(linspaces, dim=1).reshape(-1, nr_conditions, 1, 1)
-
-        # # Build per-condition min/max from the dataset tensors (device-safe)
-        # # `condition_tensors` is defined in the outer scope above when the
-        # # dataset is prepared: it's a list of 1-D tensors (one per condition).
-        # all_conditions = th.stack(condition_tensors, dim=1).to(device)  # [N_examples, nr_conditions]
-        # conds_min = all_conditions.amin(dim=0)
-        # conds_max = all_conditions.amax(dim=0)
-
-        # # Create a sweep of condition vectors between min and max (diagonal sweep)
-        # steps = th.linspace(0.0, 1.0, n_designs, device=device).unsqueeze(1)  # [n_designs, 1]
-        # encoder_hidden_states = conds_min.unsqueeze(0) + steps * (conds_max - conds_min).unsqueeze(0)
-        # # reshape to [B, nr_conditions, 1, 1] as expected by the model's conditional input
-        # encoder_hidden_states = encoder_hidden_states.view(n_designs, len(problem.conditions_keys), 1, 1).to(device)
 
         # Prepare an empty image batch on the same device as the model
         data = th.zeros((n_designs, dim, *design_shape), device=device)
@@ -625,18 +608,48 @@ if __name__ == "__main__":
         # previously sampled pixels and the desired_conds.
         for i in range(design_shape[0]):
             for j in range(design_shape[1]):
-                # print(f"Sampling pixel ({i}, {j})")
-                out = model(data, desired_conds)
-                # print(f"out shape: {out.shape}")
+                # Use parallel_model for forward pass (DataParallel distributes batch across GPUs)
+                out = parallel_model(data, desired_conds)
                 out_sample = sample_from_discretized_mix_logistic(out, args.nr_logistic_mix)
-                # print(f"out_sample shape: {out_sample.shape}")
                 # `out_sample` has shape [B, 1, H, W]; copy the sampled value for (i,j)
-                data[:, :, i, j] = out_sample.data[:, :, i, j] #out_sample[:, :, i, j] # out_sample.data[:, :, i, j]
+                data[:, :, i, j] = out_sample.data[:, :, i, j]
             #print(f"Completed row {i+1}/{design_shape[0]}")
 
-        #print(f"final data shape: {data.shape}")
-        #print(f"desired_conds shape: {desired_conds.shape}")
         return data, desired_conds
+
+
+    # old function without DataParallel
+    # @th.no_grad()
+    # def sample_designs(model: PixelCNNpp, design_shape: tuple[int, int, int], dim: int = 1, n_designs: int = 25) -> tuple[th.Tensor, th.Tensor]:
+    #     """Samples n_designs designs using dataset conditions."""
+    #     model.eval()
+    #     device = next(model.parameters()).device
+
+    #     linspaces = [
+    #         th.linspace(conds[:, i].min(), conds[:, i].max(), n_designs, device=device) for i in range(conds.shape[1])
+    #     ]
+
+    #     desired_conds = th.stack(linspaces, dim=1).reshape(-1, nr_conditions, 1, 1)
+
+    #     # Prepare an empty image batch on the same device as the model
+    #     data = th.zeros((n_designs, dim, *design_shape), device=device)
+
+    #     # Autoregressive pixel sampling: iterate spatial positions and condition on
+    #     # previously sampled pixels and the desired_conds.
+    #     for i in range(design_shape[0]):
+    #         for j in range(design_shape[1]):
+    #             # print(f"Sampling pixel ({i}, {j})")
+    #             out = model(data, desired_conds)
+    #             # print(f"out shape: {out.shape}")
+    #             out_sample = sample_from_discretized_mix_logistic(out, args.nr_logistic_mix)
+    #             # print(f"out_sample shape: {out_sample.shape}")
+    #             # `out_sample` has shape [B, 1, H, W]; copy the sampled value for (i,j)
+    #             data[:, :, i, j] = out_sample.data[:, :, i, j] #out_sample[:, :, i, j] # out_sample.data[:, :, i, j]
+    #         #print(f"Completed row {i+1}/{design_shape[0]}")
+
+    #     #print(f"final data shape: {data.shape}")
+    #     #print(f"desired_conds shape: {desired_conds.shape}")
+    #     return data, desired_conds
 
 
 
@@ -654,20 +667,6 @@ if __name__ == "__main__":
             conds = th.stack((data[1:]), dim=1).reshape(-1, nr_conditions, 1, 1)
             # print(f"conds.shape: {conds.shape}")
             #print(conds)
-
-
-            # in PixelCNNpp.__init__
-            # h_lin = nn.Linear(nr_conditions, 2 * args.nr_filters)
-
-            # # in forward, when `h` is [B, nr_conditions, 1, 1]
-            # h_flat = conds.view(conds.size(0), -1)                        # [B, nr_conditions]
-            # h_proj = h_lin(h_flat).unsqueeze(-1).unsqueeze(-1)  # [B, 2*nr_filters, 1, 1]
-            # print(h_proj.shape)
-            # print(h_proj)
-
-            # conds = th.stack((data[1:]), dim=1).reshape(-1, nr_conditions, 1, 1)
-            # print(conds.shape)
-            # print(conds)
 
             batch_start_time = time.time()
             out = model(designs, conds)
@@ -727,8 +726,8 @@ if __name__ == "__main__":
                 # --------------
                 #  Save models
                 # --------------
-                #if args.save_model and epoch == args.n_epochs - 1 and i == len(dataloader) - 1:
-                if args.save_model and (((epoch + 1) % args.model_storage_interval == 0) or (epoch == args.n_epochs - 1)) and i == len(dataloader) - 1:
+                if args.save_model and epoch == args.n_epochs - 1 and i == len(dataloader) - 1:
+                #if args.save_model and (((epoch + 1) % args.model_storage_interval == 0) or (epoch == args.n_epochs - 1)) and i == len(dataloader) - 1:
                     ckpt_model = {
                         "epoch": epoch,
                         "batches_done": batches_done,
@@ -737,10 +736,10 @@ if __name__ == "__main__":
                         "loss": loss.item(),
                     }
 
-                    th.save(ckpt_model, f"model_epoch{epoch+1}.pth")
+                    th.save(ckpt_model, "model.pth")
                     if args.track:
                         artifact_model = wandb.Artifact(f"{args.problem_id}_{args.algo}_model", type="model")
-                        artifact_model.add_file(f"model_epoch{epoch+1}.pth")
+                        artifact_model.add_file("model.pth")
 
                         wandb.log_artifact(artifact_model, aliases=[f"seed_{args.seed}"])
 
