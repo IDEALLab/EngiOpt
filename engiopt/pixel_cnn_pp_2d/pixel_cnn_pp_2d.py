@@ -47,8 +47,6 @@ class Args:
     """number of epochs of training"""
     sample_interval: int = 400
     """interval between image samples"""
-    # model_storage_interval: int = 2
-    # """interval between model storage"""
     batch_size: int = 8
     """size of the batches"""
     lr: float = 0.001
@@ -57,11 +55,11 @@ class Args:
     """decay of first order momentum of gradient"""
     b2: float = 0.9995
     """decay of first order momentum of gradient"""
-    nr_resnet: int = 2
+    nr_resnet: int = 5
     """Number of residual blocks per stage of the model."""
-    nr_filters: int = 40
+    nr_filters: int = 160
     """Number of filters to use across the model. Higher = larger model."""
-    nr_logistic_mix: int = 5
+    nr_logistic_mix: int = 10
     """Number of logistic components in the mixture. Higher = more flexible model."""
     resnet_nonlinearity: str = "concat_elu"
     """Nonlinearity to use in the ResNet blocks. One of 'concat_elu', 'elu', 'relu'."""
@@ -751,8 +749,8 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval == 0:
                     # Extract 25 designs
 
-                    #designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=25)
-                    designs, desired_conds = sample_designs_multigpu(model, design_shape, dim=1, conds=conds, n_designs=25, ngpus=None)
+                    designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=25)
+                    # designs, desired_conds = sample_designs_multigpu(model, design_shape, dim=1, conds=conds, n_designs=25, ngpus=None)
                     fig, axes = plt.subplots(5, 5, figsize=(12, 12))
 
                     # Flatten axes for easy indexing
