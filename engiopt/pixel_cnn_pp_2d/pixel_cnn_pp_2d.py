@@ -13,6 +13,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch as th
 from torch import nn
+import torch.multiprocessing as mp
 import torch.nn.functional as F
 from torch.nn.utils.parametrizations import weight_norm
 import tqdm
@@ -46,8 +47,8 @@ class Args:
     """number of epochs of training"""
     sample_interval: int = 400
     """interval between image samples"""
-    model_storage_interval: int = 2
-    """interval between model storage"""
+    # model_storage_interval: int = 2
+    # """interval between model storage"""
     batch_size: int = 8
     """size of the batches"""
     lr: float = 0.001
@@ -579,21 +580,103 @@ if __name__ == "__main__":
     optimizer = th.optim.Adam(model.parameters(), lr=args.lr, betas=(args.b1, args.b2)) # add other args if necessary
 
 
+    @th.no_grad()
+    def worker_proc(rank, ngpus, model_state, design_shape, dim, conds, n_designs_total, return_dict):
 
+        th.cuda.set_device(rank)
+        device = f"cuda:{rank}"
+
+        # Rebuild model in worker process
+        model = PixelCNNpp(nr_resnet=args.nr_resnet,
+            nr_filters=args.nr_filters,
+            nr_logistic_mix=args.nr_logistic_mix,
+            resnet_nonlinearity=args.resnet_nonlinearity,
+            dropout_p=args.dropout_p,
+            input_channels=1,
+            nr_conditions=conds.shape[1]
+        )
+        model.load_state_dict(model_state)
+        model.to(device)
+        model.eval()
+
+        # Determine this worker's batch slice
+        per_gpu = n_designs_total // ngpus
+        start = rank * per_gpu
+        end = (rank + 1) * per_gpu
+        n = per_gpu
+
+        conds_slice = conds[start:end].to(device)
+
+        # Build desired conditions for this worker
+        linspaces = [
+            th.linspace(conds_slice[:, i].min(), conds_slice[:, i].max(), n, device=device) for i in range(conds_slice.shape[1])
+        ]
+
+        desired_conds = th.stack(linspaces, dim=1).reshape(n, conds.shape[1], 1, 1)
+
+        # Allocate output batch for this worker
+        data = th.zeros((n, dim, *design_shape), device=device)
+
+        # ---------------------------------------------------------------------
+        # Autoregressive sampling loop (runs independently on each GPU)
+        # ---------------------------------------------------------------------
+        for i in range(design_shape[0]):
+            for j in range(design_shape[1]):
+                out = model(data, desired_conds)
+                out_sample = sample_from_discretized_mix_logistic(out, args.nr_logistic_mix)
+                data[:, :, i, j] = out_sample[:, :, i, j]
+
+        # Store CPU results to parent process
+        return_dict[rank] = (data.cpu(), desired_conds.cpu())
+
+
+    # -------------------------------------------------------------------------
+    # Launcher: runs once in the main process
+    # -------------------------------------------------------------------------
+    def sample_designs_multigpu(model: PixelCNNpp, design_shape, dim, conds, n_designs=25, ngpus=None):
+
+        if ngpus is None:
+            ngpus = th.cuda.device_count()
+
+        assert n_designs % ngpus == 0, "n_designs must divide evenly across GPUs"
+
+        # Share model weights with workers
+        model_state = model.state_dict()
+
+        mp.set_start_method("spawn", force=True)
+        manager = mp.Manager()
+        return_dict = manager.dict()
+
+        mp.spawn(
+            worker_proc,
+            args=(ngpus, model_state, design_shape, dim,
+                conds, n_designs, return_dict),
+            nprocs=ngpus,
+            join=True
+        )
+
+        # ---------------------------------------------------------------------
+        # Collect results from all GPUs in order
+        # ---------------------------------------------------------------------
+        all_data = []
+        all_conds = []
+
+        for rank in range(ngpus):
+            data, dc = return_dict[rank]
+            all_data.append(data)
+            all_conds.append(dc)
+
+        all_data = th.cat(all_data, dim=0)
+        all_conds = th.cat(all_conds, dim=0)
+
+        return all_data, all_conds
+
+    # old function without parallelization
     @th.no_grad()
     def sample_designs(model: PixelCNNpp, design_shape: tuple[int, int, int], dim: int = 1, n_designs: int = 25) -> tuple[th.Tensor, th.Tensor]:
-        """Samples n_designs designs using dataset conditions, parallelized across up to 5 GPUs."""
+        """Samples n_designs designs using dataset conditions."""
         model.eval()
         device = next(model.parameters()).device
-
-        # Wrap model with DataParallel if multiple GPUs are available
-        num_gpus = th.cuda.device_count()
-        if num_gpus > 1 and device.type == "cuda":
-            num_gpus = min(num_gpus, 5)  # Use at most 5 GPUs
-            parallel_model = nn.DataParallel(model, device_ids=list(range(num_gpus)))
-            print(f"Using {num_gpus} GPUs for sampling")
-        else:
-            parallel_model = model
 
         linspaces = [
             th.linspace(conds[:, i].min(), conds[:, i].max(), n_designs, device=device) for i in range(conds.shape[1])
@@ -608,48 +691,18 @@ if __name__ == "__main__":
         # previously sampled pixels and the desired_conds.
         for i in range(design_shape[0]):
             for j in range(design_shape[1]):
-                # Use parallel_model for forward pass (DataParallel distributes batch across GPUs)
-                out = parallel_model(data, desired_conds)
+                # print(f"Sampling pixel ({i}, {j})")
+                out = model(data, desired_conds)
+                # print(f"out shape: {out.shape}")
                 out_sample = sample_from_discretized_mix_logistic(out, args.nr_logistic_mix)
+                # print(f"out_sample shape: {out_sample.shape}")
                 # `out_sample` has shape [B, 1, H, W]; copy the sampled value for (i,j)
-                data[:, :, i, j] = out_sample.data[:, :, i, j]
+                data[:, :, i, j] = out_sample.data[:, :, i, j] #out_sample[:, :, i, j] # out_sample.data[:, :, i, j]
             #print(f"Completed row {i+1}/{design_shape[0]}")
 
+        #print(f"final data shape: {data.shape}")
+        #print(f"desired_conds shape: {desired_conds.shape}")
         return data, desired_conds
-
-
-    # old function without DataParallel
-    # @th.no_grad()
-    # def sample_designs(model: PixelCNNpp, design_shape: tuple[int, int, int], dim: int = 1, n_designs: int = 25) -> tuple[th.Tensor, th.Tensor]:
-    #     """Samples n_designs designs using dataset conditions."""
-    #     model.eval()
-    #     device = next(model.parameters()).device
-
-    #     linspaces = [
-    #         th.linspace(conds[:, i].min(), conds[:, i].max(), n_designs, device=device) for i in range(conds.shape[1])
-    #     ]
-
-    #     desired_conds = th.stack(linspaces, dim=1).reshape(-1, nr_conditions, 1, 1)
-
-    #     # Prepare an empty image batch on the same device as the model
-    #     data = th.zeros((n_designs, dim, *design_shape), device=device)
-
-    #     # Autoregressive pixel sampling: iterate spatial positions and condition on
-    #     # previously sampled pixels and the desired_conds.
-    #     for i in range(design_shape[0]):
-    #         for j in range(design_shape[1]):
-    #             # print(f"Sampling pixel ({i}, {j})")
-    #             out = model(data, desired_conds)
-    #             # print(f"out shape: {out.shape}")
-    #             out_sample = sample_from_discretized_mix_logistic(out, args.nr_logistic_mix)
-    #             # print(f"out_sample shape: {out_sample.shape}")
-    #             # `out_sample` has shape [B, 1, H, W]; copy the sampled value for (i,j)
-    #             data[:, :, i, j] = out_sample.data[:, :, i, j] #out_sample[:, :, i, j] # out_sample.data[:, :, i, j]
-    #         #print(f"Completed row {i+1}/{design_shape[0]}")
-
-    #     #print(f"final data shape: {data.shape}")
-    #     #print(f"desired_conds shape: {desired_conds.shape}")
-    #     return data, desired_conds
 
 
 
@@ -698,7 +751,8 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval == 0:
                     # Extract 25 designs
 
-                    designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=25)
+                    #designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=25)
+                    designs, desired_conds = sample_designs_multigpu(model, design_shape, dim=1, conds=conds, n_designs=25, ngpus=None)
                     fig, axes = plt.subplots(5, 5, figsize=(12, 12))
 
                     # Flatten axes for easy indexing
