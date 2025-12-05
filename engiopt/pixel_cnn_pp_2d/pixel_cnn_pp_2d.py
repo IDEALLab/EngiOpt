@@ -698,8 +698,8 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval == 0:
                     # Extract 25 designs
 
-                    designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=5)
-                    fig, axes = plt.subplots(1, 5, figsize=(12, 12))
+                    designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=25)
+                    fig, axes = plt.subplots(5, 5, figsize=(12, 12))
 
                     # Flatten axes for easy indexing
                     axes = axes.flatten()
