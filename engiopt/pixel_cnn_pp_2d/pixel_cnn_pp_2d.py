@@ -13,7 +13,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch as th
 from torch import nn
-import torch.multiprocessing as mp
 import torch.nn.functional as F
 from torch.nn.utils.parametrizations import weight_norm
 import tqdm
@@ -43,9 +42,9 @@ class Args:
     """Saves the model to disk."""
 
     # Algorithm specific
-    n_epochs: int = 100
+    n_epochs: int = 2
     """number of epochs of training"""
-    sample_interval: int = 400
+    sample_interval: int = 2000
     """interval between image samples"""
     batch_size: int = 8
     """size of the batches"""
@@ -57,7 +56,7 @@ class Args:
     """decay of first order momentum of gradient"""
     nr_resnet: int = 5
     """Number of residual blocks per stage of the model."""
-    nr_filters: int = 160
+    nr_filters: int = 120
     """Number of filters to use across the model. Higher = larger model."""
     nr_logistic_mix: int = 10
     """Number of logistic components in the mixture. Higher = more flexible model."""
@@ -363,11 +362,7 @@ class PixelCNNpp(nn.Module):
             u_list.append(self.gated_resnet_block_u_up_3[i](u_list[-1], a=None, h=c))
             ul_list.append(self.gated_resnet_block_ul_up_3[i](ul_list[-1], a=u_list[-1], h=c))
 
-        # for i, u in enumerate(u_list):
-        #     print(f"u_list[{i}] shape: {u.shape}")
-        # for i, ul in enumerate(ul_list):
-        #     print(f"ul_list[{i}] shape: {ul.shape}")
-        # print(f"output_padding_list: {output_padding_list}")
+
         # DOWN PASS ("decoder")
         u  = u_list.pop()
         ul = ul_list.pop()
@@ -429,7 +424,7 @@ def discretized_mix_logistic_loss(x, l):
         nr_mix = int(ls[-1] / 3) # here and below: unpacking the params of the mixture of logistics
         logit_probs = l[:,:,:,:nr_mix]
         # different for 3 channels: nr_mix * 3 #, coeff
-        l = l[:, :, :, nr_mix:].contiguous().view([*xs, nr_mix * 2]) # 3 for mean, scale
+        l = l[:, :, :, nr_mix:].contiguous().view([*xs, nr_mix * 2]) # 2 for mean, scale
         means = l[:,:,:,:,:nr_mix]
         log_scales = th.clamp(l[:, :, :, :, nr_mix:2 * nr_mix], min=-7.)
         # for 3 channels:
@@ -577,99 +572,6 @@ if __name__ == "__main__":
     # Optimzer
     optimizer = th.optim.Adam(model.parameters(), lr=args.lr, betas=(args.b1, args.b2)) # add other args if necessary
 
-
-    @th.no_grad()
-    def worker_proc(rank, ngpus, model_state, design_shape, dim, conds, n_designs_total, return_dict):
-
-        th.cuda.set_device(rank)
-        device = f"cuda:{rank}"
-
-        # Rebuild model in worker process
-        model = PixelCNNpp(nr_resnet=args.nr_resnet,
-            nr_filters=args.nr_filters,
-            nr_logistic_mix=args.nr_logistic_mix,
-            resnet_nonlinearity=args.resnet_nonlinearity,
-            dropout_p=args.dropout_p,
-            input_channels=1,
-            nr_conditions=conds.shape[1]
-        )
-        model.load_state_dict(model_state)
-        model.to(device)
-        model.eval()
-
-        # Determine this worker's batch slice
-        per_gpu = n_designs_total // ngpus
-        start = rank * per_gpu
-        end = (rank + 1) * per_gpu
-        n = per_gpu
-
-        conds_slice = conds[start:end].to(device)
-
-        # Build desired conditions for this worker
-        linspaces = [
-            th.linspace(conds_slice[:, i].min(), conds_slice[:, i].max(), n, device=device) for i in range(conds_slice.shape[1])
-        ]
-
-        desired_conds = th.stack(linspaces, dim=1).reshape(n, conds.shape[1], 1, 1)
-
-        # Allocate output batch for this worker
-        data = th.zeros((n, dim, *design_shape), device=device)
-
-        # ---------------------------------------------------------------------
-        # Autoregressive sampling loop (runs independently on each GPU)
-        # ---------------------------------------------------------------------
-        for i in range(design_shape[0]):
-            for j in range(design_shape[1]):
-                out = model(data, desired_conds)
-                out_sample = sample_from_discretized_mix_logistic(out, args.nr_logistic_mix)
-                data[:, :, i, j] = out_sample[:, :, i, j]
-
-        # Store CPU results to parent process
-        return_dict[rank] = (data.cpu(), desired_conds.cpu())
-
-
-    # -------------------------------------------------------------------------
-    # Launcher: runs once in the main process
-    # -------------------------------------------------------------------------
-    def sample_designs_multigpu(model: PixelCNNpp, design_shape, dim, conds, n_designs=25, ngpus=None):
-
-        if ngpus is None:
-            ngpus = th.cuda.device_count()
-
-        assert n_designs % ngpus == 0, "n_designs must divide evenly across GPUs"
-        print(f"Sampling {n_designs} designs across {ngpus} GPUs...")
-        # Share model weights with workers
-        model_state = model.state_dict()
-
-        mp.set_start_method("spawn", force=True)
-        manager = mp.Manager()
-        return_dict = manager.dict()
-
-        mp.spawn(
-            worker_proc,
-            args=(ngpus, model_state, design_shape, dim,
-                conds, n_designs, return_dict),
-            nprocs=ngpus,
-            join=True
-        )
-
-        # ---------------------------------------------------------------------
-        # Collect results from all GPUs in order
-        # ---------------------------------------------------------------------
-        all_data = []
-        all_conds = []
-
-        for rank in range(ngpus):
-            data, dc = return_dict[rank]
-            all_data.append(data)
-            all_conds.append(dc)
-
-        all_data = th.cat(all_data, dim=0)
-        all_conds = th.cat(all_conds, dim=0)
-
-        return all_data, all_conds
-
-    # old function without parallelization
     @th.no_grad()
     def sample_designs(model: PixelCNNpp, design_shape: tuple[int, int, int], dim: int = 1, n_designs: int = 25) -> tuple[th.Tensor, th.Tensor]:
         """Samples n_designs designs using dataset conditions."""
@@ -711,6 +613,7 @@ if __name__ == "__main__":
         model.train()
         for i, data in enumerate(dataloader):
             designs = data[0].unsqueeze(dim=1) # add channel dim
+            designs_rescaled = designs * 2. - 1.  # rescale to [-1, 1]
 
             #print(designs.shape)
             #print(data[1:])
@@ -720,9 +623,9 @@ if __name__ == "__main__":
             #print(conds)
 
             batch_start_time = time.time()
-            out = model(designs, conds)
+            out = model(designs_rescaled, conds)
             # Compute loss
-            loss = loss_operator(designs, out)
+            loss = loss_operator(designs_rescaled, out)
             optimizer.zero_grad()
             # Backpropagation
             loss.backward()
@@ -749,8 +652,7 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval == 0:
                     # Extract 25 designs
 
-                    designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=25)
-                    # designs, desired_conds = sample_designs_multigpu(model, design_shape, dim=1, conds=conds, n_designs=25, ngpus=None)
+                    designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=1)
                     fig, axes = plt.subplots(5, 5, figsize=(12, 12))
 
                     # Flatten axes for easy indexing
@@ -758,7 +660,8 @@ if __name__ == "__main__":
 
                     # Plot the image created by each output
                     for j, tensor in enumerate(designs):
-                        img = tensor.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
+                        tensor_rescaled = (tensor + 1.) / 2.  # rescale to [0, 1]
+                        img = tensor_rescaled.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
                         #print(f"img shape: {img.shape}")
                         dc = desired_conds[j].cpu().squeeze() # Extract design conditions
                         #print(f"dc shape: {dc.shape}")
