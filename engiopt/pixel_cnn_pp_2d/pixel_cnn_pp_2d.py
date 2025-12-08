@@ -44,7 +44,7 @@ class Args:
     # Algorithm specific
     n_epochs: int = 2
     """number of epochs of training"""
-    sample_interval: int = 2000
+    sample_interval: int = 600
     """interval between image samples"""
     batch_size: int = 8
     """size of the batches"""
@@ -652,7 +652,7 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval == 0:
                     # Extract 25 designs
 
-                    designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=1)
+                    designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=25)
                     fig, axes = plt.subplots(5, 5, figsize=(12, 12))
 
                     # Flatten axes for easy indexing
