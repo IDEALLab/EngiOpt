@@ -11,7 +11,7 @@ Optimization Problem:
 No performance constraints since datasets lack performance information.
 
 Architecture:
-- SNConv1DEncoder: Encodes concatenated [coords | angle] vector (385 dims)
+- Conv1DEncoder (with spectral norm): Encodes concatenated [coords | angle] vector (385 dims)
 - FactorizedBezierDecoder: Decodes latent → coords (Bezier curves) + angle (linear head)
 - LeastVolumeAE_DynamicPruning: Dynamically prunes low-variance dimensions
 
@@ -52,7 +52,7 @@ import tqdm
 import tyro
 import wandb
 
-from engiopt.lvae_1d.cmpnts import FactorizedBezierDecoder, Normalizer, SNConv1DEncoder
+from engiopt.lvae_1d.cmpnts import Conv1DEncoder, FactorizedBezierDecoder, Normalizer
 from engiopt.lvae_2d.aes import LeastVolumeAE_DynamicPruning
 from engiopt.lvae_2d.constraint_handlers import (
     ConstraintHandler,
@@ -99,6 +99,8 @@ class Args:
     """Momentum for EMA of latent statistics."""
     eta: float = 0
     """Low volume offset to prevent gradient loss at zero volume."""
+    sn_encoder: bool = False
+    """Whether to use spectral normalization in the encoder."""
 
     # Constraint optimization
     constraint_method: str = "augmented_lagrangian"
@@ -444,13 +446,16 @@ if __name__ == "__main__":
     n_data_points = coords_shape[1]  # 192
 
     # Build encoder and decoder
-    # Encoder: Standard SNConv1DEncoder that takes concatenated coords + angle
+    # Encoder: Standard Conv1DEncoder with spectral normalization that takes concatenated coords + angle
     # The concatenation happens inline before calling encoder (see loss function)
     # Total input: 2*192 + 1 = 385 dimensions
-    enc = SNConv1DEncoder(
+    enc = Conv1DEncoder(
         in_channels=1,  # Single channel (concatenated vector)
         in_features=2 * n_data_points + 1,  # 384 coords + 1 angle = 385
         latent_dim=args.latent_dim,
+        conv_channels=[64, 128, 256, 512, 1024, 2048],
+        mlp_hidden=[1024, 512],
+        use_spectral_norm=args.sn_encoder,  # Enable spectral normalization for 1-Lipschitz bounds
     )
     # Decoder: Use FactorizedBezierDecoder for architecturally correct outputs
     # Bezier curves for smooth geometry (coords), linear head for scalars (angle)
