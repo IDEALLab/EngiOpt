@@ -1,34 +1,26 @@
-"""LVAE_DP for airfoil designs with constrained volume minimization.
+"""LVAE_DP for airfoil designs with FACTORIZED architecture.
 
-This implementation uses constraint-based optimization to minimize latent volume
-subject to reconstruction accuracy constraints. The encoder/decoder operates on
-both the airfoil geometry (coords) AND angle_of_attack.
+This is a factorized variant of lvae_airfoil.py with separate encoder/decoder paths
+for geometry (coords) and angle_of_attack. This allows explicit control over which
+latent dimensions correspond to which input components.
 
 Optimization Problem:
     minimize: volume_loss (number of active latent dimensions)
     subject to: reconstruction_loss ≤ reconstruction_threshold
 
-No performance constraints since datasets lack performance information.
-
 Architecture:
-- SNConv1DEncoder: Encodes concatenated [coords | angle] vector (385 dims)
-- FactorizedBezierDecoder: Decodes latent → coords (Bezier curves) + angle (linear head)
+- FactorizedAirfoilEncoder: Separate paths for coords → z_geom and angle → z_angle
+- FactorizedBezierDecoder: Separate paths for z_geom → coords and z_angle → angle
 - LeastVolumeAE_DynamicPruning: Dynamically prunes low-variance dimensions
 
-This hybrid approach:
-- INPUT: Concatenated encoding (coords + angle treated as unified 385-dim vector)
-- OUTPUT: Factorized decoding (Bezier for smooth curves, linear for scalars)
-
-The asymmetric design prioritizes architectural correctness for outputs while using
-a simpler concatenation strategy for inputs.
-
-Supported constraint methods:
-- augmented_lagrangian (recommended)
-- log_barrier, primal_dual, adaptive, softplus_al, weighted_sum
+Key difference from lvae_airfoil.py:
+- Explicit latent factorization: z = [z_geom | z_angle]
+- Can selectively exclude angle dims from volume loss
+- Can protect angle dims from pruning
 
 Note: The EngiBench airfoil problem has a Dict design space with:
   - 'coords': (2, 192) - x,y coordinates of airfoil shape
-  - 'angle_of_attack': scalar value (encoded in latent space)
+  - 'angle_of_attack': scalar value (encoded separately in latent space)
 """
 
 from __future__ import annotations
@@ -52,7 +44,7 @@ import tqdm
 import tyro
 import wandb
 
-from engiopt.lvae_1d.cmpnts import FactorizedBezierDecoder, Normalizer, SNConv1DEncoder
+from engiopt.lvae_1d.cmpnts import FactorizedBezierDecoder, FactorizedConv1DEncoder, Normalizer
 from engiopt.lvae_2d.aes import LeastVolumeAE_DynamicPruning
 from engiopt.lvae_2d.constraint_handlers import (
     ConstraintHandler,
@@ -99,6 +91,10 @@ class Args:
     """Momentum for EMA of latent statistics."""
     eta: float = 0
     """Low volume offset to prevent gradient loss at zero volume."""
+
+    # Volume exclusion for imbalanced Dict spaces
+    exclude_angle_from_volume: bool = False
+    """Exclude angle latent dimensions from volume loss computation (uses heuristic based on input imbalance)."""
 
     # Constraint optimization
     constraint_method: str = "augmented_lagrangian"
@@ -185,11 +181,6 @@ class Args:
     """Relative tolerance to best_val_recon to allow pruning (inf = no constraint)."""
 
 
-# ============================================================================
-# Constrained LVAE Wrapper
-# ============================================================================
-
-
 class ConstrainedLVAE_Airfoil(LeastVolumeAE_DynamicPruning):
     """Airfoil LVAE with constraint-based volume minimization.
 
@@ -206,6 +197,7 @@ class ConstrainedLVAE_Airfoil(LeastVolumeAE_DynamicPruning):
         *args,
         constraint_handler: ConstraintHandler,
         reconstruction_threshold: float,
+        exclude_angle_from_volume: bool = False,
         **kwargs,
     ):
         """Initialize constrained LVAE for airfoil designs.
@@ -213,6 +205,7 @@ class ConstrainedLVAE_Airfoil(LeastVolumeAE_DynamicPruning):
         Args:
             constraint_handler: Constraint optimization method handler
             reconstruction_threshold: Constraint on reconstruction MSE
+            exclude_angle_from_volume: Exclude angle latent dims from volume loss (heuristic-based)
             *args, **kwargs: Passed to parent LeastVolumeAE_DynamicPruning
         """
         super().__init__(*args, **kwargs)
@@ -220,25 +213,22 @@ class ConstrainedLVAE_Airfoil(LeastVolumeAE_DynamicPruning):
         self.reconstruction_threshold = reconstruction_threshold
         self.performance_threshold = float("inf")  # Not used (no performance data)
 
+        # Volume exclusion settings for imbalanced Dict spaces
+        self.exclude_angle_from_volume = exclude_angle_from_volume
+
     def loss(self, batch, **kwargs):
         """Compute loss components and store for constraint handler.
 
         Args:
-            batch: Tuple of (coords, angle) tensors
+            batch: Tuple of (coords, angle) tensors (already normalized)
 
         Returns:
             torch.Tensor: [reconstruction_loss, volume_loss] for logging
         """
         coords, angle = batch
 
-        # Concatenate coords + angle for encoding
-        B = coords.shape[0]
-        coords_flat = coords.reshape(B, -1)  # (B, 2, 192) → (B, 384)
-        concat_input = th.cat([coords_flat, angle], dim=1)  # (B, 385)
-        concat_input = concat_input.unsqueeze(1)  # (B, 1, 385) for Conv1D
-
         # Encode with pruning mask
-        z = self.encoder(concat_input)
+        z = self.encoder(coords, angle)
         z[:, self._p] = self._z[self._p]
 
         # Update moving mean for pruning statistics
@@ -247,19 +237,34 @@ class ConstrainedLVAE_Airfoil(LeastVolumeAE_DynamicPruning):
         # Decode
         coords_hat, angle_hat = self.decoder(z)
 
-        # Compute reconstruction loss
-        # Both coords and angle are already normalized to [0, 1], so MSE is fair
+        # Compute reconstruction loss (simple MSE on normalized data)
+        # Data is already normalized: coords in [-1, 1], angle in [0, 1]
         coords_mse = nn.functional.mse_loss(coords, coords_hat)
         angle_mse = nn.functional.mse_loss(angle, angle_hat)
+
+        # Combined reconstruction loss
         rec_loss = coords_mse + angle_mse
 
         # Store individual components for separate logging
         self._coords_mse = coords_mse
         self._angle_mse = angle_mse
 
-        # Volume loss with active dimension scaling
-        active_ratio = self.dim / len(self._p)
-        vol_loss = active_ratio * self.loss_vol(z[:, ~self._p])
+        # Volume loss with optional angle exclusion
+        # FACTORIZED VERSION: We KNOW the last dimension is angle
+        if self.exclude_angle_from_volume:
+            # Exclude last dimension (angle) from volume computation
+            mask_geom = self._p[:-1]  # Geometry pruning mask (exclude last dim)
+            z_geom = z[:, :-1]  # Geometry latent dims (first latent_dim-1)
+
+            active_geom = (~mask_geom).sum().item()
+            total_geom = len(mask_geom)
+            active_ratio_geom = active_geom / total_geom if total_geom > 0 else 0.0
+
+            vol_loss = active_ratio_geom * self.loss_vol(z_geom[:, ~mask_geom])
+        else:
+            # Original: volume on all dimensions (including angle)
+            active_ratio = self.dim / len(self._p)
+            vol_loss = active_ratio * self.loss_vol(z[:, ~self._p])
 
         # Store for constraint handler (performance=0 since no performance data)
         self._loss_components = ConstraintLosses(
@@ -301,7 +306,7 @@ class ConstrainedLVAE_Airfoil(LeastVolumeAE_DynamicPruning):
 
 
 # ============================================================================
-# Data Preparation
+# Data Preparation Function
 # ============================================================================
 
 
@@ -316,13 +321,11 @@ def prepare_airfoil_data(problem, batch_size: int):
         tuple containing:
             - train_loader: DataLoader for training data
             - val_loader: DataLoader for validation data
-            - coords_normalizer: Normalizer for coords (to [0, 1])
+            - coords_normalizer: Normalizer for coords (to [-1, 1])
             - angle_normalizer: Normalizer for angle of attack (to [0, 1])
             - coords_shape: Shape of coords (2, 192)
             - coords_train_raw: Raw training coords for visualization (N, 2, 192)
             - angle_train_raw: Raw training angles for visualization (N, 1)
-            - coords_train: Normalized training coords (N, 2, 192)
-            - angle_train_norm: Normalized training angles (N, 1)
     """
     # Extract dataset splits
     problem_dataset = problem.dataset.with_format("torch")
@@ -378,8 +381,6 @@ def prepare_airfoil_data(problem, batch_size: int):
         coords_shape,
         coords_train_raw,
         angle_train_raw,
-        coords_train_norm,
-        angle_train_norm,
     )
 
 
@@ -397,10 +398,6 @@ if __name__ == "__main__":
     # Verify it's airfoil problem with Dict design space
     if not isinstance(problem.design_space, spaces.Dict):
         raise ValueError(f"Expected Dict design space for airfoil, got {type(problem.design_space)}")
-
-    # Get coords shape: (2, 192)
-    coords_shape = problem.design_space["coords"].shape
-    n_data_points = coords_shape[1]  # 192
 
     # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
@@ -428,8 +425,7 @@ if __name__ == "__main__":
     else:
         device = th.device("cpu")
 
-    # ---- DataLoader ----
-    # Prepare airfoil data with normalization
+    # ---- Prepare Data ----
     (
         train_loader,
         val_loader,
@@ -438,26 +434,21 @@ if __name__ == "__main__":
         coords_shape,
         coords_train_raw,
         angle_train_raw,
-        coords_train,
-        angle_train_norm,
     ) = prepare_airfoil_data(problem, args.batch_size)
     n_data_points = coords_shape[1]  # 192
 
-    # Build encoder and decoder
-    # Encoder: Standard SNConv1DEncoder that takes concatenated coords + angle
-    # The concatenation happens inline before calling encoder (see loss function)
-    # Total input: 2*192 + 1 = 385 dimensions
-    enc = SNConv1DEncoder(
-        in_channels=1,  # Single channel (concatenated vector)
-        in_features=2 * n_data_points + 1,  # 384 coords + 1 angle = 385
+    # Build factorized encoder and decoder (imported from cmpnts.py)
+    enc = FactorizedConv1DEncoder(
+        in_channels=2,
+        in_features=n_data_points,
         latent_dim=args.latent_dim,
+        n_aux=1,  # 1 auxiliary dimension for angle of attack
+        use_spectral_norm=True,  # Enable spectral normalization for Lipschitz constraint
     )
-    # Decoder: Use FactorizedBezierDecoder for architecturally correct outputs
-    # Bezier curves for smooth geometry (coords), linear head for scalars (angle)
-    # This maintains architectural correctness regardless of encoder choice
+    # Note: angle normalization/denormalization is handled externally via angle_normalizer
     dec = FactorizedBezierDecoder(
         latent_dim=args.latent_dim,
-        n_aux=1,  # 1 for angle of attack
+        n_aux=1,  # 1 auxiliary dimension for angle of attack
         n_control_points=args.n_control_points,
         n_data_points=n_data_points,
         lipschitz_scale=args.decoder_lipschitz_scale,
@@ -547,6 +538,7 @@ if __name__ == "__main__":
         latent_dim=args.latent_dim,
         constraint_handler=constraint_handler,
         reconstruction_threshold=args.reconstruction_threshold,
+        exclude_angle_from_volume=args.exclude_angle_from_volume,
         pruning_epoch=args.pruning_epoch,
         beta=args.beta,
         eta=args.eta,
@@ -617,14 +609,12 @@ if __name__ == "__main__":
                 # Sample and visualize at regular intervals
                 if batches_done % args.sample_interval == 0:
                     with th.no_grad():
-                        # Encode TRAINING designs (use normalized angles) - pruning is based on training data
-                        Xs_coords = coords_train.to(device)
-                        Xs_angle_norm = angle_train_norm.to(device)
-                        # Concatenate coords + angle for encoding
-                        B_vis = Xs_coords.shape[0]
-                        Xs_coords_flat = Xs_coords.reshape(B_vis, -1)
-                        concat_vis = th.cat([Xs_coords_flat, Xs_angle_norm], dim=1).unsqueeze(1)
-                        z = lvae.encoder(concat_vis)
+                        # Get normalized training data for encoding
+                        coords_train_norm = coords_normalizer.normalize(coords_train_raw).to(device)
+                        angle_train_norm = angle_normalizer.normalize(angle_train_raw).to(device)
+
+                        # Encode TRAINING designs - pruning is based on training data
+                        z = lvae.encoder(coords_train_norm, angle_train_norm)
                         # Apply pruning mask (set pruned dimensions to fixed values)
                         z[:, lvae._p] = lvae._z[lvae._p]
                         z_std, idx = th.sort(z.std(0), descending=True)
@@ -651,11 +641,10 @@ if __name__ == "__main__":
                         coords_rand = coords_normalizer.denormalize(coords_rand_norm)
                         angle_rand = angle_normalizer.denormalize(angle_rand_norm)
 
-                        # Move to CPU (denormalize coords for visualization)
+                        # Move to CPU (use raw training data for visualization)
                         z_std_cpu = z_std.cpu().numpy()
-                        Xs_coords_denorm = coords_normalizer.denormalize(Xs_coords)
-                        Xs_coords_cpu = Xs_coords_denorm.cpu().numpy()
-                        Xs_angle_cpu = angle_train_raw[: len(Xs_coords)].cpu().numpy()  # Use original unnormalized angles
+                        coords_train_cpu = coords_train_raw.cpu().numpy()
+                        angle_train_cpu = angle_train_raw.cpu().numpy()
                         coords_rand_np = coords_rand.cpu().numpy()
                         angle_rand_np = angle_rand.cpu().numpy()
 
@@ -689,8 +678,8 @@ if __name__ == "__main__":
                         current_title = ax.get_title()
                         ax.set_title(rf"interp={alpha}" + "\n" + current_title, fontsize=8)
                     for i in range(25):
-                        airfoil = Xs_coords_cpu[i]
-                        angle_val = Xs_angle_cpu[i][0]  # Extract scalar angle value
+                        airfoil = coords_train_cpu[i]
+                        angle_val = angle_train_cpu[i][0]  # Extract scalar angle value
                         axs[i, 0].plot(airfoil[0], airfoil[1], "b-")
                         axs[i, 0].set_aspect("equal")
                         axs[i, 0].axis("off")
@@ -716,9 +705,11 @@ if __name__ == "__main__":
 
                     # Plot 4: Reconstruction comparison
                     fig, axes = plt.subplots(5, 2, figsize=(10, 15))
-                    coords_orig = Xs_coords_cpu[:5]
-                    angle_orig = Xs_angle_cpu[:5]
-                    coords_recon, angle_recon_norm = lvae.decoder(z[:5])
+                    coords_orig = coords_train_cpu[:5]
+                    angle_orig = angle_train_cpu[:5]
+                    coords_recon_norm, angle_recon_norm = lvae.decoder(z[:5])
+                    # Denormalize reconstructions
+                    coords_recon = coords_normalizer.denormalize(coords_recon_norm)
                     angle_recon = angle_normalizer.denormalize(angle_recon_norm)
                     coords_recon_np = coords_recon.detach().cpu().numpy()
                     angle_recon_np = angle_recon.detach().cpu().numpy()
@@ -776,12 +767,8 @@ if __name__ == "__main__":
             for batch_v in val_loader:
                 coords_v = batch_v[0].to(device)
                 angle_v = batch_v[1].to(device)
-                # Concatenate coords + angle for encoding
-                B_val = coords_v.shape[0]
-                coords_v_flat = coords_v.reshape(B_val, -1)
-                concat_val = th.cat([coords_v_flat, angle_v], dim=1).unsqueeze(1)
                 # Encode
-                z_v = lvae.encoder(concat_val)
+                z_v = lvae.encoder(coords_v, angle_v)
                 # Apply pruning mask (set pruned dimensions to fixed values)
                 z_v[:, lvae._p] = lvae._z[lvae._p]
                 # Decode
