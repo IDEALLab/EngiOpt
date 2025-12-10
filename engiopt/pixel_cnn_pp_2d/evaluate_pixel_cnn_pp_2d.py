@@ -25,7 +25,7 @@ class Args:
     """Random seed to run."""
     wandb_project: str = "engiopt"
     """Wandb project name."""
-    wandb_entity: str = "jstehlin-eth-z-rich" #| None = None
+    wandb_entity: str | None = None
     """Wandb entity name."""
     n_samples: int = 50
     """Number of generated samples per seed."""
@@ -93,7 +93,7 @@ if __name__ == "__main__":
         raise RunRetrievalError
 
     artifact_dir = artifact.download()
-    ckpt_path = os.path.join(artifact_dir, "model_epoch400.pth") # change model.pth if necessary
+    ckpt_path = os.path.join(artifact_dir, "model.pth") # change model.pth if necessary
     ckpt = th.load(ckpt_path, map_location=device) # or th.device(device)
 
 
