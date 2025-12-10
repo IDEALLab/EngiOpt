@@ -48,6 +48,8 @@ class Args:
     """interval between image samples"""
     batch_size: int = 8
     """size of the batches"""
+    sampling_batch_size: int = 10
+    """Batch size to use during sampling."""
     lr: float = 0.001
     """learning rate"""
     b1: float = 0.95
@@ -581,36 +583,79 @@ if __name__ == "__main__":
     optimizer = th.optim.Adam(model.parameters(), lr=args.lr, betas=(args.b1, args.b2)) # add other args if necessary
 
     @th.no_grad()
-    def sample_designs(model: PixelCNNpp, design_shape: tuple[int, int, int], dim: int = 1, n_designs: int = 25) -> tuple[th.Tensor, th.Tensor]:
+    def sample_designs(model: PixelCNNpp, design_shape: tuple[int, int, int], dim: int = 1, n_designs: int = 25, sampling_batch_size: int = 10) -> tuple[th.Tensor, th.Tensor]:
         """Samples n_designs designs using dataset conditions."""
         model.eval()
         device = next(model.parameters()).device
-
+        # Build the full list of requested condition combinations (on the model device)
         linspaces = [
             th.linspace(conds[:, i].min(), conds[:, i].max(), n_designs, device=device) for i in range(conds.shape[1])
         ]
 
         desired_conds = th.stack(linspaces, dim=1).reshape(-1, nr_conditions, 1, 1)
 
-        # Prepare an empty image batch on the same device as the model
-        data = th.zeros((n_designs, dim, *design_shape), device=device)
+        # If n_designs is large, sample in smaller batches to reduce GPU memory use.
+        # The default behavior previously sampled all at once; we keep that by
+        # allowing the caller to set `batch_size`. If batch_size >= n_designs we
+        # behave exactly as before.
+        batch_size = sampling_batch_size
 
-        # Autoregressive pixel sampling: iterate spatial positions and condition on
-        # previously sampled pixels and the desired_conds.
-        for i in range(design_shape[0]):
-            for j in range(design_shape[1]):
-                # print(f"Sampling pixel ({i}, {j})")
-                out = model(data, desired_conds)
-                # print(f"out shape: {out.shape}")
-                out_sample = sample_from_discretized_mix_logistic(out, args.nr_logistic_mix)
-                # print(f"out_sample shape: {out_sample.shape}")
-                # `out_sample` has shape [B, 1, H, W]; copy the sampled value for (i,j)
-                data[:, :, i, j] = out_sample.data[:, :, i, j] #out_sample[:, :, i, j] # out_sample.data[:, :, i, j]
-            #print(f"Completed row {i+1}/{design_shape[0]}")
+        all_batches: list[th.Tensor] = []
 
-        #print(f"final data shape: {data.shape}")
-        #print(f"desired_conds shape: {desired_conds.shape}")
-        return data, desired_conds
+        for start in range(0, n_designs, batch_size):
+            end = min(n_designs, start + batch_size)
+            b = end - start
+
+            # prepare batch-local tensors on the same device as the model
+            batch_conds = desired_conds[start:end]
+            data = th.zeros((b, dim, *design_shape), device=device)
+
+            # Autoregressive pixel sampling for this batch
+            for i in range(design_shape[0]):
+                for j in range(design_shape[1]):
+                    out = model(data, batch_conds)
+                    out_sample = sample_from_discretized_mix_logistic(out, args.nr_logistic_mix)
+                    data[:, :, i, j] = out_sample.data[:, :, i, j]
+
+            # move completed batch to CPU to free GPU memory and store
+            all_batches.append(data.cpu())
+
+        # concatenate all batches on CPU and return desired_conds on CPU as well
+        data_all = th.cat(all_batches, dim=0)
+        return data_all, desired_conds.cpu()
+
+    # original version without batching
+    # @th.no_grad()
+    # def sample_designs(model: PixelCNNpp, design_shape: tuple[int, int, int], dim: int = 1, n_designs: int = 25) -> tuple[th.Tensor, th.Tensor]:
+    #     """Samples n_designs designs using dataset conditions."""
+    #     model.eval()
+    #     device = next(model.parameters()).device
+
+    #     linspaces = [
+    #         th.linspace(conds[:, i].min(), conds[:, i].max(), n_designs, device=device) for i in range(conds.shape[1])
+    #     ]
+
+    #     desired_conds = th.stack(linspaces, dim=1).reshape(-1, nr_conditions, 1, 1)
+
+    #     # Prepare an empty image batch on the same device as the model
+    #     data = th.zeros((n_designs, dim, *design_shape), device=device)
+
+    #     # Autoregressive pixel sampling: iterate spatial positions and condition on
+    #     # previously sampled pixels and the desired_conds.
+    #     for i in range(design_shape[0]):
+    #         for j in range(design_shape[1]):
+    #             # print(f"Sampling pixel ({i}, {j})")
+    #             out = model(data, desired_conds)
+    #             # print(f"out shape: {out.shape}")
+    #             out_sample = sample_from_discretized_mix_logistic(out, args.nr_logistic_mix)
+    #             # print(f"out_sample shape: {out_sample.shape}")
+    #             # `out_sample` has shape [B, 1, H, W]; copy the sampled value for (i,j)
+    #             data[:, :, i, j] = out_sample.data[:, :, i, j] #out_sample[:, :, i, j] # out_sample.data[:, :, i, j]
+    #         #print(f"Completed row {i+1}/{design_shape[0]}")
+
+    #     #print(f"final data shape: {data.shape}")
+    #     #print(f"desired_conds shape: {desired_conds.shape}")
+    #     return data, desired_conds
 
 
 
@@ -660,7 +705,7 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval == 0:
                     # Extract 25 designs
 
-                    designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=1)
+                    designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=1, sampling_batch_size=args.sampling_batch_size)
                     fig, axes = plt.subplots(5, 5, figsize=(12, 12))
 
                     # Flatten axes for easy indexing

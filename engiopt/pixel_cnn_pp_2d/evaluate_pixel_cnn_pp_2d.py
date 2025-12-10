@@ -23,6 +23,8 @@ class Args:
     """Problem identifier."""
     seed: int = 1
     """Random seed to run."""
+    sampling_batch_size: int = 10
+    """Batch size to use during sampling."""
     wandb_project: str = "engiopt"
     """Wandb project name."""
     wandb_entity: str | None = None
@@ -66,13 +68,6 @@ if __name__ == "__main__":
     # --------------------------------------------------------
     # adapt to PixelCNN++ input shape requirements
     conditions_tensor = conditions_tensor.unsqueeze(-1).unsqueeze(-1)
-    # print(f"Conditions tensor shape: {conditions_tensor.shape}")
-    # print(conditions_tensor)
-    # print(f"Sampled conditions shape: {sampled_conditions.shape}")
-    # print(sampled_conditions)
-    # print(f"Sampled designs shape: {sampled_designs_np.shape}")
-    # print(sampled_designs_np)
-    # print(f"Selected indices: {selected_indices}")
     design_shape = (problem.design_space.shape[0], problem.design_space.shape[1])
 
     ### Set Up PixelCNN++ Model ###
@@ -112,18 +107,47 @@ if __name__ == "__main__":
     model.eval()  # Set to evaluation mode
     model.to(device)
 
-    # input
-    gen_designs = th.zeros((args.n_samples, 1, *design_shape), device=device)
 
-    # Generate a batch of designs
-    # Autoregressive pixel sampling: iterate spatial positions and condition on
-    # previously sampled pixels and the desired_conds.
-    for i in range(design_shape[0]):
-        for j in range(design_shape[1]):
-            out = model(gen_designs, conditions_tensor)
-            out_sample = sample_from_discretized_mix_logistic(out, run.config["nr_logistic_mix"])
-            # `out_sample` has shape [B, 1, H, W]; copy the sampled value for (i,j)
-            gen_designs[:, :, i, j] = out_sample.data[:, :, i, j] #out_sample[:, :, i, j] # out_sample.data[:, :, i, j]
+    batch_size = args.sampling_batch_size
+
+    all_batches: list[th.Tensor] = []
+
+    for start in range(0, args.n_samples, batch_size):
+        end = min(args.n_samples, start + batch_size)
+        b = end - start
+
+        # prepare batch-local tensors on the same device as the model
+        batch_conds = conditions_tensor[start:end]
+        data = th.zeros((b, 1, *design_shape), device=device)
+
+        # Autoregressive pixel sampling for this batch
+        for i in range(design_shape[0]):
+            for j in range(design_shape[1]):
+                out = model(data, batch_conds)
+                out_sample = sample_from_discretized_mix_logistic(out, run.config["nr_logistic_mix"])
+                data[:, :, i, j] = out_sample.data[:, :, i, j]
+
+        # move completed batch to CPU to free GPU memory and store
+        all_batches.append(data.cpu())
+
+    # concatenate all batches on CPU and return desired_conds on CPU as well
+    gen_designs = th.cat(all_batches, dim=0)
+
+    print(gen_designs.shape)
+
+    # old sampling
+    # input
+    # gen_designs = th.zeros((args.n_samples, 1, *design_shape), device=device)
+
+    # # Generate a batch of designs
+    # # Autoregressive pixel sampling: iterate spatial positions and condition on
+    # # previously sampled pixels and the desired_conds.
+    # for i in range(design_shape[0]):
+    #     for j in range(design_shape[1]):
+    #         out = model(gen_designs, conditions_tensor)
+    #         out_sample = sample_from_discretized_mix_logistic(out, run.config["nr_logistic_mix"])
+    #         # `out_sample` has shape [B, 1, H, W]; copy the sampled value for (i,j)
+    #         gen_designs[:, :, i, j] = out_sample.data[:, :, i, j] #out_sample[:, :, i, j] # out_sample.data[:, :, i, j]
 
 
     gen_designs_np = gen_designs.detach().cpu().numpy()
