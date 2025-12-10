@@ -129,6 +129,7 @@ if __name__ == "__main__":
 
         # move completed batch to CPU to free GPU memory and store
         all_batches.append(data.cpu())
+        print(f"Sampled batch {start} to {end} / {args.n_samples}")
 
     # concatenate all batches on CPU and return desired_conds on CPU as well
     gen_designs = th.cat(all_batches, dim=0)
