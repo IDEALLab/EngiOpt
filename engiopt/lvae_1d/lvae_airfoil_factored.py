@@ -205,7 +205,7 @@ class ConstrainedLVAE_Airfoil(LeastVolumeAE_DynamicPruning):
         Args:
             constraint_handler: Constraint optimization method handler
             reconstruction_threshold: Constraint on reconstruction MSE
-            exclude_angle_from_volume: Exclude angle latent dims from volume loss (heuristic-based)
+            exclude_angle_from_volume: Exclude angle latent dims from volume loss AND pruning
             *args, **kwargs: Passed to parent LeastVolumeAE_DynamicPruning
         """
         super().__init__(*args, **kwargs)
@@ -215,6 +215,35 @@ class ConstrainedLVAE_Airfoil(LeastVolumeAE_DynamicPruning):
 
         # Volume exclusion settings for imbalanced Dict spaces
         self.exclude_angle_from_volume = exclude_angle_from_volume
+
+    def _prune_step(self, epoch, val_recon=None):
+        """Override parent pruning to protect angle dimension when exclude_angle_from_volume=True.
+
+        When excluding angle from volume, we also protect it from being pruned.
+        This prevents the high-variance angle dimension from dominating pruning decisions.
+        """
+        if not self.exclude_angle_from_volume:
+            # Use parent's pruning logic (prunes all dimensions normally)
+            return super()._prune_step(epoch, val_recon)
+
+        # FACTORIZED VERSION: Protect last dimension (angle) from pruning
+        # We temporarily mask it as "pruned" to exclude from candidate selection,
+        # then restore it after pruning decision is made
+
+        # Save original state of angle dimension
+        angle_was_pruned = self._p[-1].item()
+
+        # Temporarily mark angle as pruned to exclude from candidate selection
+        self._p[-1] = True
+
+        # Run parent's pruning logic (will skip angle since it's marked as pruned)
+        result = super()._prune_step(epoch, val_recon)
+
+        # Restore angle dimension to active state (unless it was actually pruned before)
+        if not angle_was_pruned:
+            self._p[-1] = False
+
+        return result
 
     def loss(self, batch, **kwargs):
         """Compute loss components and store for constraint handler.
@@ -617,9 +646,22 @@ if __name__ == "__main__":
                         z = lvae.encoder(coords_train_norm, angle_train_norm)
                         # Apply pruning mask (set pruned dimensions to fixed values)
                         z[:, lvae._p] = lvae._z[lvae._p]
-                        z_std, idx = th.sort(z.std(0), descending=True)
-                        z_mean = z.mean(0)
-                        N = (z_std > 0).sum().item()
+
+                        # For variance calculation and plotting, exclude angle dimension if requested
+                        if args.exclude_angle_from_volume:
+                            # Compute variance only on geometry dimensions (exclude last dim = angle)
+                            z_geom = z[:, :-1]
+                            z_std_geom, idx_geom = th.sort(z_geom.std(0), descending=True)
+                            z_mean = z.mean(0)
+                            N = (z_std_geom > 0).sum().item()
+                            # For plotting, use geometry variances
+                            z_std = z_std_geom
+                            idx = idx_geom
+                        else:
+                            # Original: compute variance over all dimensions
+                            z_std, idx = th.sort(z.std(0), descending=True)
+                            z_mean = z.mean(0)
+                            N = (z_std > 0).sum().item()
 
                         # Generate interpolated designs
                         x_ints_coords = []
@@ -635,7 +677,12 @@ if __name__ == "__main__":
 
                         # Generate random designs
                         z_rand = z_mean.unsqueeze(0).repeat([25, 1])
-                        z_rand[:, idx[:N]] += z_std[:N] * th.randn_like(z_rand[:, idx[:N]])
+                        if args.exclude_angle_from_volume:
+                            # Sample only geometry dimensions (first N), keep angle at mean
+                            z_rand[:, idx_geom[:N]] += z_std_geom[:N] * th.randn_like(z_rand[:, idx_geom[:N]])
+                        else:
+                            # Sample all dimensions
+                            z_rand[:, idx[:N]] += z_std[:N] * th.randn_like(z_rand[:, idx[:N]])
                         coords_rand_norm, angle_rand_norm = lvae.decoder(z_rand)
                         # Denormalize for plotting
                         coords_rand = coords_normalizer.denormalize(coords_rand_norm)
@@ -655,7 +702,8 @@ if __name__ == "__main__":
                     plt.yscale("log")
                     plt.xlabel("Latent dimension index")
                     plt.ylabel("Standard deviation")
-                    plt.title(f"Number of principal components = {N}")
+                    title_suffix = " (geometry only)" if args.exclude_angle_from_volume else ""
+                    plt.title(f"Number of principal components = {N}{title_suffix}")
                     plt.subplot(212)
                     plt.bar(np.arange(N), z_std_cpu[:N])
                     plt.yscale("log")
