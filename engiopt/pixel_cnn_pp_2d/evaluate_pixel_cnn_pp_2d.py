@@ -119,6 +119,7 @@ if __name__ == "__main__":
         # prepare batch-local tensors on the same device as the model
         batch_conds = conditions_tensor[start:end]
         data = th.zeros((b, 1, *design_shape), device=device)
+        print(data.shape)
 
         # Autoregressive pixel sampling for this batch
         for i in range(design_shape[0]):
