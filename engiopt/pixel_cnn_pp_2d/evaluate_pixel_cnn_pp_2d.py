@@ -23,7 +23,7 @@ class Args:
     """Problem identifier."""
     seed: int = 1
     """Random seed to run."""
-    sampling_batch_size: int = 10
+    sampling_batch_size: int = 5
     """Batch size to use during sampling."""
     wandb_project: str = "engiopt"
     """Wandb project name."""
