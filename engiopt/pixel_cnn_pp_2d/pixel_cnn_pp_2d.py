@@ -477,9 +477,9 @@ def discretized_mix_logistic_loss(x, l):
 def to_one_hot(tensor, n, fill_with=1.):
     # we perform one hot encode with respect to the last axis
     one_hot = th.zeros((*tensor.size(), n), device=tensor.device)
-    print(f"one_hot.shape: {one_hot.shape}")
+    #print(f"one_hot.shape: {one_hot.shape}")
     one_hot.scatter_(len(tensor.size()), tensor.unsqueeze(-1), fill_with)
-    print(f"one_hot.shape after scatter: {one_hot.shape}\none_hot: {one_hot}")
+    #print(f"one_hot.shape after scatter: {one_hot.shape}\none_hot: {one_hot}")
     return one_hot
 
 
@@ -495,17 +495,17 @@ def sample_from_discretized_mix_logistic(l, nr_mix):
 
     # sample mixture indicator from softmax
     temp = th.empty_like(logit_probs).uniform_(1e-5, 1. - 1e-5)
-    print(f"temp.size: {temp.size()}\ntemp: {temp}")
-    print(f"-th.log(- th.log(temp)).shape: {th.log(- th.log(temp)).shape}\n-th.log(- th.log(temp)): {- th.log(- th.log(temp))}")
+    #print(f"temp.size: {temp.size()}\ntemp: {temp}")
+    #print(f"-th.log(- th.log(temp)).shape: {th.log(- th.log(temp)).shape}\n-th.log(- th.log(temp)): {- th.log(- th.log(temp))}")
     temp = logit_probs.detach() - th.log(- th.log(temp))
-    print(f"temp.size: {temp.size()}\ntemp: {temp}")
+    #print(f"temp.size: {temp.size()}\ntemp: {temp}")
     _, argmax = temp.max(dim=3)
-    print(f"argmax.shape: {argmax.shape}\nargmax: {argmax}")
+    #print(f"argmax.shape: {argmax.shape}\nargmax: {argmax}")
     one_hot = to_one_hot(argmax, nr_mix)
-    print(f"one_hot.shape: {one_hot.shape}\none_hot: {one_hot}")
+    #print(f"one_hot.shape: {one_hot.shape}\none_hot: {one_hot}")
     sel = one_hot.view([*xs[:-1], 1, nr_mix])
-    print(f"sel.shape: {sel.shape}\nsel: {sel}")
-    time.sleep(100000)
+    #print(f"sel.shape: {sel.shape}\nsel: {sel}")
+    #time.sleep(100000)
     # select logistic parameters
     means = th.sum(l[:, :, :, :, :nr_mix] * sel, dim=4)
     log_scales = th.clamp(th.sum(
