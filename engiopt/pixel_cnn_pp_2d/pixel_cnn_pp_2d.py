@@ -54,9 +54,9 @@ class Args:
     """decay of first order momentum of gradient"""
     b2: float = 0.9995
     """decay of first order momentum of gradient"""
-    nr_resnet: int = 5
+    nr_resnet: int = 3
     """Number of residual blocks per stage of the model."""
-    nr_filters: int = 120
+    nr_filters: int = 40
     """Number of filters to use across the model. Higher = larger model."""
     nr_logistic_mix: int = 10
     """Number of logistic components in the mixture. Higher = more flexible model."""
@@ -453,7 +453,7 @@ def discretized_mix_logistic_loss(x, l):
         cdf_delta = cdf_plus - cdf_min # probability for all other cases
         mid_in = inv_stdv * centered_x
         # log probability in the center of the bin, to be used in extreme cases
-        # (not actually used in this code)
+        # (likely not used in this code)
         log_pdf_mid = mid_in - log_scales - 2.*F.softplus(mid_in)
 
         # now select the right output: left edge case, right edge case, normal case, extremely low prob case (doesn't actually happen here)
@@ -473,9 +473,11 @@ def discretized_mix_logistic_loss(x, l):
 
 
 def to_one_hot(tensor, n, fill_with=1.):
-    # we perform one hot encore with respect to the last axis
+    # we perform one hot encode with respect to the last axis
     one_hot = th.zeros((*tensor.size(), n), device=tensor.device)
+    print(f"one_hot.shape: {one_hot.shape}")
     one_hot.scatter_(len(tensor.size()), tensor.unsqueeze(-1), fill_with)
+    print(f"one_hot.shape after scatter: {one_hot.shape}\none_hot: {one_hot}")
     return one_hot
 
 
@@ -491,11 +493,17 @@ def sample_from_discretized_mix_logistic(l, nr_mix):
 
     # sample mixture indicator from softmax
     temp = th.empty_like(logit_probs).uniform_(1e-5, 1. - 1e-5)
+    print(f"temp.size: {temp.size()}\ntemp: {temp}")
+    print(f"-th.log(- th.log(temp)).shape: {th.log(- th.log(temp)).shape}\n-th.log(- th.log(temp)): {- th.log(- th.log(temp))}")
     temp = logit_probs.detach() - th.log(- th.log(temp))
+    print(f"temp.size: {temp.size()}\ntemp: {temp}")
     _, argmax = temp.max(dim=3)
-
+    print(f"argmax.shape: {argmax.shape}\nargmax: {argmax}")
     one_hot = to_one_hot(argmax, nr_mix)
+    print(f"one_hot.shape: {one_hot.shape}\none_hot: {one_hot}")
     sel = one_hot.view([*xs[:-1], 1, nr_mix])
+    print(f"sel.shape: {sel.shape}\nsel: {sel}")
+    time.sleep(100000)
     # select logistic parameters
     means = th.sum(l[:, :, :, :, :nr_mix] * sel, dim=4)
     log_scales = th.clamp(th.sum(
@@ -652,7 +660,7 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval == 0:
                     # Extract 25 designs
 
-                    designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=25)
+                    designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=1)
                     fig, axes = plt.subplots(5, 5, figsize=(12, 12))
 
                     # Flatten axes for easy indexing
