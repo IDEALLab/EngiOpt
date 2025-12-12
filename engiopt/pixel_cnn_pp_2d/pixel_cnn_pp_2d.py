@@ -705,7 +705,7 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval == 0:
                     # Extract 25 designs
 
-                    designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=1, sampling_batch_size=args.sampling_batch_size)
+                    designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=25, sampling_batch_size=args.sampling_batch_size)
                     fig, axes = plt.subplots(5, 5, figsize=(12, 12))
 
                     # Flatten axes for easy indexing
