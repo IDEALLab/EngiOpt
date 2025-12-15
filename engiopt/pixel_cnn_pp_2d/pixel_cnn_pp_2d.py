@@ -46,7 +46,7 @@ class Args:
     """number of epochs of training"""
     sample_interval: int = 600
     """interval between image samples"""
-    batch_size: int = 8
+    batch_size: int = 4
     """size of the batches"""
     sampling_batch_size: int = 10
     """Batch size to use during sampling."""
@@ -56,9 +56,9 @@ class Args:
     """decay of first order momentum of gradient"""
     b2: float = 0.9995
     """decay of first order momentum of gradient"""
-    nr_resnet: int = 3
+    nr_resnet: int = 2
     """Number of residual blocks per stage of the model."""
-    nr_filters: int = 40
+    nr_filters: int = 30
     """Number of filters to use across the model. Higher = larger model."""
     nr_logistic_mix: int = 10
     """Number of logistic components in the mixture. Higher = more flexible model."""
@@ -417,30 +417,21 @@ def log_prob_from_logits(x):
 
 def discretized_mix_logistic_loss(x, l):
         """Log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval."""
-        # Pytorch ordering
+        # Tensorflow ordering
         x = x.permute(0, 2, 3, 1)
+        print(f"x shape in loss: {x.shape}")
         l = l.permute(0, 2, 3, 1)
-        xs = list(x.shape) # true image (i.e. labels) to regress to, e.g. (B,32,32,3)
-        ls = list(l.shape) # predicted distribution, e.g. (B,32,32,100)
-        # different for 3 channels: / 10
+        print(f"l shape in loss: {l.shape}")
+        xs = list(x.shape) # true image (i.e. labels) to regress to, e.g. (B,width,height,3)
+        ls = list(l.shape) # predicted distribution, e.g. (B,width,height,30)
         nr_mix = int(ls[-1] / 3) # here and below: unpacking the params of the mixture of logistics
         logit_probs = l[:,:,:,:nr_mix]
-        # different for 3 channels: nr_mix * 3 #, coeff
         l = l[:, :, :, nr_mix:].contiguous().view([*xs, nr_mix * 2]) # 2 for mean, scale
         means = l[:,:,:,:,:nr_mix]
         log_scales = th.clamp(l[:, :, :, :, nr_mix:2 * nr_mix], min=-7.)
-        # for 3 channels:
-        # coeffs = F.tanh(l[:, :, :, :, 2 * nr_mix:3 * nr_mix])
         x = x.contiguous()
         zeros = th.zeros([*xs, nr_mix], device=x.device)
         x = x.unsqueeze(-1) + zeros
-        # for 3 channels:
-        # m2 = (means[:, :, :, 1, :] + coeffs[:, :, :, 0, :]
-        #             * x[:, :, :, 0, :]).view(xs[0], xs[1], xs[2], 1, nr_mix)
-
-        # m3 = (means[:, :, :, 2, :] + coeffs[:, :, :, 1, :] * x[:, :, :, 0, :] +
-        #             coeffs[:, :, :, 2, :] * x[:, :, :, 1, :]).view(xs[0], xs[1], xs[2], 1, nr_mix)
-        # means = th.cat((means[:, :, :, 0, :].unsqueeze(3), m2, m3), dim=3)
 
         centered_x = x - means
         inv_stdv = th.exp(-log_scales)
@@ -468,9 +459,10 @@ def discretized_mix_logistic_loss(x, l):
         # the 1e-12 in tf.maximum(cdf_delta, 1e-12) is never actually used as output, it's purely there to get around the tf.select() gradient issue
         # if the probability on a sub-pixel is below 1e-5, we use an approximation based on the assumption that the log-density is constant in the bin of the observed sub-pixel value
 
-        # log_probs = tf.where(x < -0.999, log_cdf_plus, tf.where(x > 0.999, log_one_minus_cdf_min, tf.where(cdf_delta > 1e-5, tf.log(tf.maximum(cdf_delta, 1e-12)), log_pdf_mid - np.log(127.5))))
         log_probs = th.where(x < -0.999, log_cdf_plus, th.where(x > 0.999, log_one_minus_cdf_min, th.where(cdf_delta > 1e-5, th.log(th.clamp(cdf_delta, min=1e-12)), log_pdf_mid - np.log(127.5))))  # noqa: PLR2004
+        print(f"log_probs shape before sum: {log_probs.shape}")
         log_probs = th.sum(log_probs, dim=3) + log_prob_from_logits(logit_probs)
+        time.sleep(100000)
         return -th.sum(log_sum_exp(log_probs))
 
 
@@ -484,10 +476,10 @@ def to_one_hot(tensor, n, fill_with=1.):
 
 
 def sample_from_discretized_mix_logistic(l, nr_mix):
-    # Pytorch ordering
+    # Tensorflow ordering
     l = l.permute(0, 2, 3, 1)
     ls = list(l.shape)
-    xs = [*ls[:-1], 1] #[3]
+    xs = [*ls[:-1], 1]
 
     # unpack parameters
     logit_probs = l[:, :, :, :nr_mix]
@@ -495,17 +487,11 @@ def sample_from_discretized_mix_logistic(l, nr_mix):
 
     # sample mixture indicator from softmax
     temp = th.empty_like(logit_probs).uniform_(1e-5, 1. - 1e-5)
-    #print(f"temp.size: {temp.size()}\ntemp: {temp}")
-    #print(f"-th.log(- th.log(temp)).shape: {th.log(- th.log(temp)).shape}\n-th.log(- th.log(temp)): {- th.log(- th.log(temp))}")
     temp = logit_probs.detach() - th.log(- th.log(temp))
-    #print(f"temp.size: {temp.size()}\ntemp: {temp}")
     _, argmax = temp.max(dim=3)
-    #print(f"argmax.shape: {argmax.shape}\nargmax: {argmax}")
     one_hot = to_one_hot(argmax, nr_mix)
-    #print(f"one_hot.shape: {one_hot.shape}\none_hot: {one_hot}")
     sel = one_hot.view([*xs[:-1], 1, nr_mix])
-    #print(f"sel.shape: {sel.shape}\nsel: {sel}")
-    #time.sleep(100000)
+
     # select logistic parameters
     means = th.sum(l[:, :, :, :, :nr_mix] * sel, dim=4)
     log_scales = th.clamp(th.sum(
@@ -524,7 +510,7 @@ if __name__ == "__main__":
     problem.reset(seed=args.seed)
 
     design_shape = problem.design_space.shape
-    #print(f"Design shape: {design_shape}")
+
     conditions = problem.conditions_keys
     nr_conditions = len(conditions)
 
@@ -548,7 +534,6 @@ if __name__ == "__main__":
         device = th.device("cuda")
     else:
         device = th.device("cpu")
-    #device = th.device("cpu")
 
     # Loss function
     loss_operator = discretized_mix_logistic_loss
@@ -595,9 +580,7 @@ if __name__ == "__main__":
         desired_conds = th.stack(linspaces, dim=1).reshape(-1, nr_conditions, 1, 1)
 
         # If n_designs is large, sample in smaller batches to reduce GPU memory use.
-        # The default behavior previously sampled all at once; we keep that by
-        # allowing the caller to set `batch_size`. If batch_size >= n_designs we
-        # behave exactly as before.
+        # If batch_size >= n_designs then there is only one batch.
         batch_size = sampling_batch_size
 
         all_batches: list[th.Tensor] = []

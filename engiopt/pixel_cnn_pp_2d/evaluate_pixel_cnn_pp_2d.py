@@ -89,7 +89,7 @@ if __name__ == "__main__":
 
     artifact_dir = artifact.download()
     ckpt_path = os.path.join(artifact_dir, "model.pth") # change model.pth if necessary
-    ckpt = th.load(ckpt_path, map_location=device) # or th.device(device)
+    ckpt = th.load(ckpt_path, map_location=device)
 
 
     # Build PixelCNN++ Model
@@ -136,20 +136,6 @@ if __name__ == "__main__":
     gen_designs = th.cat(all_batches, dim=0)
 
     print(gen_designs.shape)
-
-    # old sampling
-    # input
-    # gen_designs = th.zeros((args.n_samples, 1, *design_shape), device=device)
-
-    # # Generate a batch of designs
-    # # Autoregressive pixel sampling: iterate spatial positions and condition on
-    # # previously sampled pixels and the desired_conds.
-    # for i in range(design_shape[0]):
-    #     for j in range(design_shape[1]):
-    #         out = model(gen_designs, conditions_tensor)
-    #         out_sample = sample_from_discretized_mix_logistic(out, run.config["nr_logistic_mix"])
-    #         # `out_sample` has shape [B, 1, H, W]; copy the sampled value for (i,j)
-    #         gen_designs[:, :, i, j] = out_sample.data[:, :, i, j] #out_sample[:, :, i, j] # out_sample.data[:, :, i, j]
 
 
     gen_designs_np = gen_designs.detach().cpu().numpy()
