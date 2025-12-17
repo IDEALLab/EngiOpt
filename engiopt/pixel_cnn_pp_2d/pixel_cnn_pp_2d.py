@@ -1,8 +1,13 @@
 """PixelCNN++ 2D model implementation.
 
+Based on the original Tensorflow code of OpenAI: https://github.com/openai/pixel-cnn,
+and the PyTorch implementation of Lucas Caccia: https://github.com/pclucas14/pixel-cnn-pp.
+
 Provides the model classes, shifted convolutional blocks, and the
 discretized mixture of logistics loss used for training and sampling.
 """
+from __future__ import annotations
+
 from dataclasses import dataclass
 import os
 import random
@@ -13,7 +18,7 @@ import matplotlib.pyplot as plt
 import numpy as np
 import torch as th
 from torch import nn
-import torch.nn.functional as F
+import torch.nn.functional as f
 from torch.nn.utils.parametrizations import weight_norm
 import tqdm
 import tyro
@@ -42,11 +47,11 @@ class Args:
     """Saves the model to disk."""
 
     # Algorithm specific
-    n_epochs: int = 2
+    n_epochs: int = 100
     """number of epochs of training"""
     sample_interval: int = 600
     """interval between image samples"""
-    batch_size: int = 4
+    batch_size: int = 8
     """size of the batches"""
     sampling_batch_size: int = 10
     """Batch size to use during sampling."""
@@ -56,31 +61,34 @@ class Args:
     """decay of first order momentum of gradient"""
     b2: float = 0.9995
     """decay of first order momentum of gradient"""
-    nr_resnet: int = 2
+    nr_resnet: int = 5
     """Number of residual blocks per stage of the model."""
-    nr_filters: int = 30
+    nr_filters: int = 160
     """Number of filters to use across the model. Higher = larger model."""
     nr_logistic_mix: int = 10
     """Number of logistic components in the mixture. Higher = more flexible model."""
     resnet_nonlinearity: str = "concat_elu"
-    """Nonlinearity to use in the ResNet blocks. One of 'concat_elu', 'elu', 'relu'."""
+    """Nonlinearity to use in the ResNet blocks."""
     dropout_p: float = 0.5
     """Dropout probability."""
 
 
-def concat_elu(x):
-    """Like concatenated ReLU (http://arxiv.org/abs/1603.05201), but then with ELU."""
-    # Pytorch ordering
-    axis = len(x.size()) - 3
-    return F.elu(th.cat([x, -x], dim=axis))
 
-class nin(nn.Module):
-    def __init__(self, nr_filters_in, nr_filters_out):
+def concat_elu(x: th.Tensor) -> th.Tensor:
+    """Like concatenated ReLU (http://arxiv.org/abs/1603.05201), but then with ELU."""
+    # PyTorch ordering
+    axis = len(x.size()) - 3
+    return f.elu(th.cat([x, -x], dim=axis))
+
+
+
+class Nin(nn.Module):
+    def __init__(self, nr_filters_in: int, nr_filters_out: int):
         super().__init__()
         self.lin_a = weight_norm(nn.Linear(nr_filters_in, nr_filters_out))
         self.nr_filters_out = nr_filters_out
 
-    def forward(self, x):
+    def forward(self, x: th.Tensor) -> th.Tensor:
         x = x.permute(0, 2, 3, 1)  # BCHW -> BHWC
         xs = list(x.shape)
         x = x.reshape(-1, xs[3])  # -> [B*H*W, C]
@@ -88,9 +96,12 @@ class nin(nn.Module):
         out = out.view(xs[0], xs[1], xs[2], self.nr_filters_out)
         return out.permute(0, 3, 1, 2)  # BHWC -> BCHW
 
+
+
 class GatedResnet(nn.Module):
-    def __init__(self, nr_filters, conv_op, resnet_nonlinearity=concat_elu, skip_connection=0, dropout_p=0.5, nr_conditions=0):
+    def __init__(self, nr_filters: int, conv_op: nn.Module, resnet_nonlinearity: callable = concat_elu, skip_connection: int = 0, dropout_p: float = 0.5, nr_conditions: int = 0):  # noqa: PLR0913
         super().__init__()
+
         self.skip_connection = skip_connection
         self.resnet_nonlinearity = resnet_nonlinearity
 
@@ -102,7 +113,7 @@ class GatedResnet(nn.Module):
         self.conv_input = conv_op(self.filter_doubling * nr_filters, nr_filters)
 
         if skip_connection != 0:
-            self.nin_skip = nin(self.filter_doubling * skip_connection * nr_filters, nr_filters)
+            self.nin_skip = Nin(self.filter_doubling * skip_connection * nr_filters, nr_filters)
 
         self.dropout = nn.Dropout2d(dropout_p)
         self.conv_out = conv_op(self.filter_doubling * nr_filters, 2 * nr_filters) # output has to be doubled for gating
@@ -110,80 +121,73 @@ class GatedResnet(nn.Module):
         self.h_lin = nn.Linear(nr_conditions, 2 * nr_filters)
 
 
-    def forward(self, x, a=None, h=None):
+    def forward(self, x: th.Tensor, a: th.Tensor = None, h: th.Tensor = None) -> th.Tensor:
         c1 = self.conv_input(self.resnet_nonlinearity(x))
-        # print(f"c1 shape: {c1.shape}")
         if a is not None :
-            # print(f"a shape: {a.shape}")
             c1 += self.nin_skip(self.resnet_nonlinearity(a))
         c1 = self.resnet_nonlinearity(c1)
         c1 = self.dropout(c1)
         c2 = self.conv_out(c1)
         if h is not None:
-            # in forward, when `h` is [B, nr_conditions, 1, 1]
+            # `h` is [B, nr_conditions, 1, 1]
             h_flat = h.view(h.size(0), -1)                        # [B, nr_conditions]
             h_proj = self.h_lin(h_flat).unsqueeze(-1).unsqueeze(-1)  # [B, 2*nr_filters, 1, 1]
             c2 += h_proj
         a, b = th.chunk(c2, 2, dim=1)
-        c3 = a * F.sigmoid(b)
+        c3 = a * f.sigmoid(b)
         return x + c3
 
 
-def downShift(x, pad):
+
+def down_shift(x: th.Tensor, pad: nn.Module) -> th.Tensor:
+    """Down shift the input tensor by one row."""
     xs = list(x.shape)
     x = x[:, :, :xs[2] - 1, :]
-    x = pad(x)
-    return x
+    return pad(x)
 
-def downRightShift(x, pad):
+
+
+def down_right_shift(x: th.Tensor, pad: nn.Module) -> th.Tensor:
+    """Down right shift the input tensor by one row and one column."""
     xs = list(x.shape)
     x = x[:, :, :, :xs[3] - 1]
-    x = pad(x)
-    return x
+    return pad(x)
+
+
 
 class DownShiftedConv2d(nn.Module):
-    def __init__(self,
-                 nr_filters_in,
-                 nr_filters_out,
-                 filter_size=(2,3),
-                 stride=(1,1),
-                 shift_output_down=False):
-
+    def __init__(self, nr_filters_in: int, nr_filters_out: int, filter_size: tuple = (2,3), stride: tuple = (1,1), shift_output_down: bool = False):  # noqa: FBT001, FBT002
         super().__init__()
+
         self.pad = nn.ZeroPad2d((int((filter_size[1] - 1) / 2), int((filter_size[1] - 1) / 2), filter_size[0]-1, 0)) # padding left, right, top, bottom
         self.conv = weight_norm(nn.Conv2d(nr_filters_in, nr_filters_out, filter_size, stride))
         self.shift_output_down = shift_output_down
-        self.down_shift = downShift
+        self.down_shift = down_shift
         self.down_shift_pad = nn.ZeroPad2d((0,0,1,0))
 
-    def forward(self, x):
+    def forward(self, x : th.Tensor) -> th.Tensor:
         x = self.pad(x)
         x = self.conv(x)
         if self.shift_output_down:
             x = self.down_shift(x, pad=self.down_shift_pad)
         return x
 
-class DownShiftedDeconv2d(nn.Module):
-    def __init__(self,
-                 nr_filters_in,
-                 nr_filters_out,
-                 filter_size=(2,3),
-                 stride=(1,1),
-                 output_padding=(0,1)):
 
+
+class DownShiftedDeconv2d(nn.Module):
+    def __init__(self, nr_filters_in: int, nr_filters_out: int, filter_size: tuple = (2,3), stride: tuple = (1,1), output_padding: tuple = (0,1)):
         super().__init__()
+
         self.deconv = weight_norm(nn.ConvTranspose2d(nr_filters_in, nr_filters_out, filter_size, stride, output_padding=output_padding))
         self.filter_size = filter_size
         self.stride = stride
 
-    def forward(self, x, output_padding=None):
-        # Allow callers to pass a dynamic `output_padding` (some callers compute
-        # this to handle odd/even spatial sizes). If not provided, use the
-        # configured ConvTranspose2d module directly.
+    def forward(self, x: th.Tensor, output_padding: tuple | None = None) -> th.Tensor:
+        # Use output_padding if needed & provided to handle odd/even spatial sizes.
         if output_padding is None:
             x = self.deconv(x)
         else:
-            x = F.conv_transpose2d(
+            x = f.conv_transpose2d(
                 x,
                 self.deconv.weight,
                 self.deconv.bias,
@@ -196,46 +200,41 @@ class DownShiftedDeconv2d(nn.Module):
         xs = list(x.shape)
         return x[:, :, :(xs[2] - self.filter_size[0] + 1), int((self.filter_size[1] - 1) / 2):(xs[3] - int((self.filter_size[1] - 1) / 2))]
 
-class DownRightShiftedConv2d(nn.Module):
-    def __init__(self,
-                 nr_filters_in,
-                 nr_filters_out,
-                 filter_size=(2,2),
-                 stride=(1,1),
-                 shift_output_right_down=False):
 
+
+class DownRightShiftedConv2d(nn.Module):
+    def __init__(self, nr_filters_in: int, nr_filters_out: int, filter_size: tuple = (2,2), stride: tuple = (1,1), shift_output_right_down: bool = False):  # noqa: FBT001, FBT002
         super().__init__()
+
         self.pad = nn.ZeroPad2d((filter_size[1] - 1, 0, filter_size[0]-1, 0)) # padding left, right, top, bottom
         self.conv = weight_norm(nn.Conv2d(nr_filters_in, nr_filters_out, filter_size, stride))
         self.shift_output_right_down = shift_output_right_down
-        self.down_right_shift = downRightShift
+        self.down_right_shift = down_right_shift
         self.down_right_shift_pad = nn.ZeroPad2d((1,0,0,0))
 
-    def forward(self, x):
+    def forward(self, x: th.Tensor) -> th.Tensor:
         x = self.pad(x)
         x = self.conv(x)
         if self.shift_output_right_down:
             x = self.down_right_shift(x, pad=self.down_right_shift_pad)
         return x
 
-class DownRightShiftedDeconv2d(nn.Module):
-    def __init__(self,
-                 nr_filters_in,
-                 nr_filters_out,
-                 filter_size=(2,2),
-                 stride=(1,1),
-                 output_padding=(1,0)):
 
+
+class DownRightShiftedDeconv2d(nn.Module):
+    def __init__(self, nr_filters_in: int, nr_filters_out: int, filter_size: tuple = (2,2), stride: tuple = (1,1), output_padding: tuple = (1,0)):
         super().__init__()
+
         self.deconv = weight_norm(nn.ConvTranspose2d(nr_filters_in, nr_filters_out, filter_size, stride, output_padding=output_padding))
         self.filter_size = filter_size
         self.stride = stride
 
-    def forward(self, x, output_padding=None):
+    def forward(self, x: th.Tensor, output_padding: tuple | None = None) -> th.Tensor:
+        # Use output_padding if needed & provided to handle odd/even spatial sizes.
         if output_padding is None:
             x = self.deconv(x)
         else:
-            x = F.conv_transpose2d(
+            x = f.conv_transpose2d(
                 x,
                 self.deconv.weight,
                 self.deconv.bias,
@@ -249,26 +248,19 @@ class DownRightShiftedDeconv2d(nn.Module):
         return x[:, :, :(xs[2] - self.filter_size[0] + 1), :(xs[3] - self.filter_size[1] + 1)]
 
 
-# IMPLEMENT PIXELCNN++ HERE
-class PixelCNNpp(nn.Module):
-    def __init__(self,
-                 nr_resnet: int,
-                 nr_filters: int,
-                 nr_logistic_mix: int,
-                 resnet_nonlinearity: str,
-                 dropout_p: float,
-                 input_channels: int = 1,
-                 nr_conditions: int = 0):
 
+class PixelCNNpp(nn.Module):
+    def __init__(self, nr_resnet: int, nr_filters: int, nr_logistic_mix: int, resnet_nonlinearity: str, dropout_p: float, input_channels: int = 1, nr_conditions: int = 0):  # noqa: PLR0913
         super().__init__()
+
         if resnet_nonlinearity == "concat_elu" :
             self.resnet_nonlinearity = concat_elu
         elif resnet_nonlinearity == "elu" :
-            self.resnet_nonlinearity = F.elu
+            self.resnet_nonlinearity = f.elu
         elif resnet_nonlinearity == "relu" :
-            self.resnet_nonlinearity = F.relu
+            self.resnet_nonlinearity = f.relu
         else:
-            raise Exception("Only concat elu, elu and relu are supported as resnet nonlinearity.")  # noqa: TRY002
+            raise Exception("Only concat_elu, elu and relu are supported as resnet_nonlinearity.")  # noqa: TRY002
 
         self.nr_resnet = nr_resnet
         self.nr_filters = nr_filters
@@ -313,10 +305,11 @@ class PixelCNNpp(nn.Module):
         self.gated_resnet_block_u_down_3 = nn.ModuleList([GatedResnet(nr_filters, DownShiftedConv2d, self.resnet_nonlinearity, skip_connection=1, dropout_p=dropout_p, nr_conditions=nr_conditions) for _ in range(nr_resnet + 1)])
         self.gated_resnet_block_ul_down_3 = nn.ModuleList([GatedResnet(nr_filters, DownRightShiftedConv2d, self.resnet_nonlinearity, skip_connection=2, dropout_p=dropout_p, nr_conditions=nr_conditions) for _ in range(nr_resnet + 1)])
 
-        num_mix = 3 if self.input_channels == 1 else 10
-        self.nin_out = nin(nr_filters, num_mix * nr_logistic_mix)
+        num_mix = 3
+        self.nin_out = Nin(nr_filters, num_mix * nr_logistic_mix)
 
-    def forward(self, x: th.Tensor, c: th.Tensor) -> th.Tensor:
+
+    def forward(self, x: th.Tensor, c: th.Tensor) -> th.Tensor:  # noqa: C901
         xs = list(x.shape)
         padding = th.ones(xs[0], 1, xs[2], xs[3], device=x.device)
         x = th.cat((x, padding), dim=1)  # add extra channel for padding
@@ -335,7 +328,6 @@ class PixelCNNpp(nn.Module):
         ul_list.append(self.downsize_ul_1(ul_list[-1]))
 
         # Handle images with odd height/width
-        # print(f"Before first downsize: u.shape[2]: {u_list[-1].shape[2]}, u.shape[3]: {u_list[-1].shape[3]}, u.shape[2]: {u_list[-2].shape[2]}, u.shape[3]: {u_list[-2].shape[3]}")
         pad_height = 1
         pad_width = 1
         if u_list[-2].shape[2] % u_list[-1].shape[2] != 0:
@@ -373,33 +365,31 @@ class PixelCNNpp(nn.Module):
             u = self.gated_resnet_block_u_down_1[i](u, a=u_list.pop(), h=c)
             ul = self.gated_resnet_block_ul_down_1[i](ul, a=th.cat((u, ul_list.pop()), dim=1), h=c)
 
-        #print(f"After first down pass: u shape: {u.shape}, ul shape: {ul.shape}")
         u = self.upsize_u_1(u, output_padding=output_padding_list[-1])
         ul = self.upsize_ul_1(ul, output_padding=output_padding_list[-1])
-        # print(f"After first upsize: u shape: {u.shape}, ul shape: {ul.shape}")
 
         for i in range(self.nr_resnet + 1):
             u = self.gated_resnet_block_u_down_2[i](u, a=u_list.pop(), h=c)
             ul = self.gated_resnet_block_ul_down_2[i](ul, a=th.cat((u, ul_list.pop()), dim=1), h=c)
 
-        # print(f"After second down pass: u shape: {u.shape}, ul shape: {ul.shape}")
         u = self.upsize_u_2(u, output_padding=output_padding_list[-2])
         ul = self.upsize_ul_2(ul, output_padding=output_padding_list[-2])
-        # print(f"After second upsize: u shape: {u.shape}, ul shape: {ul.shape}")
 
         for i in range(self.nr_resnet + 1):
             u = self.gated_resnet_block_u_down_3[i](u, a=u_list.pop(), h=c)
             ul = self.gated_resnet_block_ul_down_3[i](ul, a=th.cat((u, ul_list.pop()), dim=1), h=c)
 
 
-        x_out = self.nin_out(F.elu(ul))
+        x_out = self.nin_out(f.elu(ul))
 
         assert len(u_list) == 0
         assert len(ul_list) == 0
 
         return x_out
 
-def log_sum_exp(x):
+
+
+def log_sum_exp(x: th.Tensor) -> th.Tensor:
     """Numerically stable log_sum_exp implementation that prevents overflow."""
     # TF ordering
     axis  = len(x.size()) - 1
@@ -407,7 +397,9 @@ def log_sum_exp(x):
     m2, _ = th.max(x, dim=axis, keepdim=True)
     return m + th.log(th.sum(th.exp(x - m2), dim=axis))
 
-def log_prob_from_logits(x):
+
+
+def log_prob_from_logits(x: th.Tensor) -> th.Tensor:
     """Numerically stable log_softmax implementation that prevents overflow."""
     # TF ordering
     axis = len(x.size()) - 1
@@ -415,17 +407,17 @@ def log_prob_from_logits(x):
     return x - m - th.log(th.sum(th.exp(x - m), dim=axis, keepdim=True))
 
 
-def discretized_mix_logistic_loss(x, l):
+def discretized_mix_logistic_loss(x: th.Tensor, l: th.Tensor) -> th.Tensor:
         """Log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval."""
         # Tensorflow ordering
         x = x.permute(0, 2, 3, 1)
-        print(f"x shape in loss: {x.shape}")
         l = l.permute(0, 2, 3, 1)
-        print(f"l shape in loss: {l.shape}")
-        xs = list(x.shape) # true image (i.e. labels) to regress to, e.g. (B,width,height,3)
-        ls = list(l.shape) # predicted distribution, e.g. (B,width,height,30)
-        nr_mix = int(ls[-1] / 3) # here and below: unpacking the params of the mixture of logistics
-        logit_probs = l[:,:,:,:nr_mix]
+        xs = list(x.shape) # true image (i.e. labels)
+        ls = list(l.shape) # predicted distribution
+
+        # unpacking the params of the mixture of logistics
+        nr_mix = int(ls[-1] / 3)
+        logit_probs = l[:,:,:,:nr_mix] # mixture probabilities
         l = l[:, :, :, nr_mix:].contiguous().view([*xs, nr_mix * 2]) # 2 for mean, scale
         means = l[:,:,:,:,:nr_mix]
         log_scales = th.clamp(l[:, :, :, :, nr_mix:2 * nr_mix], min=-7.)
@@ -436,53 +428,49 @@ def discretized_mix_logistic_loss(x, l):
         centered_x = x - means
         inv_stdv = th.exp(-log_scales)
         plus_in = inv_stdv * (centered_x + 1./255.)
-        cdf_plus = F.sigmoid(plus_in)
+        cdf_plus = f.sigmoid(plus_in)
         min_in = inv_stdv * (centered_x - 1./255.)
-        cdf_min = F.sigmoid(min_in)
-        # log probability for edge case of 0 (before scaling)
-        log_cdf_plus = plus_in - F.softplus(plus_in)
-        # log probability for edge case of 255 (before scaling)
-        log_one_minus_cdf_min = -F.softplus(min_in)
-        cdf_delta = cdf_plus - cdf_min # probability for all other cases
-        mid_in = inv_stdv * centered_x
+        cdf_min = f.sigmoid(min_in)
+        # log probability for edge case of 0
+        log_cdf_plus = plus_in - f.softplus(plus_in)
+        # log probability for edge case of 255
+        log_one_minus_cdf_min = -f.softplus(min_in)
+        # probability for all other cases
+        cdf_delta = cdf_plus - cdf_min
         # log probability in the center of the bin, to be used in extreme cases
-        # (likely not used in this code)
-        log_pdf_mid = mid_in - log_scales - 2.*F.softplus(mid_in)
+        mid_in = inv_stdv * centered_x
+        log_pdf_mid = mid_in - log_scales - 2.*f.softplus(mid_in)
 
-        # now select the right output: left edge case, right edge case, normal case, extremely low prob case (doesn't actually happen here)
+        # select the right output: left edge case, right edge case, normal case, extremely low prob case (doesn't actually happen here)
 
-        # this is what is really done, but using the robust version below for extreme cases in other applications and to avoid NaN issue with tf.select()
-        # log_probs = tf.select(x < -0.999, log_cdf_plus, tf.select(x > 0.999, log_one_minus_cdf_min, tf.log(cdf_delta)))
+        # this is what is really done, but using the robust version below for extreme cases
+        # log_probs = th.where(x < -0.999, log_cdf_plus, th.where(x > 0.999, log_one_minus_cdf_min, th.log(cdf_delta)))  # noqa: ERA001
 
-        # robust version, that still works if probabilities are below 1e-5 (which never happens in our code)
-        # tensorflow backpropagates through tf.select() by multiplying with zero instead of selecting: this requires use to use some ugly tricks to avoid potential NaNs
-        # the 1e-12 in tf.maximum(cdf_delta, 1e-12) is never actually used as output, it's purely there to get around the tf.select() gradient issue
-        # if the probability on a sub-pixel is below 1e-5, we use an approximation based on the assumption that the log-density is constant in the bin of the observed sub-pixel value
-
+        # robust version, that still works if the probability is below 1e-5
+        # approximation used based on the assumption that the log-density is constant in the bin of the observed sub-pixel value
         log_probs = th.where(x < -0.999, log_cdf_plus, th.where(x > 0.999, log_one_minus_cdf_min, th.where(cdf_delta > 1e-5, th.log(th.clamp(cdf_delta, min=1e-12)), log_pdf_mid - np.log(127.5))))  # noqa: PLR2004
-        print(f"log_probs shape before sum: {log_probs.shape}")
         log_probs = th.sum(log_probs, dim=3) + log_prob_from_logits(logit_probs)
-        time.sleep(100000)
         return -th.sum(log_sum_exp(log_probs))
 
 
-def to_one_hot(tensor, n, fill_with=1.):
-    # we perform one hot encode with respect to the last axis
+
+def to_one_hot(tensor: th.Tensor, n: int, fill_with: float = 1.) -> th.Tensor:
+    """One hot encoding with respect to the last axis."""
     one_hot = th.zeros((*tensor.size(), n), device=tensor.device)
-    #print(f"one_hot.shape: {one_hot.shape}")
     one_hot.scatter_(len(tensor.size()), tensor.unsqueeze(-1), fill_with)
-    #print(f"one_hot.shape after scatter: {one_hot.shape}\none_hot: {one_hot}")
     return one_hot
 
 
-def sample_from_discretized_mix_logistic(l, nr_mix):
+
+def sample_from_discretized_mix_logistic(l: th.Tensor, nr_mix: int) -> th.Tensor:
+    """Sample from a discretized mixture of logistic distributions."""
     # Tensorflow ordering
     l = l.permute(0, 2, 3, 1)
     ls = list(l.shape)
     xs = [*ls[:-1], 1]
 
     # unpack parameters
-    logit_probs = l[:, :, :, :nr_mix]
+    logit_probs = l[:, :, :, :nr_mix] # mixture probabilities
     l = l[:, :, :, nr_mix:].contiguous().view([*xs, nr_mix * 2]) # for mean, scale
 
     # sample mixture indicator from softmax
@@ -499,8 +487,8 @@ def sample_from_discretized_mix_logistic(l, nr_mix):
     u = th.empty_like(means).uniform_(1e-5, 1. - 1e-5)
     x = means + th.exp(log_scales) * (th.log(u) - th.log(1. - u))
     x0 = th.clamp(th.clamp(x[:, :, :, 0], min=-1.), max=1.)
-    out = x0.unsqueeze(1)
-    return out
+    return x0.unsqueeze(1)
+
 
 
 if __name__ == "__main__":
@@ -513,7 +501,6 @@ if __name__ == "__main__":
 
     conditions = problem.conditions_keys
     nr_conditions = len(conditions)
-
 
     # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
@@ -550,13 +537,12 @@ if __name__ == "__main__":
     )
 
     model.to(device)
-    # loss.to(device)
 
     # Configure data loader
     training_ds = problem.dataset.with_format("torch", device=device)["train"]
     condition_tensors = [training_ds[key][:] for key in problem.conditions_keys]
 
-    training_ds = th.utils.data.TensorDataset(training_ds["optimal_design"][:], *condition_tensors) # .flatten(1) ?
+    training_ds = th.utils.data.TensorDataset(training_ds["optimal_design"][:], *condition_tensors)
 
     dataloader = th.utils.data.DataLoader(
         training_ds,
@@ -565,7 +551,9 @@ if __name__ == "__main__":
     )
 
     # Optimzer
-    optimizer = th.optim.Adam(model.parameters(), lr=args.lr, betas=(args.b1, args.b2)) # add other args if necessary
+    optimizer = th.optim.Adam(model.parameters(), lr=args.lr, betas=(args.b1, args.b2))
+
+
 
     @th.no_grad()
     def sample_designs(model: PixelCNNpp, design_shape: tuple[int, int, int], dim: int = 1, n_designs: int = 25, sampling_batch_size: int = 10) -> tuple[th.Tensor, th.Tensor]:
@@ -607,39 +595,6 @@ if __name__ == "__main__":
         data_all = th.cat(all_batches, dim=0)
         return data_all, desired_conds.cpu()
 
-    # original version without batching
-    # @th.no_grad()
-    # def sample_designs(model: PixelCNNpp, design_shape: tuple[int, int, int], dim: int = 1, n_designs: int = 25) -> tuple[th.Tensor, th.Tensor]:
-    #     """Samples n_designs designs using dataset conditions."""
-    #     model.eval()
-    #     device = next(model.parameters()).device
-
-    #     linspaces = [
-    #         th.linspace(conds[:, i].min(), conds[:, i].max(), n_designs, device=device) for i in range(conds.shape[1])
-    #     ]
-
-    #     desired_conds = th.stack(linspaces, dim=1).reshape(-1, nr_conditions, 1, 1)
-
-    #     # Prepare an empty image batch on the same device as the model
-    #     data = th.zeros((n_designs, dim, *design_shape), device=device)
-
-    #     # Autoregressive pixel sampling: iterate spatial positions and condition on
-    #     # previously sampled pixels and the desired_conds.
-    #     for i in range(design_shape[0]):
-    #         for j in range(design_shape[1]):
-    #             # print(f"Sampling pixel ({i}, {j})")
-    #             out = model(data, desired_conds)
-    #             # print(f"out shape: {out.shape}")
-    #             out_sample = sample_from_discretized_mix_logistic(out, args.nr_logistic_mix)
-    #             # print(f"out_sample shape: {out_sample.shape}")
-    #             # `out_sample` has shape [B, 1, H, W]; copy the sampled value for (i,j)
-    #             data[:, :, i, j] = out_sample.data[:, :, i, j] #out_sample[:, :, i, j] # out_sample.data[:, :, i, j]
-    #         #print(f"Completed row {i+1}/{design_shape[0]}")
-
-    #     #print(f"final data shape: {data.shape}")
-    #     #print(f"desired_conds shape: {desired_conds.shape}")
-    #     return data, desired_conds
-
 
 
     # ----------
@@ -651,12 +606,7 @@ if __name__ == "__main__":
             designs = data[0].unsqueeze(dim=1) # add channel dim
             designs_rescaled = designs * 2. - 1.  # rescale to [-1, 1]
 
-            #print(designs.shape)
-            #print(data[1:])
-
             conds = th.stack((data[1:]), dim=1).reshape(-1, nr_conditions, 1, 1)
-            # print(f"conds.shape: {conds.shape}")
-            #print(conds)
 
             batch_start_time = time.time()
             out = model(designs_rescaled, conds)
@@ -698,9 +648,9 @@ if __name__ == "__main__":
                     for j, tensor in enumerate(designs):
                         tensor_rescaled = (tensor + 1.) / 2.  # rescale to [0, 1]
                         img = tensor_rescaled.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
-                        #print(f"img shape: {img.shape}")
+
                         dc = desired_conds[j].cpu().squeeze() # Extract design conditions
-                        #print(f"dc shape: {dc.shape}")
+
                         axes[j].imshow(img)  # image plot
                         title = [(problem.conditions_keys[i][0], f"{dc[i]:.2f}") for i in range(nr_conditions)]
                         title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)

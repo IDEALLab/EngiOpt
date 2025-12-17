@@ -1,4 +1,6 @@
-"""Evaluation of the PixelCNN++."""
+"""Evaluation of the PixelCNN++ model."""
+from __future__ import annotations
+
 from dataclasses import dataclass
 import os
 
@@ -57,7 +59,7 @@ if __name__ == "__main__":
     else:
         device = th.device("cpu")
 
-    ### Set up testing conditions ###
+    # Set up testing conditions
     conditions_tensor, sampled_conditions, sampled_designs_np, selected_indices = sample_conditions(
         problem=problem,
         n_samples=args.n_samples,
@@ -65,12 +67,11 @@ if __name__ == "__main__":
         seed=seed,
     )
 
-    # --------------------------------------------------------
     # adapt to PixelCNN++ input shape requirements
     conditions_tensor = conditions_tensor.unsqueeze(-1).unsqueeze(-1)
     design_shape = (problem.design_space.shape[0], problem.design_space.shape[1])
 
-    ### Set Up PixelCNN++ Model ###
+    # Set up PixelCNN++ model
     if args.wandb_entity is not None:
         artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_pixel_cnn_pp_2d_model:seed_{seed}"
     else:
@@ -88,11 +89,9 @@ if __name__ == "__main__":
         raise RunRetrievalError
 
     artifact_dir = artifact.download()
-    ckpt_path = os.path.join(artifact_dir, "model.pth") # change model.pth if necessary
+    ckpt_path = os.path.join(artifact_dir, "model.pth")
     ckpt = th.load(ckpt_path, map_location=device)
 
-
-    # Build PixelCNN++ Model
     model = PixelCNNpp(
         nr_resnet=run.config["nr_resnet"],
         nr_filters=run.config["nr_filters"],
@@ -104,22 +103,20 @@ if __name__ == "__main__":
     )
 
     model.load_state_dict(ckpt["model"])
-    model.eval()  # Set to evaluation mode
+    model.eval()
     model.to(device)
 
 
-    batch_size = args.sampling_batch_size
-
+    # Sample designs in batches
     all_batches: list[th.Tensor] = []
 
-    for start in range(0, args.n_samples, batch_size):
-        end = min(args.n_samples, start + batch_size)
+    for start in range(0, args.n_samples, args.sampling_batch_size):
+        end = min(args.n_samples, start + args.sampling_batch_size)
         b = end - start
 
         # prepare batch-local tensors on the same device as the model
         batch_conds = conditions_tensor[start:end]
         data = th.zeros((b, 1, *design_shape), device=device)
-        print(data.shape)
 
         # Autoregressive pixel sampling for this batch
         for i in range(design_shape[0]):
@@ -130,17 +127,13 @@ if __name__ == "__main__":
 
         # move completed batch to CPU to free GPU memory and store
         all_batches.append(data.cpu())
-        print(f"Sampled batch {start} to {end} / {args.n_samples}")
 
-    # concatenate all batches on CPU and return desired_conds on CPU as well
+    # concatenate all batches on CPU
     gen_designs = th.cat(all_batches, dim=0)
-
-    print(gen_designs.shape)
 
 
     gen_designs_np = gen_designs.detach().cpu().numpy()
-    gen_designs_np = gen_designs_np.reshape(args.n_samples, *problem.design_space.shape)
-    # Clip to boundaries for running THIS IS PROBLEM DEPENDENT
+    gen_designs_np = gen_designs_np.reshape(args.n_samples, *problem.design_space.shape) # remove channel dim
     gen_designs_np = np.clip(gen_designs_np, 1e-3, 1.0)
 
     # Compute metrics
