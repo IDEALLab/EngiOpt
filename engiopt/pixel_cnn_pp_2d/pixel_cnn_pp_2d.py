@@ -82,7 +82,7 @@ def concat_elu(x: th.Tensor) -> th.Tensor:
     return f.elu(th.cat([x, -x], dim=axis))
 
 
-class NIN(nn.Module):
+class NetworkInNetwork(nn.Module):
     def __init__(self, nr_filters_in: int, nr_filters_out: int):
         super().__init__()
         self.lin_a = weight_norm(nn.Linear(nr_filters_in, nr_filters_out))
@@ -120,7 +120,7 @@ class GatedResnet(nn.Module):
         self.conv_input = conv_op(self.filter_doubling * nr_filters, nr_filters)
 
         if skip_connection != 0:
-            self.nin_skip = NIN(self.filter_doubling * skip_connection * nr_filters, nr_filters)
+            self.nin_skip = NetworkInNetwork(self.filter_doubling * skip_connection * nr_filters, nr_filters)
 
         self.dropout = nn.Dropout2d(dropout_p)
         self.conv_out = conv_op(self.filter_doubling * nr_filters, 2 * nr_filters)  # output has to be doubled for gating
@@ -505,7 +505,7 @@ class PixelCNNpp(nn.Module):
         )
 
         num_mix = 3
-        self.nin_out = NIN(nr_filters, num_mix * nr_logistic_mix)
+        self.nin_out = NetworkInNetwork(nr_filters, num_mix * nr_logistic_mix)
 
     def forward(self, x: th.Tensor, c: th.Tensor) -> th.Tensor:  # noqa: C901
         xs = list(x.shape)
