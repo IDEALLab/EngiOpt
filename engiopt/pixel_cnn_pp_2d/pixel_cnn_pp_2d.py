@@ -60,7 +60,7 @@ class Args:
     b1: float = 0.95
     """decay of first order momentum of gradient"""
     b2: float = 0.9995
-    """decay of first order momentum of gradient"""
+    """decay of second order momentum of gradient"""
     nr_resnet: int = 5
     """Number of residual blocks per stage of the model."""
     nr_filters: int = 160
@@ -123,7 +123,7 @@ class GatedResnet(nn.Module):
 
     def forward(self, x: th.Tensor, a: th.Tensor = None, h: th.Tensor = None) -> th.Tensor:
         c1 = self.conv_input(self.resnet_nonlinearity(x))
-        if a is not None :
+        if a is not None:
             c1 += self.nin_skip(self.resnet_nonlinearity(a))
         c1 = self.resnet_nonlinearity(c1)
         c1 = self.dropout(c1)
@@ -165,7 +165,7 @@ class DownShiftedConv2d(nn.Module):
         self.down_shift = down_shift
         self.down_shift_pad = nn.ZeroPad2d((0,0,1,0))
 
-    def forward(self, x : th.Tensor) -> th.Tensor:
+    def forward(self, x: th.Tensor) -> th.Tensor:
         x = self.pad(x)
         x = self.conv(x)
         if self.shift_output_down:
@@ -253,11 +253,11 @@ class PixelCNNpp(nn.Module):
     def __init__(self, nr_resnet: int, nr_filters: int, nr_logistic_mix: int, resnet_nonlinearity: str, dropout_p: float, input_channels: int = 1, nr_conditions: int = 0):  # noqa: PLR0913
         super().__init__()
 
-        if resnet_nonlinearity == "concat_elu" :
+        if resnet_nonlinearity == "concat_elu":
             self.resnet_nonlinearity = concat_elu
-        elif resnet_nonlinearity == "elu" :
+        elif resnet_nonlinearity == "elu":
             self.resnet_nonlinearity = f.elu
-        elif resnet_nonlinearity == "relu" :
+        elif resnet_nonlinearity == "relu":
             self.resnet_nonlinearity = f.relu
         else:
             raise Exception("Only concat_elu, elu and relu are supported as resnet_nonlinearity.")  # noqa: TRY002
@@ -391,7 +391,7 @@ class PixelCNNpp(nn.Module):
 
 def log_sum_exp(x: th.Tensor) -> th.Tensor:
     """Numerically stable log_sum_exp implementation that prevents overflow."""
-    # TF ordering
+    # [B, W, H, C] ordering
     axis  = len(x.size()) - 1
     m, _  = th.max(x, dim=axis)
     m2, _ = th.max(x, dim=axis, keepdim=True)
@@ -401,7 +401,7 @@ def log_sum_exp(x: th.Tensor) -> th.Tensor:
 
 def log_prob_from_logits(x: th.Tensor) -> th.Tensor:
     """Numerically stable log_softmax implementation that prevents overflow."""
-    # TF ordering
+    # [B, W, H, C] ordering
     axis = len(x.size()) - 1
     m, _ = th.max(x, dim=axis, keepdim=True)
     return x - m - th.log(th.sum(th.exp(x - m), dim=axis, keepdim=True))
@@ -409,16 +409,17 @@ def log_prob_from_logits(x: th.Tensor) -> th.Tensor:
 
 def discretized_mix_logistic_loss(x: th.Tensor, l: th.Tensor) -> th.Tensor:
         """Log-likelihood for mixture of discretized logistics, assumes the data has been rescaled to [-1,1] interval."""
-        # Tensorflow ordering
+        # [B, W, H, C] ordering
         x = x.permute(0, 2, 3, 1)
         l = l.permute(0, 2, 3, 1)
         xs = list(x.shape) # true image (i.e. labels)
         ls = list(l.shape) # predicted distribution
 
         # unpacking the params of the mixture of logistics
+        # nr_mix = nr_logistic_mix and is multiplied by 3 (for \pi, \mu, s)
         nr_mix = int(ls[-1] / 3)
-        logit_probs = l[:,:,:,:nr_mix] # mixture probabilities
-        l = l[:, :, :, nr_mix:].contiguous().view([*xs, nr_mix * 2]) # 2 for mean, scale
+        logit_probs = l[:,:,:,:nr_mix] # mixture probabilities (\pi)
+        l = l[:, :, :, nr_mix:].contiguous().view([*xs, nr_mix * 2]) # *2 for mean (\mu), scale (s)
         means = l[:,:,:,:,:nr_mix]
         log_scales = th.clamp(l[:, :, :, :, nr_mix:2 * nr_mix], min=-7.)
         x = x.contiguous()
@@ -464,14 +465,15 @@ def to_one_hot(tensor: th.Tensor, n: int, fill_with: float = 1.) -> th.Tensor:
 
 def sample_from_discretized_mix_logistic(l: th.Tensor, nr_mix: int) -> th.Tensor:
     """Sample from a discretized mixture of logistic distributions."""
-    # Tensorflow ordering
+    # [B, W, H, C] ordering
     l = l.permute(0, 2, 3, 1)
     ls = list(l.shape)
     xs = [*ls[:-1], 1]
 
-    # unpack parameters
-    logit_probs = l[:, :, :, :nr_mix] # mixture probabilities
-    l = l[:, :, :, nr_mix:].contiguous().view([*xs, nr_mix * 2]) # for mean, scale
+    # unpacking the params of the mixture of logistics
+    # nr_mix = nr_logistic_mix and is multiplied by 3 (for \pi, \mu, s)
+    logit_probs = l[:, :, :, :nr_mix] # mixture probabilities (\pi)
+    l = l[:, :, :, nr_mix:].contiguous().view([*xs, nr_mix * 2]) # *2 for mean (\mu), scale (s)
 
     # sample mixture indicator from softmax
     temp = th.empty_like(logit_probs).uniform_(1e-5, 1. - 1e-5)
@@ -550,19 +552,19 @@ if __name__ == "__main__":
         shuffle=True,
     )
 
-    # Optimzer
+    # Optimizer
     optimizer = th.optim.Adam(model.parameters(), lr=args.lr, betas=(args.b1, args.b2))
 
 
 
     @th.no_grad()
-    def sample_designs(model: PixelCNNpp, design_shape: tuple[int, int, int], dim: int = 1, n_designs: int = 25, sampling_batch_size: int = 10) -> tuple[th.Tensor, th.Tensor]:
+    def sample_designs(model: PixelCNNpp, design_shape: tuple[int, int, int], conditions: th.Tensor, dim: int = 1, n_designs: int = 25, sampling_batch_size: int = 10) -> tuple[th.Tensor, th.Tensor]:  # noqa: PLR0913
         """Samples n_designs designs using dataset conditions."""
         model.eval()
         device = next(model.parameters()).device
         # Build the full list of requested condition combinations (on the model device)
         linspaces = [
-            th.linspace(conds[:, i].min(), conds[:, i].max(), n_designs, device=device) for i in range(conds.shape[1])
+            th.linspace(conditions[:, i].min(), conditions[:, i].max(), n_designs, device=device) for i in range(conditions.shape[1])
         ]
 
         desired_conds = th.stack(linspaces, dim=1).reshape(-1, nr_conditions, 1, 1)
@@ -638,7 +640,7 @@ if __name__ == "__main__":
                 if batches_done % args.sample_interval == 0:
                     # Extract 25 designs
 
-                    designs, desired_conds = sample_designs(model, design_shape, dim=1, n_designs=25, sampling_batch_size=args.sampling_batch_size)
+                    designs, desired_conds = sample_designs(model, design_shape, conds, dim=1, n_designs=25, sampling_batch_size=args.sampling_batch_size)
                     fig, axes = plt.subplots(5, 5, figsize=(12, 12))
 
                     # Flatten axes for easy indexing
