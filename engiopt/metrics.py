@@ -189,9 +189,12 @@ def metrics(
             unflattened_design = spaces.unflatten(problem.design_space, gen_designs[i])
         else:
             unflattened_design = gen_designs[i]
+        problem.reset()
         _, opt_history = problem.optimize(unflattened_design, config=conditions)
+        problem.reset()
         reference_optimum = problem.simulate(dataset_designs[i], config=conditions)
         opt_history_gaps = optimality_gap(opt_history, reference_optimum)
+        problem.reset()
 
         iog_list.append(problem.simulate(unflattened_design, config=conditions))
         cog_list.append(np.sum(opt_history_gaps))

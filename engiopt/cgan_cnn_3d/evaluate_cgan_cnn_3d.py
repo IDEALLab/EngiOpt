@@ -10,11 +10,11 @@ import numpy as np
 import pandas as pd
 import torch as th
 import tyro
-import wandb
 
 from engiopt import metrics
 from engiopt.cgan_cnn_3d.cgan_cnn_3d import Generator3D
 from engiopt.dataset_sample_conditions import sample_conditions
+import wandb
 
 
 @dataclasses.dataclass
@@ -63,7 +63,7 @@ if __name__ == "__main__":
 
     # Reshape to match the expected input shape for the model
     conditions_tensor = conditions_tensor.unsqueeze(-1).unsqueeze(-1)
-    conditions_tensor = conditions_tensor.view(args.n_samples, len(problem.conditions), 1, 1, 1)
+    conditions_tensor = conditions_tensor.view(args.n_samples, len(problem.conditions_keys), 1, 1, 1)
 
     ### Set Up Generator ###
 

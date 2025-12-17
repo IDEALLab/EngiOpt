@@ -101,7 +101,7 @@ if __name__ == "__main__":
         up_block_types=("UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D"),
         layers_per_block=run.config["layers_per_block"],
         transformer_layers_per_block=1,
-        encoder_hid_dim=len(problem.conditions),
+        encoder_hid_dim=len(problem.conditions_keys),
         only_cross_attention=True,
     ).to(device)
 
