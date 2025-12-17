@@ -88,7 +88,7 @@ if __name__ == "__main__":
 
     model = Generator(
         latent_dim=run.config["latent_dim"],
-        n_conds=len(problem.conditions),
+        n_conds=len(problem.conditions_keys),
         design_shape=problem.design_space.shape,
     ).to(device)
     model.load_state_dict(ckpt["generator"])
