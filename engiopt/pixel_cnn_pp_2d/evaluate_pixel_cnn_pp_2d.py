@@ -1,4 +1,5 @@
 """Evaluation of the PixelCNN++ model."""
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -99,13 +100,12 @@ if __name__ == "__main__":
         resnet_nonlinearity=run.config["resnet_nonlinearity"],
         dropout_p=run.config["dropout_p"],
         input_channels=1,
-        nr_conditions=conditions_tensor.shape[1]
+        nr_conditions=conditions_tensor.shape[1],
     )
 
     model.load_state_dict(ckpt["model"])
     model.eval()
     model.to(device)
-
 
     # Sample designs in batches
     all_batches: list[th.Tensor] = []
@@ -131,9 +131,8 @@ if __name__ == "__main__":
     # concatenate all batches on CPU
     gen_designs = th.cat(all_batches, dim=0)
 
-
     gen_designs_np = gen_designs.detach().cpu().numpy()
-    gen_designs_np = gen_designs_np.reshape(args.n_samples, *problem.design_space.shape) # remove channel dim
+    gen_designs_np = gen_designs_np.reshape(args.n_samples, *problem.design_space.shape)  # remove channel dim
     gen_designs_np = np.clip(gen_designs_np, 1e-3, 1.0)
 
     # Compute metrics
