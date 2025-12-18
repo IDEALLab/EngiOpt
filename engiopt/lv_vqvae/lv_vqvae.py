@@ -20,6 +20,8 @@ Notes for this version:
     - LV + dynamic pruning is used to reduce n_z.
 """
 
+#  TODO: 1) Fix wandb not tracking everything properly, 2) Make sure that fewer n_z and |Z| are actually being used, not just shown on a plot, 3) Make the decoder 1-Lipschitz and ablate possible training issues
+
 from __future__ import annotations
 
 from dataclasses import dataclass
@@ -87,6 +89,7 @@ def _token_stats_from_indices(
         "unique_tokens": float(unique),
         "token_usage_frac": usage_frac,
     }
+
 
 @dataclass
 class Args:
@@ -188,13 +191,13 @@ class Args:
     """EMA momentum for tracking per-dimension std used by pruning decisions"""
     lv_min_active_dims: int = 1
     """minimum number of latent dimensions allowed to remain active (pruning will not go below this)"""
-    lv_max_prune_per_epoch: int = 32
+    lv_max_prune_per_epoch: int = 16
     """maximum number of latent dimensions to prune per epoch"""
     lv_cooldown_epochs: int = 1
     """number of epochs to wait after a prune event before pruning again"""
     lv_k_consecutive: int = 1
     """require this many consecutive 'safe' epochs (val MAE below threshold) before pruning"""
-    lv_val_mae_target: float = 0.1
+    lv_val_mae_target: float = 0.05
     """validation MAE reconstruction target used as the pruning guardrail"""
     lv_val_mae_slack: float = 0.005
     """safety margin below lv_val_mae_target required before allowing pruning"""
@@ -204,13 +207,13 @@ class Args:
     """epoch to start pruning codebook entries (tokens)"""
     cb_min_active_codes: int = 32
     """minimum number of codebook entries allowed to remain active"""
-    cb_max_prune_per_epoch: int = 128
+    cb_max_prune_per_epoch: int = 64
     """maximum number of codebook entries to prune per epoch"""
     cb_cooldown_epochs: int = 1
     """number of epochs to wait after a codebook prune event before pruning again"""
     cb_k_consecutive: int = 1
     """require this many consecutive 'safe' epochs before pruning codebook entries"""
-    cb_val_mae_target: float = 0.1
+    cb_val_mae_target: float = 0.05
     """validation MAE reconstruction target used as the codebook pruning guardrail"""
     cb_val_mae_slack: float = 0.005
     """safety margin below cb_val_mae_target required before allowing codebook pruning"""
@@ -593,7 +596,6 @@ class VQVAETransformer(nn.Module):
         out[out < v[..., [-1]]] = -float("inf")
         return out
 
-
     def _apply_image_token_constraints(self, logits: th.Tensor) -> th.Tensor:
         """Mask logits so only *active image tokens* are ever produced.
 
@@ -606,7 +608,11 @@ class VQVAETransformer(nn.Module):
         mask = th.zeros(vocab, dtype=th.bool, device=logits.device)
         start = self.image_token_offset
         end = self.image_token_offset + self.image_vocab
-        active = self.vqvae.codebook.active_codes.to(device=logits.device) if hasattr(self.vqvae.codebook, "active_codes") else th.ones(self.image_vocab, dtype=th.bool, device=logits.device)
+        active = (
+            self.vqvae.codebook.active_codes.to(device=logits.device)
+            if hasattr(self.vqvae.codebook, "active_codes")
+            else th.ones(self.image_vocab, dtype=th.bool, device=logits.device)
+        )
         mask[start:end] = active
         return logits.masked_fill(~mask.view(1, 1, -1), -float("inf"))
 
@@ -841,6 +847,15 @@ if __name__ == "__main__":
         wandb.define_metric("codebook_pruned_this_epoch", step_metric="vqvae_step")
         wandb.define_metric("codebook_ema_entropy", step_metric="vqvae_step")
         wandb.define_metric("codebook_ema_perplexity", step_metric="vqvae_step")
+        wandb.define_metric("lv_codebook_reinit_enabled", step_metric="vqvae_step")
+
+        # Normalized / ratio metrics for Stage 1 (VQVAE)
+        wandb.define_metric("vqvae_token_entropy_norm", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_token_perplexity_frac", step_metric="vqvae_step")
+        wandb.define_metric("codebook_ema_entropy_norm", step_metric="vqvae_step")
+        wandb.define_metric("codebook_ema_perplexity_frac", step_metric="vqvae_step")
+        wandb.define_metric("lv_active_frac", step_metric="vqvae_step")
+        wandb.define_metric("codebook_active_frac", step_metric="vqvae_step")
 
         wandb.define_metric("vqvae_loss", step_metric="vqvae_step")
         wandb.define_metric("epoch_vqvae", step_metric="vqvae_step")
@@ -861,6 +876,7 @@ if __name__ == "__main__":
 
     from engiopt.lv_vqvae.utils import CodebookPruner
     from engiopt.lv_vqvae.utils import LatentDimPruner
+
     lv_pruner = LatentDimPruner(
         latent_dim=args.latent_dim,
         start_epoch_lv=args.lv_start_epoch,
@@ -886,7 +902,6 @@ if __name__ == "__main__":
         val_mae_slack=args.cb_val_mae_slack,
         ema_beta=args.cb_ema_beta,
     ).to(device)
-
 
     vqvae = VQVAE(
         device=device,
@@ -1045,8 +1060,13 @@ if __name__ == "__main__":
                 # ----------
                 if args.track:
                     batches_done = epoch * len(dataloader_cvqvae) + i
-                    wandb.log({"cvqvae_loss": cvq_loss.item(), "cvqvae_step": batches_done})
-                    wandb.log({"epoch_cvqvae": epoch, "cvqvae_step": batches_done})
+                    wandb.log(
+                        {
+                            "cvqvae_step": batches_done,
+                            "cvqvae_loss": cvq_loss.item(),
+                            "epoch_cvqvae": epoch,
+                        }
+                    )
                     print(
                         f"[Epoch {epoch}/{args.n_epochs_cvqvae}] [Batch {i}/{len(dataloader_cvqvae)}] [CVQ loss: {cvq_loss.item()}]"
                     )
@@ -1138,6 +1158,16 @@ if __name__ == "__main__":
 
                 codebook_active_n = int(vqvae.codebook.active_codes.sum().item())
 
+                # Normalized / ratio versions (stable as active codes/dims change)
+                _k = max(1, codebook_active_n)
+                _logk = float(np.log(_k)) if _k > 1 else 1.0
+                vqvae_token_entropy_norm = float(token_stats["token_entropy"] / _logk)
+                vqvae_token_perplexity_frac = float(token_stats["token_perplexity"] / _k)
+                codebook_ema_entropy_norm = float(cb_entropy / _logk)
+                codebook_ema_perplexity_frac = float(cb_perplexity / _k)
+                lv_active_frac = float(lv_pruner.n_active / max(1, args.latent_dim))
+                codebook_active_frac = float(codebook_active_n / max(1, args.num_codebook_vectors))
+
             opt_vq.zero_grad()
             vq_loss.backward()
             opt_vq.step()
@@ -1147,32 +1177,35 @@ if __name__ == "__main__":
             # ----------
             if args.track:
                 batches_done = epoch * len(dataloader_vqvae) + i
-                wandb.log(
-                    {
-                        "vqvae_loss": vq_loss.item(),
-                        "vqvae_rec_loss": rec_loss.item(),
-                        "vqvae_q_loss": q_loss.item(),
-                        "vqvae_lv_loss": float(lv_loss.item()),
-                        "vqvae_lv_w": float(lv_w),
-                        "lv_active_dims": int(lv_pruner.n_active),
-                        "lv_ema_std_active_mean": lv_std_mean,
-                        "lv_ema_std_active_min": lv_std_min,
-                        "lv_ema_std_active_max": lv_std_max,
-                        "vqvae_z_abs_mean": z_abs_mean,
-                        "vqvae_z_l2_rms": z_l2_rms,
-                        "vqvae_z_std": z_std,
-                        "vqvae_token_entropy": token_stats["token_entropy"],
-                        "vqvae_token_perplexity": token_stats["token_perplexity"],
-                        "vqvae_unique_tokens": token_stats["unique_tokens"],
-                        "vqvae_token_usage_frac": token_stats["token_usage_frac"],
-                        "codebook_active_codes": codebook_active_n,
-                        "codebook_ema_entropy": cb_entropy,
-                        "codebook_ema_perplexity": cb_perplexity,
-                        "vqvae_step": batches_done,
-                        "epoch_vqvae": epoch,
-                    },
-                    step=batches_done,
-                )
+                log_vq = {
+                    "vqvae_step": batches_done,
+                    "epoch_vqvae": epoch,
+                    "vqvae_loss": vq_loss.item(),
+                    "vqvae_rec_loss": rec_loss.item(),
+                    "vqvae_q_loss": q_loss.item(),
+                    "vqvae_lv_loss": float(lv_loss.item()),
+                    "vqvae_lv_w": float(lv_w),
+                    "lv_active_dims": int(lv_pruner.n_active),
+                    "lv_active_frac": lv_active_frac,
+                    "lv_ema_std_active_mean": lv_std_mean,
+                    "lv_ema_std_active_min": lv_std_min,
+                    "lv_ema_std_active_max": lv_std_max,
+                    "vqvae_z_abs_mean": z_abs_mean,
+                    "vqvae_z_l2_rms": z_l2_rms,
+                    "vqvae_z_std": z_std,
+                    "vqvae_token_entropy": token_stats["token_entropy"],
+                    "vqvae_token_entropy_norm": vqvae_token_entropy_norm,
+                    "vqvae_token_perplexity": token_stats["token_perplexity"],
+                    "vqvae_token_perplexity_frac": vqvae_token_perplexity_frac,
+                    "vqvae_unique_tokens": token_stats["unique_tokens"],
+                    "vqvae_token_usage_frac": token_stats["token_usage_frac"],
+                    "codebook_active_codes": codebook_active_n,
+                    "codebook_active_frac": codebook_active_frac,
+                    "codebook_ema_entropy": cb_entropy,
+                    "codebook_ema_entropy_norm": codebook_ema_entropy_norm,
+                    "codebook_ema_perplexity": cb_perplexity,
+                    "codebook_ema_perplexity_frac": codebook_ema_perplexity_frac,
+                }
                 print(
                     f"[Epoch {epoch}/{args.n_epochs_vqvae}] [Batch {i}/{len(dataloader_vqvae)}] [VQ loss: {vq_loss.item()}]"
                 )
@@ -1197,8 +1230,10 @@ if __name__ == "__main__":
                         axes[j].set_yticks([])  # Hide y ticks
 
                     plt.tight_layout()
-                    wandb.log({"designs_vqvae": wandb.Image(fig), "vqvae_step": batches_done})
+                    log_vq["designs_vqvae"] = wandb.Image(fig)
                     plt.close(fig)
+
+                wandb.log(log_vq)
 
                 # --------------
                 #  Save models
@@ -1247,18 +1282,27 @@ if __name__ == "__main__":
 
         if args.track:
             batches_done = epoch * len(dataloader_vqvae) + i
+            _k = max(1, int(vqvae.codebook.active_codes.sum().item()))
+            _logk = float(np.log(_k)) if _k > 1 else 1.0
+            _cb_entropy = float(_entropy_from_probs(cb_pruner.ema_usage).item())
+            _cb_perplexity = float(th.exp(_entropy_from_probs(cb_pruner.ema_usage)).item())
             wandb.log(
                 {
+                    "vqvae_step": batches_done,
+                    "epoch_vqvae": epoch,
                     "vqvae_val_mae": val_mae,
                     "lv_active_dims": lv_pruner.n_active,
+                    "lv_active_frac": float(lv_pruner.n_active / max(1, args.latent_dim)),
                     "lv_pruned_this_epoch": int(pruned),
                     "lv_codebook_reinit_enabled": int(getattr(vqvae.codebook, "reinit_enabled", True)),
-                    "vqvae_step": batches_done,
                     "codebook_active_codes": int(vqvae.codebook.active_codes.sum().item()),
+                    "codebook_active_frac": float(int(vqvae.codebook.active_codes.sum().item()) / max(1, args.num_codebook_vectors)),
                     "codebook_pruned_this_epoch": int(pruned_codes),
-                    "codebook_ema_entropy": float(_entropy_from_probs(cb_pruner.ema_usage).item()),
-                    "codebook_ema_perplexity": float(th.exp(_entropy_from_probs(cb_pruner.ema_usage)).item()),
-}
+                    "codebook_ema_entropy": _cb_entropy,
+                    "codebook_ema_entropy_norm": float(_cb_entropy / _logk),
+                    "codebook_ema_perplexity": _cb_perplexity,
+                    "codebook_ema_perplexity_frac": float(_cb_perplexity / _k),
+                }
             )
 
         vqvae.train()
@@ -1306,7 +1350,9 @@ if __name__ == "__main__":
                 start = transformer.image_token_offset
                 end = transformer.image_token_offset + transformer.image_vocab
                 p_img = probs[..., start:end]
-                logits_entropy = float((-(p_img.clamp_min(1e-12) * p_img.clamp_min(1e-12).log()).sum(dim=-1)).mean().item())
+                logits_entropy = float(
+                    (-(p_img.clamp_min(1e-12) * p_img.clamp_min(1e-12).log()).sum(dim=-1)).mean().item()
+                )
             loss.backward()
             opt_transformer.step()
 
@@ -1317,16 +1363,16 @@ if __name__ == "__main__":
                 batches_done = epoch * len(dataloader_transformer) + i
                 wandb.log(
                     {
+                        "transformer_step": batches_done,
+                        "epoch_transformer": epoch,
                         "transformer_loss": loss.item(),
                         "transformer_target_entropy": tstats["token_entropy"],
                         "transformer_target_perplexity": tstats["token_perplexity"],
                         "transformer_target_unique_tokens": tstats["unique_tokens"],
                         "transformer_target_usage_frac": tstats["token_usage_frac"],
                         "transformer_logits_entropy": logits_entropy,
-                        "transformer_step": batches_done,
                     }
                 )
-                wandb.log({"epoch_transformer": epoch, "transformer_step": batches_done})
                 print(
                     f"[Epoch {epoch}/{args.n_epochs_transformer}] [Batch {i}/{len(dataloader_transformer)}] [Transformer loss: {loss.item()}]"
                 )
@@ -1420,8 +1466,8 @@ if __name__ == "__main__":
                 "lv_active_mask": lv_pruner.active_mask_float(th.device("cpu")).cpu(),
                 "codebook_active_codes": vqvae.codebook.active_codes.detach().cpu(),
             }
-            th.save(ckpt_tr, "transformer.pth")
 
+        th.save(ckpt_tr, "transformer.pth")
         artifact_tr = wandb.Artifact(f"{args.problem_id}_{args.algo}_transformer", type="model")
         artifact_tr.add_file("transformer.pth")
         wandb.log_artifact(artifact_tr, aliases=[f"seed_{args.seed}"])
