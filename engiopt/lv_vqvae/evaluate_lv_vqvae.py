@@ -1,4 +1,8 @@
-"""Evaluation for the VQGAN."""
+"""Evaluation for the LV-VQVAE.
+
+Stage 1 is a VQVAE-style discrete autoencoder; no discriminator, no perceptual loss.
+Stage 2 is a Transformer trained on the discrete latent tokens.
+"""
 
 from __future__ import annotations
 
@@ -14,16 +18,16 @@ import wandb
 
 from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
+from engiopt.lv_vqvae.vqvae import VQVAE
+from engiopt.lv_vqvae.vqvae import VQVAETransformer
 from engiopt.transforms import drop_constant
 from engiopt.transforms import normalize
 from engiopt.transforms import resize_to
-from engiopt.vqgan.vqgan import VQGAN
-from engiopt.vqgan.vqgan import VQGANTransformer
 
 
 @dataclasses.dataclass
 class Args:
-    """Command-line arguments for a single-seed VQGAN 2D evaluation."""
+    """Command-line arguments for a single-seed LV-VQVAE 2D evaluation."""
 
     problem_id: str = "beams2d"
     """Problem identifier."""
@@ -37,7 +41,7 @@ class Args:
     """Number of generated samples per seed."""
     sigma: float = 10.0
     """Kernel bandwidth for MMD and DPP metrics."""
-    output_csv: str = "vqgan_{problem_id}_metrics.csv"
+    output_csv: str = "lv_vqvae_{problem_id}_metrics.csv"
     """Output CSV path template; may include {problem_id}."""
 
 
@@ -64,19 +68,19 @@ if __name__ == "__main__":
 
     # Restores the pytorch model from wandb
     if args.wandb_entity is not None:
-        artifact_path_cvqgan = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_vqgan_cvqgan:seed_{seed}"
-        artifact_path_vqgan = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_vqgan_vqgan:seed_{seed}"
+        artifact_path_cvqvae = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_lv_vqvae_cvqvae:seed_{seed}"
+        artifact_path_vqvae = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_lv_vqvae_vqvae:seed_{seed}"
         artifact_path_transformer = (
-            f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_vqgan_transformer:seed_{seed}"
+            f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_lv_vqvae_transformer:seed_{seed}"
         )
     else:
-        artifact_path_cvqgan = f"{args.wandb_project}/{args.problem_id}_vqgan_cvqgan:seed_{seed}"
-        artifact_path_vqgan = f"{args.wandb_project}/{args.problem_id}_vqgan_vqgan:seed_{seed}"
-        artifact_path_transformer = f"{args.wandb_project}/{args.problem_id}_vqgan_transformer:seed_{seed}"
+        artifact_path_cvqvae = f"{args.wandb_project}/{args.problem_id}_lv_vqvae_cvqvae:seed_{seed}"
+        artifact_path_vqvae = f"{args.wandb_project}/{args.problem_id}_lv_vqvae_vqvae:seed_{seed}"
+        artifact_path_transformer = f"{args.wandb_project}/{args.problem_id}_lv_vqvae_transformer:seed_{seed}"
 
     api = wandb.Api()
-    artifact_cvqgan = api.artifact(artifact_path_cvqgan, type="model")
-    artifact_vqgan = api.artifact(artifact_path_vqgan, type="model")
+    artifact_cvqvae = api.artifact(artifact_path_cvqvae, type="model")
+    artifact_vqvae = api.artifact(artifact_path_vqvae, type="model")
     artifact_transformer = api.artifact(artifact_path_transformer, type="model")
 
     class RunRetrievalError(ValueError):
@@ -88,18 +92,19 @@ if __name__ == "__main__":
         raise RunRetrievalError
     run = api.run(f"{run.entity}/{run.project}/{run.id}")
 
-    artifact_dir_cvqgan = artifact_cvqgan.download()
-    artifact_dir_vqgan = artifact_vqgan.download()
+    artifact_dir_cvqvae = artifact_cvqvae.download()
+    artifact_dir_vqvae = artifact_vqvae.download()
     artifact_dir_transformer = artifact_transformer.download()
 
-    ckpt_path_cvqgan = os.path.join(artifact_dir_cvqgan, "cvqgan.pth")
-    ckpt_path_vqgan = os.path.join(artifact_dir_vqgan, "vqgan.pth")
+    ckpt_path_cvqvae = os.path.join(artifact_dir_cvqvae, "cvqvae.pth")
+    ckpt_path_vqvae = os.path.join(artifact_dir_vqvae, "vqvae.pth")
     ckpt_path_transformer = os.path.join(artifact_dir_transformer, "transformer.pth")
-    ckpt_cvqgan = th.load(ckpt_path_cvqgan, map_location=th.device(device), weights_only=False)
-    ckpt_vqgan = th.load(ckpt_path_vqgan, map_location=th.device(device), weights_only=False)
+    ckpt_cvqvae = th.load(ckpt_path_cvqvae, map_location=th.device(device), weights_only=False)
+    ckpt_vqvae = th.load(ckpt_path_vqvae, map_location=th.device(device), weights_only=False)
+    lv_active_mask = ckpt_vqvae.get("lv_active_mask", None)
     ckpt_transformer = th.load(ckpt_path_transformer, map_location=th.device(device), weights_only=False)
 
-    vqgan = VQGAN(
+    vqvae = VQVAE(
         device=device,
         is_c=False,
         encoder_channels=run.config["encoder_channels"],
@@ -114,11 +119,11 @@ if __name__ == "__main__":
         latent_dim=run.config["latent_dim"],
         num_codebook_vectors=run.config["num_codebook_vectors"],
     )
-    vqgan.load_state_dict(ckpt_vqgan["vqgan"])
-    vqgan.eval()  # Set to evaluation mode
-    vqgan.to(device)
+    vqvae.load_state_dict(ckpt_vqvae["vqvae"])
+    vqvae.eval()
+    vqvae.to(device)
 
-    cvqgan = VQGAN(
+    cvqvae = VQVAE(
         device=device,
         is_c=True,
         cond_feature_map_dim=run.config["cond_feature_map_dim"],
@@ -127,14 +132,14 @@ if __name__ == "__main__":
         cond_latent_dim=run.config["cond_latent_dim"],
         cond_codebook_vectors=run.config["cond_codebook_vectors"],
     )
-    cvqgan.load_state_dict(ckpt_cvqgan["cvqgan"])
-    cvqgan.eval()  # Set to evaluation mode
-    cvqgan.to(device)
+    cvqvae.load_state_dict(ckpt_cvqvae["cvqvae"])
+    cvqvae.eval()
+    cvqvae.to(device)
 
-    model = VQGANTransformer(
+    model = VQVAETransformer(
         conditional=run.config["conditional"],
-        vqgan=vqgan,
-        cvqgan=cvqgan,
+        vqvae=vqvae,
+        cvqvae=cvqvae,
         image_size=run.config["image_size"],
         decoder_channels=run.config["decoder_channels"],
         cond_feature_map_dim=run.config["cond_feature_map_dim"],
@@ -145,8 +150,11 @@ if __name__ == "__main__":
         dropout=run.config["dropout"],
     )
     model.load_state_dict(ckpt_transformer["transformer"])
-    model.eval()  # Set to evaluation mode
+    model.eval()
     model.to(device)
+
+    if lv_active_mask is not None:
+        model.vqvae_active_mask = th.as_tensor(lv_active_mask).to(device=device, dtype=th.float32)
 
     ### Set up testing conditions ###
     _, sampled_conditions, sampled_designs_np, _ = sample_conditions(
@@ -168,7 +176,7 @@ if __name__ == "__main__":
     # Convert to tensor
     conditions_tensor = th.stack([th.as_tensor(sampled_conditions_new[c][:]).float() for c in conditions], dim=1).to(device)
 
-    # Set the start-of-sequence tokens for the transformer using the CVQGAN to discretize the conditions if enabled
+    # Set the start-of-sequence tokens for the transformer using the CVQVAE to discretize the conditions if enabled
     if run.config["conditional"]:
         c = model.encode_to_z(x=conditions_tensor, is_c=True)[1]
     else:
@@ -200,7 +208,7 @@ if __name__ == "__main__":
         {
             "seed": seed,
             "problem_id": args.problem_id,
-            "model_id": "vqgan",
+            "model_id": "lv_vqvae",
             "n_samples": args.n_samples,
             "sigma": args.sigma,
         }

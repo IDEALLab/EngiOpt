@@ -1,18 +1,23 @@
-"""Vector Quantized Generative Adversarial Network (VQGAN).
+"""Least-Volume Vector Quantized Variational Autoencoder (LV-VQVAE).
 
-Based on https://github.com/dome272/VQGAN-pyth with an "Online Clustered Codebook" for better codebook usage from https://github.com/lyndonzheng/CVQ-VAE/blob/main/quantise.py
+Based on https://github.com/dome272/VQGAN-pytorch with an "Online Clustered Codebook" for better codebook usage from https://github.com/lyndonzheng/CVQ-VAE/blob/main/quantise.py
 
-VQGAN is composed of two primary Stages:
-    - Stage 1 is similar to an autoencoder (AE) but with a discrete latent space represented by a codebook.
-    - Stage 2 is a generative model (a transformer in this case) trained on the latent space of Stage 1.
+This implementation is composed of two primary Stages:
+    - Stage 1 is a VQVAE: an autoencoder (AE) with a discrete latent space represented by a codebook.
+      We additionally apply a least-volume (LV) objective with dynamic pruning to reduce the effective latent
+      dimensionality n_z over the course of training.
+    - Stage 2 is a generative model (a transformer in this case) trained on the discrete latent tokens from Stage 1.
 
-The transformer now uses nanoGPT (https://github.com/karpathy/nanoGPT) instead of minGPT (https://github.com/karpathy/minGPT) as in the original implementation.
+The transformer uses nanoGPT (https://github.com/karpathy/nanoGPT) instead of minGPT (https://github.com/karpathy/minGPT) as in the original implementation.
 
 For Stage 2, we take the indices of the codebook vectors and flatten them into a 1D sequence, treating them as training tokens.
-The transformer is then trained to autoregressively predict each token in the sequence, after which it is reshaped back to the original 2D latent space and passed through the decoder of Stage 1 to generate an image.
-To make VQGAN conditional, we train a separate VQGAN on the conditions only (CVQGAN) and replace the start-of-sequence tokens of the transformer with the CVQGAN latent tokens.
+The transformer is then trained to autoregressively predict each token in the sequence, after which it is reshaped back to the original 2D latent space and passed through the Stage 1 decoder to generate an image.
+To make Stage 2 conditional, we train a separate VQVAE on the conditions only (CVQVAE) and replace the start-of-sequence tokens of the transformer with the CVQVAE latent tokens.
 
-We have updated the transformer architecture, converted VQGAN from a two-stage to a single-stage approach, added several new arguments, switched to wandb for logging, added greyscale support to the perceptual loss, and more.
+Notes for this version:
+    - Discriminator/adversarial training is removed.
+    - Perceptual loss is removed.
+    - LV + dynamic pruning is used to reduce n_z.
 """
 
 from __future__ import annotations
@@ -33,26 +38,59 @@ import tqdm
 import tyro
 import wandb
 
+from engiopt.lv_vqvae.utils import Codebook
+from engiopt.lv_vqvae.utils import DownSampleBlock
+from engiopt.lv_vqvae.utils import GPT
+from engiopt.lv_vqvae.utils import GPTConfig
+from engiopt.lv_vqvae.utils import GroupNorm
+from engiopt.lv_vqvae.utils import LinearCombo
+from engiopt.lv_vqvae.utils import NonLocalBlock
+from engiopt.lv_vqvae.utils import ResidualBlock
+from engiopt.lv_vqvae.utils import Swish
+from engiopt.lv_vqvae.utils import UpSampleBlock
 from engiopt.transforms import drop_constant
 from engiopt.transforms import normalize
 from engiopt.transforms import resize_to
-from engiopt.vqgan.utils import Codebook
-from engiopt.vqgan.utils import Discriminator
-from engiopt.vqgan.utils import DownSampleBlock
-from engiopt.vqgan.utils import GPT
-from engiopt.vqgan.utils import GPTConfig
-from engiopt.vqgan.utils import GreyscaleLPIPS
-from engiopt.vqgan.utils import GroupNorm
-from engiopt.vqgan.utils import LinearCombo
-from engiopt.vqgan.utils import NonLocalBlock
-from engiopt.vqgan.utils import ResidualBlock
-from engiopt.vqgan.utils import Swish
-from engiopt.vqgan.utils import UpSampleBlock
 
+
+def _entropy_from_probs(p: th.Tensor) -> th.Tensor:
+    """Shannon entropy (nats) of a probability vector."""
+    p = p.clamp_min(1e-12)
+    return -(p * p.log()).sum()
+
+
+def _token_stats_from_indices(
+    indices: th.Tensor,
+    *,
+    vocab_size: int,
+    active_codes: th.Tensor | None = None,
+) -> dict[str, float]:
+    """Compute basic token-usage stats from a flat index tensor."""
+    idx = indices.view(-1).to(dtype=th.long)
+    counts = th.bincount(idx, minlength=vocab_size).float()
+    if active_codes is not None:
+        a = active_codes.to(device=counts.device, dtype=th.bool)
+        counts = counts[a]
+        active_n = int(a.sum().item())
+    else:
+        active_n = vocab_size
+
+    total = counts.sum().clamp_min(1.0)
+    probs = counts / total
+    entropy = _entropy_from_probs(probs)
+    perplexity = float(entropy.exp().item())
+    unique = int((counts > 0).sum().item())
+    usage_frac = float(unique / max(1, active_n))
+    return {
+        "token_entropy": float(entropy.item()),
+        "token_perplexity": perplexity,
+        "unique_tokens": float(unique),
+        "token_usage_frac": usage_frac,
+    }
 
 @dataclass
 class Args:
-    """Command-line arguments for VQGAN."""
+    """Command-line arguments for LV-VQVAE."""
 
     problem_id: str = "beams2d"
     """Problem identifier for 2D engineering design."""
@@ -81,32 +119,30 @@ class Args:
     image_size: int = 128
     """desired size of the square image input to the model"""
 
-    # Algorithm-specific: Stage 1 Conditional AE or "CVQGAN" if the model is specified as conditional
-    # Note that a Discriminator is not used for CVQGAN, as it is generally a much simpler model.
+    # Algorithm-specific: Stage 1 Conditional AE or "CVQVAE" if the model is specified as conditional
     cond_dim: int = 3
     """dimensionality of the condition space"""
     cond_hidden_dim: int = 256
-    """hidden dimension of the CVQGAN MLP"""
+    """hidden dimension of the CVQVAE MLP"""
     cond_latent_dim: int = 4
-    """individual code dimension for CVQGAN"""
+    """individual code dimension for CVQVAE"""
     cond_codebook_vectors: int = 64
-    """number of vectors in the CVQGAN codebook"""
+    """number of vectors in the CVQVAE codebook"""
     cond_feature_map_dim: int = 4
-    """feature map dimension for the CVQGAN encoder output"""
-    batch_size_cvqgan: int = 16
-    """size of the batches for CVQGAN"""
-    n_epochs_cvqgan: int = 1000
-    """number of epochs of CVQGAN training"""
+    """feature map dimension for the CVQVAE encoder output"""
+    batch_size_cvqvae: int = 16
+    """size of the batches for CVQVAE"""
+    n_epochs_cvqvae: int = 1000
+    """number of epochs of CVQVAE training"""
     cond_lr: float = 2e-4
-    """learning rate for CVQGAN"""
+    """learning rate for CVQVAE"""
 
-    # Algorithm-specific: Stage 1 (AE)
-    # From original implementation: assume image_channels=1, use greyscale LPIPS only, use_Online=True, determine image_size automatically, calculate decoder_start_resolution automatically
-    n_epochs_vqgan: int = 100
+    # Algorithm-specific: Stage 1 (VQVAE)
+    n_epochs_vqvae: int = 100
     """number of epochs of training"""
-    batch_size_vqgan: int = 16
+    batch_size_vqvae: int = 16
     """size of the batches for Stage 1"""
-    lr_vqgan: float = 4e-4
+    lr_vqvae: float = 4e-4
     """learning rate for Stage 1"""
     beta: float = 0.25
     """beta hyperparameter for the codebook commitment loss"""
@@ -116,18 +152,12 @@ class Args:
     """decay of first order momentum of gradient"""
     n_cpu: int = 8
     """number of cpu threads to use during batch generation"""
-    latent_dim: int = 16
+    latent_dim: int = 256
     """dimensionality of the latent space"""
-    num_codebook_vectors: int = 256
+    num_codebook_vectors: int = 1024
     """number of vectors in the codebook"""
-    disc_start: int = 0
-    """epoch to start discriminator training"""
-    disc_factor: float = 0.0
-    """weighting factor for the adversarial loss from the discriminator"""
     rec_loss_factor: float = 1.0
     """weighting factor for the reconstruction loss"""
-    perceptual_loss_factor: float = 0.1
-    """weighting factor for the perceptual loss"""
     encoder_channels: tuple[int, ...] = (64, 64, 128, 128, 256)
     """tuple of channel sizes for each encoder layer"""
     encoder_attn_resolutions: tuple[int, ...] = (16,)
@@ -140,11 +170,57 @@ class Args:
     """tuple of resolutions at which to apply attention in the decoder"""
     decoder_num_res_blocks: int = 3
     """number of residual blocks per decoder layer"""
-    sample_interval_vqgan: int = 100
+    sample_interval_vqvae: int = 100
     """interval between Stage 1 image samples"""
 
+    # LV + dynamic pruning (n_z)
+    lv_start_epoch: int = 5
+    """epoch to start applying LV loss (keep LV loss weight = 0 before this)"""
+    lv_prune_start_epoch: int = 10
+    """epoch to start pruning latent dimensions (after LV has had time to shape the space)"""
+    lv_w_max: float = 0.01
+    """maximum weight for the LV loss after ramp-up"""
+    lv_ramp_epochs: int = 10
+    """number of epochs to linearly ramp LV loss weight from 0 to lv_w_max"""
+    lv_eta: float = 1.0
+    """scaling inside LV loss (multiplies the log-volume term)"""
+    lv_ema_beta: float = 0.9
+    """EMA momentum for tracking per-dimension std used by pruning decisions"""
+    lv_min_active_dims: int = 1
+    """minimum number of latent dimensions allowed to remain active (pruning will not go below this)"""
+    lv_max_prune_per_epoch: int = 32
+    """maximum number of latent dimensions to prune per epoch"""
+    lv_cooldown_epochs: int = 1
+    """number of epochs to wait after a prune event before pruning again"""
+    lv_k_consecutive: int = 1
+    """require this many consecutive 'safe' epochs (val MAE below threshold) before pruning"""
+    lv_val_mae_target: float = 0.1
+    """validation MAE reconstruction target used as the pruning guardrail"""
+    lv_val_mae_slack: float = 0.005
+    """safety margin below lv_val_mae_target required before allowing pruning"""
+
+    # Codebook pruning (|Z|)
+    cb_prune_start_epoch: int = 10
+    """epoch to start pruning codebook entries (tokens)"""
+    cb_min_active_codes: int = 32
+    """minimum number of codebook entries allowed to remain active"""
+    cb_max_prune_per_epoch: int = 128
+    """maximum number of codebook entries to prune per epoch"""
+    cb_cooldown_epochs: int = 1
+    """number of epochs to wait after a codebook prune event before pruning again"""
+    cb_k_consecutive: int = 1
+    """require this many consecutive 'safe' epochs before pruning codebook entries"""
+    cb_val_mae_target: float = 0.1
+    """validation MAE reconstruction target used as the codebook pruning guardrail"""
+    cb_val_mae_slack: float = 0.005
+    """safety margin below cb_val_mae_target required before allowing codebook pruning"""
+    cb_ema_beta: float = 0.9
+    """EMA momentum for tracking per-token usage used by codebook pruning decisions"""
+
+    lv_codebook_freeze_epochs: int = 2
+    """freeze online codebook reinitialization for this many epochs after a prune event"""
+
     # Algorithm-specific: Stage 2 (Transformer)
-    # From original implementation: assume pkeep=1.0, sos_token=0, bias=True
     n_epochs_transformer: int = 100
     """number of epochs of training"""
     early_stopping: bool = True
@@ -170,22 +246,10 @@ class Args:
 
 
 class Encoder(nn.Module):
-    """Encoder module for VQGAN Stage 1.
+    """Encoder module for Stage 1 (VQVAE).
 
     # Simplified architecture: image -> conv -> [resblock -> attn? -> downsample]* -> norm -> swish -> final conv -> latent image
     Where `?` indicates a block that is only included at certain resolutions and `*` indicates a block that is repeated.
-
-    Consists of a series of convolutional, residual, and attention blocks arranged using the provided arguments.
-    The number of downsample blocks is determined by the length of the encoder channels tuple minus two.
-    For example, if encoder_channels=(128, 128, 128, 128) and the starting resolution is 128, the encoder will downsample the input image twice, from 128x128 to 32x32.
-
-    Parameters:
-        encoder_channels (tuple[int, ...]): tuple of channel sizes for each encoder layer
-        encoder_start_resolution (int): starting resolution for the encoder
-        encoder_attn_resolutions (tuple[int, ...]): tuple of resolutions at which to apply attention in the encoder
-        encoder_num_res_blocks (int): number of residual blocks per encoder layer
-        image_channels (int): number of channels in the input image
-        latent_dim (int): dimensionality of the latent space
     """
 
     def __init__(  # noqa: PLR0913
@@ -225,14 +289,7 @@ class Encoder(nn.Module):
 
 
 class CondEncoder(nn.Module):
-    """Simpler MLP-based encoder for the CVQGAN if enabled.
-
-    Parameters:
-        cond_feature_map_dim (int): feature map dimension for the CVQGAN encoder output
-        cond_dim (int): number of input features
-        cond_hidden_dim (int): hidden dimension of the CVQGAN MLP
-        cond_latent_dim (int): individual code dimension for CVQGAN
-    """
+    """Simpler MLP-based encoder for the CVQVAE if enabled."""
 
     def __init__(self, cond_feature_map_dim: int, cond_dim: int, cond_hidden_dim: int, cond_latent_dim: int):
         super().__init__()
@@ -250,23 +307,7 @@ class CondEncoder(nn.Module):
 
 
 class Decoder(nn.Module):
-    """Decoder module for VQGAN Stage 1.
-
-    Simplified architecture: latent image -> conv -> [resblock -> attn? -> upsample]* -> norm -> swish -> final conv -> image
-    Where `?` indicates a block that is only included at certain resolutions and `*` indicates a block that is repeated.
-
-    Consists of a series of convolutional, residual, and attention blocks arranged using the provided arguments.
-    The number of upsample blocks is determined by the length of the decoder channels tuple minus one.
-    For example, if decoder_channels=(128, 128, 128) and the starting resolution is 32, the decoder will upsample the input image twice, from 32x32 to 128x128.
-
-    Parameters:
-        decoder_channels (tuple[int, ...]): tuple of channel sizes for each decoder layer
-        decoder_start_resolution (int): starting resolution for the decoder
-        decoder_attn_resolutions (tuple[int, ...]): tuple of resolutions at which to apply attention in the decoder
-        decoder_num_res_blocks (int): number of residual blocks per decoder layer
-        image_channels (int): number of channels in the output image
-        latent_dim (int): dimensionality of the latent space
-    """
+    """Decoder module for Stage 1 (VQVAE)."""
 
     def __init__(  # noqa: PLR0913
         self,
@@ -309,14 +350,7 @@ class Decoder(nn.Module):
 
 
 class CondDecoder(nn.Module):
-    """Simpler MLP-based decoder for the CVQGAN if enabled.
-
-    Parameters:
-        cond_feature_map_dim (int): feature map dimension for the CVQGAN encoder output
-        cond_dim (int): number of input features
-        cond_hidden_dim (int): hidden dimension of the CVQGAN MLP
-        cond_latent_dim (int): individual code dimension for CVQGAN
-    """
+    """Simpler MLP-based decoder for the CVQVAE if enabled."""
 
     def __init__(self, cond_latent_dim: int, cond_dim: int, cond_hidden_dim: int, cond_feature_map_dim: int):
         super().__init__()
@@ -331,48 +365,24 @@ class CondDecoder(nn.Module):
         return self.model(x.contiguous().view(len(x), -1))
 
 
-class VQGAN(nn.Module):
-    """VQGAN model for Stage 1.
+class VQVAE(nn.Module):
+    """VQVAE model for Stage 1.
 
-    Can be configured as a CVQGAN if desired.
-
-    Parameters:
-        device (th.device): torch device to use
-
-        **CVQGAN params**
-        is_c (bool): If True, use CVQGAN architecture (MLP-based encoder/decoder).
-        cond_feature_map_dim (int): Feature map dimension for the CVQGAN encoder output.
-        cond_dim (int): Number of input features for the CVQGAN encoder.
-        cond_hidden_dim (int): Hidden dimension of the CVQGAN MLP.
-        cond_latent_dim (int): Individual code dimension for CVQGAN.
-        cond_codebook_vectors (int): Number of codebook vectors for CVQGAN.
-
-        **VQGAN params**
-        encoder_channels (tuple[int, ...]): Tuple of channel sizes for each encoder layer.
-        encoder_start_resolution (int): Starting resolution for the encoder.
-        encoder_attn_resolutions (tuple[int, ...]): Tuple of resolutions at which to apply attention in the encoder.
-        encoder_num_res_blocks (int): Number of residual blocks per encoder layer.
-        decoder_channels (tuple[int, ...]): Tuple of channel sizes for each decoder layer.
-        decoder_start_resolution (int): Starting resolution for the decoder.
-        decoder_attn_resolutions (tuple[int, ...]): Tuple of resolutions at which to apply attention in the decoder.
-        decoder_num_res_blocks (int): Number of residual blocks per decoder layer.
-        image_channels (int): Number of channels in the input/output image.
-        latent_dim (int): Dimensionality of the latent space.
-        num_codebook_vectors (int): Number of codebook vectors.
+    Can be configured as a CVQVAE if desired.
     """
 
     def __init__(  # noqa: PLR0913
         self,
         *,
         device: th.device,
-        # CVQGAN parameters
+        # CVQVAE parameters
         is_c: bool = False,
         cond_feature_map_dim: int = 4,
         cond_dim: int = 3,
         cond_hidden_dim: int = 256,
         cond_latent_dim: int = 4,
         cond_codebook_vectors: int = 64,
-        # VQGAN + Codebook parameters
+        # VQVAE + Codebook parameters
         encoder_channels: tuple[int, ...] = (64, 64, 128, 128, 256),
         encoder_start_resolution: int = 128,
         encoder_attn_resolutions: tuple[int, ...] = (16,),
@@ -420,69 +430,64 @@ class VQGAN(nn.Module):
             latent_dim=cond_latent_dim if is_c else latent_dim,
         ).to(device=device)
 
-    def forward(self, designs: th.Tensor) -> tuple[th.Tensor, th.Tensor, th.Tensor]:
-        """Full VQGAN forward pass."""
+    def forward(
+        self,
+        designs: th.Tensor,
+        *,
+        active_mask: th.Tensor | None = None,
+        return_latents: bool = False,
+    ):
+        """Full VQVAE forward pass."""
         encoded = self.encoder(designs)
         quant_encoded = self.quant_conv(encoded)
-        quant, indices, q_loss, _, _ = self.codebook(quant_encoded)
+        if active_mask is not None:
+            quant_encoded = quant_encoded * active_mask.view(1, -1, 1, 1)
+        quant, indices, q_loss, _, _ = self.codebook(quant_encoded, active_mask=active_mask)
+        if active_mask is not None:
+            quant = quant * active_mask.view(1, -1, 1, 1)
         post_quant = self.post_quant_conv(quant)
         decoded = self.decoder(post_quant)
+        if return_latents:
+            return decoded, indices, q_loss, quant_encoded
         return decoded, indices, q_loss
 
-    def encode(self, designs: th.Tensor) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+    def encode(
+        self,
+        designs: th.Tensor,
+        *,
+        active_mask: th.Tensor | None = None,
+    ) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         """Encode image batch into quantized latent representation."""
         encoded = self.encoder(designs)
         quant_encoded = self.quant_conv(encoded)
-        return self.codebook(quant_encoded)
+        if active_mask is not None:
+            quant_encoded = quant_encoded * active_mask.view(1, -1, 1, 1)
+        z_q, indices, loss, min_encodings, perplexity = self.codebook(quant_encoded, active_mask=active_mask)
+        if active_mask is not None:
+            z_q = z_q * active_mask.view(1, -1, 1, 1)
+        return z_q, indices, loss, min_encodings, perplexity
 
     def decode(self, z: th.Tensor) -> th.Tensor:
         """Decode quantized latent representation back to image space."""
         return self.decoder(self.post_quant_conv(z))
 
-    def calculate_lambda(self, perceptual_loss: th.Tensor, gan_loss: th.Tensor) -> th.Tensor:
-        """Compute balancing factor λ between discriminator loss and the remaining loss terms."""
-        last_layer = self.decoder.model[-1]
-        last_weight = last_layer.weight
-        grad_perc = th.autograd.grad(perceptual_loss, last_weight, retain_graph=True)[0]
-        grad_gan = th.autograd.grad(gan_loss, last_weight, retain_graph=True)[0]
-        lamb = th.norm(grad_perc) / (th.norm(grad_gan) + 1e-4)
-        return 0.8 * th.clamp(lamb, 0.0, 1e4).detach()
 
-    @staticmethod
-    def adopt_weight(disc_factor: float, i: int, threshold: int, value: float = 0.0) -> float:
-        """Adopt weight scheduling: zero out `disc_factor` before threshold."""
-        return value if i < threshold else disc_factor
+class VQVAETransformer(nn.Module):
+    """Wrapper for Stage 2: Transformer.
 
-
-class VQGANTransformer(nn.Module):
-    """Wrapper for VQGAN Stage 2: Transformer.
-
-    Generative component of VQGAN trained on the Stage 1 discrete latent space.
-
-    Parameters:
-        conditional (bool): If True, use CVQGAN for conditioning.
-        vqgan (VQGAN): Pretrained VQGAN model for primary image encoding/decoding.
-        cvqgan (VQGAN): Pretrained CVQGAN model for conditional encoding (if conditional=True).
-        image_size (int): Input image size (assumed square).
-        decoder_channels (tuple[int, ...]): Decoder channels from the VQGAN model.
-        cond_feature_map_dim (int): Feature map dimension from the CVQGAN encoder (if conditional=True).
-        num_codebook_vectors (int): Number of codebook vectors from the VQGAN model.
-        n_layer (int): Number of Transformer layers.
-        n_head (int): Number of attention heads in the Transformer.
-        n_embd (int): Embedding dimension in the Transformer.
-        dropout (float): Dropout rate in the Transformer.
-        bias (bool): If True, use bias terms in the Transformer layers.
+    Generative component trained on the Stage 1 discrete latent space.
     """
 
     def __init__(  # noqa: PLR0913
         self,
         *,
         conditional: bool = True,
-        vqgan: VQGAN,
-        cvqgan: VQGAN,
+        vqvae: VQVAE,
+        cvqvae: VQVAE,
         image_size: int,
         decoder_channels: tuple[int, ...],
         cond_feature_map_dim: int,
+        cond_codebook_vectors: int,
         num_codebook_vectors: int,
         n_layer: int,
         n_head: int,
@@ -491,18 +496,27 @@ class VQGANTransformer(nn.Module):
         bias: bool = True,
     ):
         super().__init__()
-        self.sos_token = 0
-        self.vqgan = vqgan
-        self.cvqgan = cvqgan
+        self.vqvae = vqvae
+        self.cvqvae = cvqvae
 
-        #  block_size is automatically set to the combined sequence length of the VQGAN and CVQGAN
+        # Disjoint token namespaces:
+        #   - conditional tokens: [0, cond_codebook_vectors)
+        #   - image tokens:       [cond_codebook_vectors, cond_codebook_vectors + num_codebook_vectors)
+        #   - SOS token:          cond_codebook_vectors + num_codebook_vectors
+        self.cond_vocab = cond_codebook_vectors if conditional else 0
+        self.image_vocab = num_codebook_vectors
+        self.image_token_offset = self.cond_vocab
+        self.sos_token = self.cond_vocab + self.image_vocab
+        self.vqvae_active_mask: th.Tensor | None = None
+
+        #  block_size is automatically set to the combined sequence length of the VQVAE and CVQVAE
         block_size = (image_size // (2 ** (len(decoder_channels) - 1))) ** 2
         if conditional:
             block_size += cond_feature_map_dim**2
 
         #  Create config object for NanoGPT
         transformer_config = GPTConfig(
-            vocab_size=num_codebook_vectors,
+            vocab_size=(num_codebook_vectors + (cond_codebook_vectors if conditional else 0) + 1),
             block_size=block_size,
             n_layer=n_layer,
             n_head=n_head,
@@ -517,25 +531,29 @@ class VQGANTransformer(nn.Module):
     @th.no_grad()
     def encode_to_z(self, *, x: th.Tensor, is_c: bool = False) -> tuple[th.Tensor, th.Tensor]:
         """Encode images to quantized latent vectors (z) and their indices."""
-        if is_c:  #  For the conditional tokens, use the CVQGAN encoder
-            quant_z, indices, _, _, _ = self.cvqgan.encode(x)
+        if is_c:  #  For the conditional tokens, use the CVQVAE encoder
+            quant_z, indices, _, _, _ = self.cvqvae.encode(x)
         else:
-            quant_z, indices, _, _, _ = self.vqgan.encode(x)
+            quant_z, indices, _, _, _ = self.vqvae.encode(x, active_mask=self.vqvae_active_mask)
         indices = indices.view(quant_z.shape[0], -1)
         return quant_z, indices
 
     @th.no_grad()
     def z_to_image(self, indices: th.Tensor) -> th.Tensor:
         """Convert quantized latent indices back to image space."""
-        ix_to_vectors = self.vqgan.codebook.embedding(indices).reshape(indices.shape[0], self.sidelen, self.sidelen, -1)
+        indices = indices - self.image_token_offset
+        ix_to_vectors = self.vqvae.codebook.embedding(indices).reshape(indices.shape[0], self.sidelen, self.sidelen, -1)
+        if self.vqvae_active_mask is not None:
+            ix_to_vectors = ix_to_vectors * self.vqvae_active_mask.view(1, 1, 1, -1)
         ix_to_vectors = ix_to_vectors.permute(0, 3, 1, 2)
-        return self.vqgan.decode(ix_to_vectors)
+        return self.vqvae.decode(ix_to_vectors)
 
     def forward(self, x: th.Tensor, c: th.Tensor, pkeep: float = 1.0) -> tuple[th.Tensor, th.Tensor]:
         """Forward pass through the Transformer. Returns logits and targets for loss computation."""
         _, indices = self.encode_to_z(x=x)
+        indices = indices + self.image_token_offset
 
-        # Replace the start token with the encoded conditional input if using CVQGAN
+        # Replace the start token with the encoded conditional input if using CVQVAE
         if self.conditional:
             _, sos_tokens = self.encode_to_z(x=c, is_c=True)
         else:
@@ -545,7 +563,13 @@ class VQGANTransformer(nn.Module):
         if pkeep < 1.0:
             mask = th.bernoulli(pkeep * th.ones(indices.shape, device=indices.device))
             mask = mask.round().to(dtype=th.int64)
-            random_indices = th.randint_like(indices, self.transformer.config.vocab_size)
+            random_indices = th.randint(
+                low=self.image_token_offset,
+                high=self.image_token_offset + self.image_vocab,
+                size=indices.shape,
+                device=indices.device,
+                dtype=indices.dtype,
+            )
             new_indices = mask * indices + (1 - mask) * random_indices
         else:
             new_indices = indices
@@ -558,6 +582,7 @@ class VQGANTransformer(nn.Module):
         # We're ignoring the loss returned by NanoGPT
         logits, _ = self.transformer(new_indices[:, :-1], None)
         logits = logits[:, -indices.shape[1] :]  # Always predict the last 256 tokens
+        logits = self._apply_image_token_constraints(logits)
 
         return logits, target
 
@@ -567,6 +592,23 @@ class VQGANTransformer(nn.Module):
         out = logits.clone()
         out[out < v[..., [-1]]] = -float("inf")
         return out
+
+
+    def _apply_image_token_constraints(self, logits: th.Tensor) -> th.Tensor:
+        """Mask logits so only *active image tokens* are ever produced.
+
+        This prevents:
+          - sampling conditional-token IDs at image positions
+          - sampling the SOS token at image positions
+          - sampling deactivated (pruned) image codebook entries
+        """
+        vocab = logits.size(-1)
+        mask = th.zeros(vocab, dtype=th.bool, device=logits.device)
+        start = self.image_token_offset
+        end = self.image_token_offset + self.image_vocab
+        active = self.vqvae.codebook.active_codes.to(device=logits.device) if hasattr(self.vqvae.codebook, "active_codes") else th.ones(self.image_vocab, dtype=th.bool, device=logits.device)
+        mask[start:end] = active
+        return logits.masked_fill(~mask.view(1, 1, -1), -float("inf"))
 
     @th.no_grad()
     def sample(
@@ -579,6 +621,7 @@ class VQGANTransformer(nn.Module):
         for _ in range(steps):
             logits, _ = self.transformer(x, None)
             logits = logits[:, -1, :] / temperature
+            logits = self._apply_image_token_constraints(logits.unsqueeze(1)).squeeze(1)
 
             if top_k is not None:
                 # Determine the actual vocabulary size for this batch
@@ -612,7 +655,8 @@ class VQGANTransformer(nn.Module):
         log = {}
 
         _, indices = self.encode_to_z(x=x)
-        # Replace the start token with the encoded conditional input if using CVQGAN
+        indices = indices + self.image_token_offset
+        # Replace the start token with the encoded conditional input if using CVQVAE
         if self.conditional:
             _, sos_tokens = self.encode_to_z(x=c, is_c=True)
         else:
@@ -647,9 +691,6 @@ if __name__ == "__main__":
     rng = np.random.default_rng(args.seed)
     random.seed(args.seed)
     th.backends.cudnn.deterministic = True
-
-    os.makedirs("images/vqgan", exist_ok=True)
-    os.makedirs("images/transformer", exist_ok=True)
 
     if th.backends.mps.is_available():
         device = th.device("mps")
@@ -699,14 +740,14 @@ if __name__ == "__main__":
         th.as_tensor(training_ds["optimal_upsampled"][:]).to(device),
         *[th.as_tensor(training_ds[key][:]).to(device) for key in conditions],
     )
-    dataloader_cvqgan = th.utils.data.DataLoader(
+    dataloader_cvqvae = th.utils.data.DataLoader(
         th_training_ds,
-        batch_size=args.batch_size_cvqgan,
+        batch_size=args.batch_size_cvqvae,
         shuffle=True,
     )
-    dataloader_vqgan = th.utils.data.DataLoader(
+    dataloader_vqvae = th.utils.data.DataLoader(
         th_training_ds,
-        batch_size=args.batch_size_vqgan,
+        batch_size=args.batch_size_vqvae,
         shuffle=True,
     )
     dataloader_transformer = th.utils.data.DataLoader(
@@ -715,44 +756,43 @@ if __name__ == "__main__":
         shuffle=True,
     )
 
-    # If early stopping enabled, create a validation dataloader
-    if args.early_stopping:
-        val_ds = problem.dataset.with_format("torch")["val"]
+    # Create a validation dataloader (used for LV pruning and optionally transformer early stopping)
+    val_ds = problem.dataset.with_format("torch")["val"]
+    val_ds = val_ds.map(
+        lambda batch: {
+            "optimal_upsampled": resize_to(data=batch["optimal_design"][:], h=args.image_size, w=args.image_size)
+            .cpu()
+            .numpy()
+        },
+        batched=True,
+    )
+    val_ds = val_ds.remove_columns("optimal_design")
+
+    # Optionally drop condition columns that are constant like overhang_constraint in beams2d
+    if args.drop_constant_conditions:
+        to_drop = [c for c in problem.conditions_keys if c not in conditions]
+        if to_drop:
+            val_ds = val_ds.remove_columns(to_drop)
+
+    # If enabled, normalize using training mean/std (computed above)
+    if args.normalize_conditions:
         val_ds = val_ds.map(
             lambda batch: {
-                "optimal_upsampled": resize_to(data=batch["optimal_design"][:], h=args.image_size, w=args.image_size)
-                .cpu()
-                .numpy()
+                c: ((th.as_tensor(batch[c][:]).float() - mean[i]) / std[i]).numpy() for i, c in enumerate(conditions)
             },
             batched=True,
         )
-        val_ds = val_ds.remove_columns("optimal_design")
 
-        # Optionally drop condition columns that are constant like overhang_constraint in beams2d
-        if args.drop_constant_conditions:
-            to_drop = [c for c in problem.conditions_keys if c not in conditions]
-            if to_drop:
-                val_ds = val_ds.remove_columns(to_drop)
-
-        # If enabled, normalize using training mean/std (computed above)
-        if args.normalize_conditions:
-            val_ds = val_ds.map(
-                lambda batch: {
-                    c: ((th.as_tensor(batch[c][:]).float() - mean[i]) / std[i]).numpy() for i, c in enumerate(conditions)
-                },
-                batched=True,
-            )
-
-        # Move to device only here
-        th_val_ds = th.utils.data.TensorDataset(
-            th.as_tensor(val_ds["optimal_upsampled"][:]).to(device),
-            *[th.as_tensor(val_ds[key][:]).to(device) for key in conditions],
-        )
-        dataloader_val = th.utils.data.DataLoader(
-            th_val_ds,
-            batch_size=args.batch_size_transformer,
-            shuffle=False,
-        )
+    # Move to device only here
+    th_val_ds = th.utils.data.TensorDataset(
+        th.as_tensor(val_ds["optimal_upsampled"][:]).to(device),
+        *[th.as_tensor(val_ds[key][:]).to(device) for key in conditions],
+    )
+    dataloader_val = th.utils.data.DataLoader(
+        th_val_ds,
+        batch_size=args.batch_size_transformer,
+        shuffle=False,
+    )
 
     # For logging a fixed set of designs in Stage 1
     n_logged_designs = 25
@@ -775,14 +815,43 @@ if __name__ == "__main__":
             name=run_name,
             dir="./logs/wandb",
         )
-        wandb.define_metric("cvqgan_step", summary="max")
-        wandb.define_metric("cvqgan_loss", step_metric="cvqgan_step")
-        wandb.define_metric("epoch_cvqgan", step_metric="cvqgan_step")
-        wandb.define_metric("vqgan_step", summary="max")
-        wandb.define_metric("vqgan_loss", step_metric="vqgan_step")
-        wandb.define_metric("discriminator_loss", step_metric="vqgan_step")
-        wandb.define_metric("epoch_vqgan", step_metric="vqgan_step")
+        wandb.define_metric("cvqvae_step", summary="max")
+        wandb.define_metric("cvqvae_loss", step_metric="cvqvae_step")
+        wandb.define_metric("epoch_cvqvae", step_metric="cvqvae_step")
+        wandb.define_metric("vqvae_step", summary="max")
+
+        wandb.define_metric("vqvae_rec_loss", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_q_loss", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_lv_loss", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_lv_w", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_val_mae", step_metric="vqvae_step")
+        wandb.define_metric("lv_active_dims", step_metric="vqvae_step")
+        wandb.define_metric("lv_pruned_this_epoch", step_metric="vqvae_step")
+        wandb.define_metric("lv_ema_std_active_mean", step_metric="vqvae_step")
+        wandb.define_metric("lv_ema_std_active_min", step_metric="vqvae_step")
+        wandb.define_metric("lv_ema_std_active_max", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_z_abs_mean", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_z_l2_rms", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_z_std", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_token_entropy", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_token_perplexity", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_unique_tokens", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_token_usage_frac", step_metric="vqvae_step")
+        wandb.define_metric("codebook_active_codes", step_metric="vqvae_step")
+        wandb.define_metric("codebook_pruned_this_epoch", step_metric="vqvae_step")
+        wandb.define_metric("codebook_ema_entropy", step_metric="vqvae_step")
+        wandb.define_metric("codebook_ema_perplexity", step_metric="vqvae_step")
+
+        wandb.define_metric("vqvae_loss", step_metric="vqvae_step")
+        wandb.define_metric("epoch_vqvae", step_metric="vqvae_step")
         wandb.define_metric("transformer_step", summary="max")
+
+        wandb.define_metric("transformer_target_entropy", step_metric="transformer_step")
+        wandb.define_metric("transformer_target_perplexity", step_metric="transformer_step")
+        wandb.define_metric("transformer_target_unique_tokens", step_metric="transformer_step")
+        wandb.define_metric("transformer_target_usage_frac", step_metric="transformer_step")
+        wandb.define_metric("transformer_logits_entropy", step_metric="transformer_step")
+
         wandb.define_metric("transformer_loss", step_metric="transformer_step")
         wandb.define_metric("epoch_transformer", step_metric="transformer_step")
         if args.early_stopping:
@@ -790,7 +859,36 @@ if __name__ == "__main__":
         wandb.config["image_channels"] = image_channels
         wandb.config["latent_size"] = latent_size
 
-    vqgan = VQGAN(
+    from engiopt.lv_vqvae.utils import CodebookPruner
+    from engiopt.lv_vqvae.utils import LatentDimPruner
+    lv_pruner = LatentDimPruner(
+        latent_dim=args.latent_dim,
+        start_epoch_lv=args.lv_start_epoch,
+        start_epoch_prune=args.lv_prune_start_epoch,
+        min_active_dims=args.lv_min_active_dims,
+        max_prune_per_epoch=args.lv_max_prune_per_epoch,
+        cooldown_epochs=args.lv_cooldown_epochs,
+        k_consecutive=args.lv_k_consecutive,
+        val_mae_target=args.lv_val_mae_target,
+        val_mae_slack=args.lv_val_mae_slack,
+        ema_beta=args.lv_ema_beta,
+        eta=args.lv_eta,
+    ).to(device)
+
+    cb_pruner = CodebookPruner(
+        num_codebook_vectors=args.num_codebook_vectors,
+        start_epoch_prune=args.cb_prune_start_epoch,
+        min_active_codes=args.cb_min_active_codes,
+        max_prune_per_epoch=args.cb_max_prune_per_epoch,
+        cooldown_epochs=args.cb_cooldown_epochs,
+        k_consecutive=args.cb_k_consecutive,
+        val_mae_target=args.cb_val_mae_target,
+        val_mae_slack=args.cb_val_mae_slack,
+        ema_beta=args.cb_ema_beta,
+    ).to(device)
+
+
+    vqvae = VQVAE(
         device=device,
         is_c=False,
         encoder_channels=args.encoder_channels,
@@ -806,9 +904,7 @@ if __name__ == "__main__":
         num_codebook_vectors=args.num_codebook_vectors,
     ).to(device=device)
 
-    discriminator = Discriminator(image_channels=image_channels).to(device=device)
-
-    cvqgan = VQGAN(
+    cvqvae = VQVAE(
         device=device,
         is_c=True,
         cond_feature_map_dim=args.cond_feature_map_dim,
@@ -818,13 +914,14 @@ if __name__ == "__main__":
         cond_codebook_vectors=args.cond_codebook_vectors,
     ).to(device=device)
 
-    transformer = VQGANTransformer(
+    transformer = VQVAETransformer(
         conditional=args.conditional,
-        vqgan=vqgan,
-        cvqgan=cvqgan,
+        vqvae=vqvae,
+        cvqvae=cvqvae,
         image_size=args.image_size,
         decoder_channels=args.decoder_channels,
         cond_feature_map_dim=args.cond_feature_map_dim,
+        cond_codebook_vectors=args.cond_codebook_vectors,
         num_codebook_vectors=args.num_codebook_vectors,
         n_layer=args.n_layer,
         n_head=args.n_head,
@@ -832,31 +929,29 @@ if __name__ == "__main__":
         dropout=args.dropout,
     ).to(device=device)
 
-    # CVQGAN Stage 0 optimizer
+    # CVQVAE Stage 0 optimizer
     opt_cvq = th.optim.Adam(
-        list(cvqgan.encoder.parameters())
-        + list(cvqgan.decoder.parameters())
-        + list(cvqgan.codebook.parameters())
-        + list(cvqgan.quant_conv.parameters())
-        + list(cvqgan.post_quant_conv.parameters()),
+        list(cvqvae.encoder.parameters())
+        + list(cvqvae.decoder.parameters())
+        + list(cvqvae.codebook.parameters())
+        + list(cvqvae.quant_conv.parameters())
+        + list(cvqvae.post_quant_conv.parameters()),
         lr=args.cond_lr,
         eps=1e-08,
         betas=(args.b1, args.b2),
     )
 
-    # VQGAN Stage 1 optimizer
+    # VQVAE Stage 1 optimizer
     opt_vq = th.optim.Adam(
-        list(vqgan.encoder.parameters())
-        + list(vqgan.decoder.parameters())
-        + list(vqgan.codebook.parameters())
-        + list(vqgan.quant_conv.parameters())
-        + list(vqgan.post_quant_conv.parameters()),
-        lr=args.lr_vqgan,
+        list(vqvae.encoder.parameters())
+        + list(vqvae.decoder.parameters())
+        + list(vqvae.codebook.parameters())
+        + list(vqvae.quant_conv.parameters())
+        + list(vqvae.post_quant_conv.parameters()),
+        lr=args.lr_vqvae,
         eps=1e-08,
         betas=(args.b1, args.b2),
     )
-    # VQGAN Stage 1 discriminator optimizer
-    opt_disc = th.optim.Adam(discriminator.parameters(), lr=args.lr_vqgan, eps=1e-08, betas=(args.b1, args.b2))
 
     # Transformer Stage 2 optimizer
     decay, no_decay = set(), set()
@@ -889,23 +984,21 @@ if __name__ == "__main__":
 
     opt_transformer = th.optim.AdamW(optim_groups, lr=args.lr_transformer, betas=(0.9, 0.95))
 
-    perceptual_loss_fcn = GreyscaleLPIPS().eval().to(device)
-
     @th.no_grad()
-    def sample_designs_vqgan(n_designs: int) -> list[th.Tensor]:
-        """Sample reconstructions from trained VQGAN Stage 1."""
-        vqgan.eval()
+    def sample_designs_vqvae(n_designs: int) -> list[th.Tensor]:
+        """Sample reconstructions from trained Stage 1 (VQVAE)."""
+        vqvae.eval()
 
         designs, *_ = next(iter(log_dataloader))
         designs = designs[:n_designs].to(device)
-        reconstructions, _, _ = vqgan(designs)
+        reconstructions, _, _ = vqvae(designs, active_mask=lv_pruner.active_mask_float(device))
 
-        vqgan.train()
+        vqvae.train()
         return reconstructions
 
     @th.no_grad()
     def sample_designs_transformer(n_designs: int) -> tuple[th.Tensor, th.Tensor]:
-        """Sample generated designs from trained VQGAN Stage 2."""
+        """Sample generated designs from trained Stage 2."""
         transformer.eval()
 
         # Create condition grid
@@ -930,16 +1023,16 @@ if __name__ == "__main__":
         return desired_conds, gen_imgs
 
     # ---------------------------
-    #  Stage 0: Training CVQGAN
+    #  Stage 0: Training CVQVAE
     # ---------------------------
     if args.conditional:
-        print("Stage 0: Training CVQGAN")
-        cvqgan.train()
-        for epoch in tqdm.trange(args.n_epochs_cvqgan):
-            for i, data in enumerate(dataloader_cvqgan):
+        print("Stage 0: Training CVQVAE")
+        cvqvae.train()
+        for epoch in tqdm.trange(args.n_epochs_cvqvae):
+            for i, data in enumerate(dataloader_cvqvae):
                 # THIS IS PROBLEM DEPENDENT
                 conds = th.stack((data[1:]), dim=1).to(dtype=th.float32, device=device)
-                decoded_images, codebook_indices, q_loss = cvqgan(conds)
+                decoded_images, codebook_indices, q_loss = cvqvae(conds)
 
                 opt_cvq.zero_grad()
                 rec_loss = th.abs(conds - decoded_images).mean()
@@ -951,91 +1044,144 @@ if __name__ == "__main__":
                 #  Logging
                 # ----------
                 if args.track:
-                    batches_done = epoch * len(dataloader_cvqgan) + i
-                    wandb.log({"cvqgan_loss": cvq_loss.item(), "cvqgan_step": batches_done})
-                    wandb.log({"epoch_cvqgan": epoch, "cvqgan_step": batches_done})
+                    batches_done = epoch * len(dataloader_cvqvae) + i
+                    wandb.log({"cvqvae_loss": cvq_loss.item(), "cvqvae_step": batches_done})
+                    wandb.log({"epoch_cvqvae": epoch, "cvqvae_step": batches_done})
                     print(
-                        f"[Epoch {epoch}/{args.n_epochs_cvqgan}] [Batch {i}/{len(dataloader_cvqgan)}] [CVQ loss: {cvq_loss.item()}]"
+                        f"[Epoch {epoch}/{args.n_epochs_cvqvae}] [Batch {i}/{len(dataloader_cvqvae)}] [CVQ loss: {cvq_loss.item()}]"
                     )
 
                     # --------------
                     #  Save model
                     # --------------
-                    if args.save_model and epoch == args.n_epochs_cvqgan - 1 and i == len(dataloader_cvqgan) - 1:
+                    if args.save_model and epoch == args.n_epochs_cvqvae - 1 and i == len(dataloader_cvqvae) - 1:
                         ckpt_cvq = {
                             "epoch": epoch,
                             "batches_done": batches_done,
-                            "cvqgan": cvqgan.state_dict(),
-                            "optimizer_cvqgan": opt_cvq.state_dict(),
+                            "cvqvae": cvqvae.state_dict(),
+                            "optimizer_cvqvae": opt_cvq.state_dict(),
                             "loss": cvq_loss.item(),
                         }
 
-                        th.save(ckpt_cvq, "cvqgan.pth")
-                        artifact_cvq = wandb.Artifact(f"{args.problem_id}_{args.algo}_cvqgan", type="model")
-                        artifact_cvq.add_file("cvqgan.pth")
-                        wandb.log_artifact(artifact_cvq, aliases=[f"seed_{args.seed}"])
+                        th.save(ckpt_cvq, "lv_cvqvae.pth")
+                        artifact_lv_cvq = wandb.Artifact(f"{args.problem_id}_{args.algo}_lv_cvqvae", type="model")
+                        artifact_lv_cvq.add_file("lv_cvqvae.pth")
+                        wandb.log_artifact(artifact_lv_cvq, aliases=[f"seed_{args.seed}"])
 
-        # Freeze CVQGAN for later use in Stage 2 Transformer
-        for p in cvqgan.parameters():
+        # Freeze CVQVAE for later use in Stage 2 Transformer
+        for p in cvqvae.parameters():
             p.requires_grad_(requires_grad=False)
-        cvqgan.eval()
+        cvqvae.eval()
 
     # --------------------------
-    #  Stage 1: Training VQGAN
+    #  Stage 1: Training VQVAE
     # --------------------------
-    print("Stage 1: Training VQGAN")
-    vqgan.train()
-    discriminator.train()
-    for epoch in tqdm.trange(args.n_epochs_vqgan):
-        for i, data in enumerate(dataloader_vqgan):
+    print("Stage 1: Training VQVAE")
+    vqvae.train()
+    codebook_freeze = 0
+    for epoch in tqdm.trange(args.n_epochs_vqvae):
+        if codebook_freeze > 0:
+            codebook_freeze -= 1
+        if hasattr(vqvae.codebook, "reinit_enabled"):
+            vqvae.codebook.reinit_enabled = (codebook_freeze == 0)
+
+        for i, data in enumerate(dataloader_vqvae):
             # THIS IS PROBLEM DEPENDENT
             designs = data[0].to(dtype=th.float32, device=device)
-            decoded_images, codebook_indices, q_loss = vqgan(designs)
+            mask = lv_pruner.active_mask_float(device) if (epoch >= args.lv_start_epoch) else None
+            decoded_images, codebook_indices, q_loss, quant_encoded = vqvae(
+                designs, active_mask=mask, return_latents=True
+            )
 
-            disc_real = discriminator(designs)
-            disc_fake = discriminator(decoded_images)
+            lv_pruner.update_stats(quant_encoded.detach())
+            cb_pruner.update_stats(codebook_indices.detach())
 
-            disc_factor = vqgan.adopt_weight(args.disc_factor, epoch, threshold=args.disc_start)
+            rec_loss = th.abs(designs - decoded_images).mean()
 
-            perceptual_loss = perceptual_loss_fcn(designs, decoded_images)
-            rec_loss = th.abs(designs - decoded_images)
-            perceptual_rec_loss = args.perceptual_loss_factor * perceptual_loss + args.rec_loss_factor * rec_loss
-            perceptual_rec_loss = perceptual_rec_loss.mean()
-            g_loss = -th.mean(disc_fake)
+            # LV weight schedule: 0 until epoch 5, then ramp
+            lv_w = 0.0
+            lv_loss = th.tensor(0.0, device=device)
+            if epoch >= args.lv_start_epoch:
+                t = min(1.0, (epoch - args.lv_start_epoch + 1) / max(1, args.lv_ramp_epochs))
+                lv_w = args.lv_w_max * t
+                lv_loss = lv_pruner.lv_loss(quant_encoded)
 
-            lamb = vqgan.calculate_lambda(perceptual_rec_loss, g_loss)
-            vq_loss = perceptual_rec_loss + q_loss + disc_factor * lamb * g_loss
+            vq_loss = args.rec_loss_factor * rec_loss + q_loss + lv_w * lv_loss
 
-            d_loss_real = th.mean(f.relu(1.0 - disc_real))
-            d_loss_fake = th.mean(f.relu(1.0 + disc_fake))
-            gan_loss = disc_factor * 0.5 * (d_loss_real + d_loss_fake)
+            # Stats for tracking (computed on the continuous latents used for LV/pruning)
+            with th.no_grad():
+                z_abs_mean = float(quant_encoded.abs().mean().item())
+                z_l2_rms = float(quant_encoded.pow(2).mean().sqrt().item())
+                z_std = float(quant_encoded.std().item())
+
+                active_codes = getattr(vqvae.codebook, "active_codes", None)
+                token_stats = _token_stats_from_indices(
+                    codebook_indices,
+                    vocab_size=vqvae.codebook.num_embed,
+                    active_codes=active_codes,
+                )
+
+                # EMA token-usage stats from the codebook pruner (already a probability distribution)
+                cb_p = cb_pruner.ema_usage
+                cb_entropy = float(_entropy_from_probs(cb_p).item())
+                cb_perplexity = float(th.exp(_entropy_from_probs(cb_p)).item())
+
+                # LV stats on EMA std
+                active = lv_pruner.active.to(device=lv_pruner.ema_std.device)
+                if int(active.sum().item()) > 0:
+                    std_active = lv_pruner.ema_std[active]
+                    lv_std_mean = float(std_active.mean().item())
+                    lv_std_min = float(std_active.min().item())
+                    lv_std_max = float(std_active.max().item())
+                else:
+                    lv_std_mean = lv_std_min = lv_std_max = 0.0
+
+                codebook_active_n = int(vqvae.codebook.active_codes.sum().item())
 
             opt_vq.zero_grad()
-            vq_loss.backward(retain_graph=True)
-
-            opt_disc.zero_grad()
-            gan_loss.backward()
-
+            vq_loss.backward()
             opt_vq.step()
-            opt_disc.step()
 
             # ----------
             #  Logging
             # ----------
             if args.track:
-                batches_done = epoch * len(dataloader_vqgan) + i
-                wandb.log({"vqgan_loss": vq_loss.item(), "vqgan_step": batches_done})
-                wandb.log({"discriminator_loss": gan_loss.item(), "vqgan_step": batches_done})
-                wandb.log({"epoch_vqgan": epoch, "vqgan_step": batches_done})
+                batches_done = epoch * len(dataloader_vqvae) + i
+                wandb.log(
+                    {
+                        "vqvae_loss": vq_loss.item(),
+                        "vqvae_rec_loss": rec_loss.item(),
+                        "vqvae_q_loss": q_loss.item(),
+                        "vqvae_lv_loss": float(lv_loss.item()),
+                        "vqvae_lv_w": float(lv_w),
+                        "lv_active_dims": int(lv_pruner.n_active),
+                        "lv_ema_std_active_mean": lv_std_mean,
+                        "lv_ema_std_active_min": lv_std_min,
+                        "lv_ema_std_active_max": lv_std_max,
+                        "vqvae_z_abs_mean": z_abs_mean,
+                        "vqvae_z_l2_rms": z_l2_rms,
+                        "vqvae_z_std": z_std,
+                        "vqvae_token_entropy": token_stats["token_entropy"],
+                        "vqvae_token_perplexity": token_stats["token_perplexity"],
+                        "vqvae_unique_tokens": token_stats["unique_tokens"],
+                        "vqvae_token_usage_frac": token_stats["token_usage_frac"],
+                        "codebook_active_codes": codebook_active_n,
+                        "codebook_ema_entropy": cb_entropy,
+                        "codebook_ema_perplexity": cb_perplexity,
+                        "vqvae_step": batches_done,
+                        "epoch_vqvae": epoch,
+                    },
+                    step=batches_done,
+                )
                 print(
-                    f"[Epoch {epoch}/{args.n_epochs_vqgan}] [Batch {i}/{len(dataloader_vqgan)}] [D loss: {gan_loss.item()}] [VQ loss: {vq_loss.item()}]"
+                    f"[Epoch {epoch}/{args.n_epochs_vqvae}] [Batch {i}/{len(dataloader_vqvae)}] [VQ loss: {vq_loss.item()}]"
                 )
 
                 # This saves a grid image of 25 generated designs every sample_interval
-                if batches_done % args.sample_interval_vqgan == 0:
+                if batches_done % args.sample_interval_vqvae == 0:
                     # Extract 25 designs
                     designs = resize_to(
-                        data=sample_designs_vqgan(n_designs=n_logged_designs), h=design_shape[0], w=design_shape[1]
+                        data=sample_designs_vqvae(n_designs=n_logged_designs), h=design_shape[0], w=design_shape[1]
                     )
                     fig, axes = plt.subplots(5, 5, figsize=(12, 12))
 
@@ -1051,44 +1197,79 @@ if __name__ == "__main__":
                         axes[j].set_yticks([])  # Hide y ticks
 
                     plt.tight_layout()
-                    img_fname = f"images/vqgan/{batches_done}.png"
-                    plt.savefig(img_fname)
-                    plt.close()
-                    wandb.log({"designs_vqgan": wandb.Image(img_fname)})
+                    wandb.log({"designs_vqvae": wandb.Image(fig), "vqvae_step": batches_done})
+                    plt.close(fig)
 
                 # --------------
                 #  Save models
                 # --------------
-                if args.save_model and epoch == args.n_epochs_vqgan - 1 and i == len(dataloader_vqgan) - 1:
+                if args.save_model and epoch == args.n_epochs_vqvae - 1 and i == len(dataloader_vqvae) - 1:
                     ckpt_vq = {
                         "epoch": epoch,
                         "batches_done": batches_done,
-                        "vqgan": vqgan.state_dict(),
-                        "optimizer_vqgan": opt_vq.state_dict(),
+                        "vqvae": vqvae.state_dict(),
+                        "optimizer_vqvae": opt_vq.state_dict(),
                         "loss": vq_loss.item(),
-                    }
-                    ckpt_disc = {
-                        "epoch": epoch,
-                        "batches_done": batches_done,
-                        "discriminator": discriminator.state_dict(),
-                        "optimizer_discriminator": opt_disc.state_dict(),
-                        "loss": gan_loss.item(),
+                            "lv_active_mask": lv_pruner.active_mask_float(th.device("cpu")).cpu(),
+                            "codebook_active_codes": vqvae.codebook.active_codes.detach().cpu(),
                     }
 
-                    th.save(ckpt_vq, "vqgan.pth")
-                    th.save(ckpt_disc, "discriminator.pth")
-                    artifact_vq = wandb.Artifact(f"{args.problem_id}_{args.algo}_vqgan", type="model")
-                    artifact_vq.add_file("vqgan.pth")
-                    artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
-                    artifact_disc.add_file("discriminator.pth")
+                    th.save(ckpt_vq, "lv_vqvae.pth")
+                    artifact_lv_vq = wandb.Artifact(f"{args.problem_id}_{args.algo}_lv_vqvae", type="model")
+                    artifact_lv_vq.add_file("lv_vqvae.pth")
+                    wandb.log_artifact(artifact_lv_vq, aliases=[f"seed_{args.seed}"])
 
-                    wandb.log_artifact(artifact_vq, aliases=[f"seed_{args.seed}"])
-                    wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
+        # End-of-epoch: held-out val MAE + pruning (Stage 2-style block)
+        vqvae.eval()
+        maes = []
+        with th.no_grad():
+            for val_data in dataloader_val:
+                val_designs = val_data[0].to(dtype=th.float32, device=device)
+                val_mask = lv_pruner.active_mask_float(device) if (epoch >= args.lv_start_epoch) else None
+                val_recon, _, _ = vqvae(val_designs, active_mask=val_mask)
+                maes.append(th.abs(val_designs - val_recon).mean().item())
+        val_mae = sum(maes) / max(1, len(maes))
 
-    # Freeze VQGAN for later use in Stage 2 Transformer
-    for p in vqgan.parameters():
+        pruned = lv_pruner.maybe_prune(
+            epoch=epoch,
+            val_mae=val_mae,
+            codebook=vqvae.codebook.embedding,
+        )
+
+        pruned_codes = cb_pruner.maybe_prune(
+            epoch=epoch,
+            val_mae=val_mae,
+            codebook=vqvae.codebook,
+        )
+
+        if pruned:
+            codebook_freeze = max(codebook_freeze, args.lv_codebook_freeze_epochs)
+
+        if args.track:
+            batches_done = epoch * len(dataloader_vqvae) + i
+            wandb.log(
+                {
+                    "vqvae_val_mae": val_mae,
+                    "lv_active_dims": lv_pruner.n_active,
+                    "lv_pruned_this_epoch": int(pruned),
+                    "lv_codebook_reinit_enabled": int(getattr(vqvae.codebook, "reinit_enabled", True)),
+                    "vqvae_step": batches_done,
+                    "codebook_active_codes": int(vqvae.codebook.active_codes.sum().item()),
+                    "codebook_pruned_this_epoch": int(pruned_codes),
+                    "codebook_ema_entropy": float(_entropy_from_probs(cb_pruner.ema_usage).item()),
+                    "codebook_ema_perplexity": float(th.exp(_entropy_from_probs(cb_pruner.ema_usage)).item()),
+}
+            )
+
+        vqvae.train()
+
+    # Freeze VQVAE for later use in Stage 2 Transformer
+    for p in vqvae.parameters():
         p.requires_grad_(requires_grad=False)
-    vqgan.eval()
+    vqvae.eval()
+
+    # Persist the final active mask into Stage 2 so tokenization/decoding stays consistent
+    transformer.vqvae_active_mask = lv_pruner.active_mask_float(device)
 
     # --------------------------------
     #  Stage 2: Training Transformer
@@ -1099,6 +1280,7 @@ if __name__ == "__main__":
     # If early stopping enabled, initialize necessary variables
     if args.early_stopping:
         best_val = float("inf")
+        best_ckpt_tr: dict | None = None
         patience_counter = 0
         patience = args.early_stopping_patience
 
@@ -1111,6 +1293,20 @@ if __name__ == "__main__":
             opt_transformer.zero_grad()
             logits, targets = transformer(designs, conds)
             loss = f.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+
+            # Token-usage / uncertainty stats for tracking
+            with th.no_grad():
+                targets_img = (targets - transformer.image_token_offset).clamp_min(0)
+                tstats = _token_stats_from_indices(
+                    targets_img,
+                    vocab_size=transformer.image_vocab,
+                    active_codes=getattr(vqvae.codebook, "active_codes", None),
+                )
+                probs = f.softmax(logits, dim=-1)
+                start = transformer.image_token_offset
+                end = transformer.image_token_offset + transformer.image_vocab
+                p_img = probs[..., start:end]
+                logits_entropy = float((-(p_img.clamp_min(1e-12) * p_img.clamp_min(1e-12).log()).sum(dim=-1)).mean().item())
             loss.backward()
             opt_transformer.step()
 
@@ -1119,7 +1315,17 @@ if __name__ == "__main__":
             # ----------
             if args.track:
                 batches_done = epoch * len(dataloader_transformer) + i
-                wandb.log({"transformer_loss": loss.item(), "transformer_step": batches_done})
+                wandb.log(
+                    {
+                        "transformer_loss": loss.item(),
+                        "transformer_target_entropy": tstats["token_entropy"],
+                        "transformer_target_perplexity": tstats["token_perplexity"],
+                        "transformer_target_unique_tokens": tstats["unique_tokens"],
+                        "transformer_target_usage_frac": tstats["token_usage_frac"],
+                        "transformer_logits_entropy": logits_entropy,
+                        "transformer_step": batches_done,
+                    }
+                )
                 wandb.log({"epoch_transformer": epoch, "transformer_step": batches_done})
                 print(
                     f"[Epoch {epoch}/{args.n_epochs_transformer}] [Batch {i}/{len(dataloader_transformer)}] [Transformer loss: {loss.item()}]"
@@ -1149,10 +1355,8 @@ if __name__ == "__main__":
                         axes[j].set_yticks([])  # Hide y ticks
 
                     plt.tight_layout()
-                    img_fname = f"images/transformer/{batches_done}.png"
-                    plt.savefig(img_fname)
-                    plt.close()
-                    wandb.log({"designs_transformer": wandb.Image(img_fname)})
+                    wandb.log({"designs_transformer": wandb.Image(fig), "transformer_step": batches_done})
+                    plt.close(fig)
 
         # Early stopping based on held-out validation loss
         if args.track and args.early_stopping:
@@ -1172,17 +1376,18 @@ if __name__ == "__main__":
                 best_val = val_loss
                 patience_counter = 0
 
-                # Save best model (overwrite locally)
+                # Cache best model in memory; we'll upload to W&B once at the end.
                 if args.save_model:
-                    ckpt_tr = {
+                    best_ckpt_tr = {
                         "epoch": epoch,
                         "batches_done": batches_done,
                         "transformer": transformer.state_dict(),
                         "optimizer_transformer": opt_transformer.state_dict(),
                         "loss": loss.item(),
                         "val_loss": val_loss,
+                        "lv_active_mask": lv_pruner.active_mask_float(th.device("cpu")).cpu(),
+                        "codebook_active_codes": vqvae.codebook.active_codes.detach().cpu(),
                     }
-                    th.save(ckpt_tr, "transformer.pth")
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
@@ -1194,13 +1399,26 @@ if __name__ == "__main__":
     #  Save model
     # --------------
     if args.track and args.save_model:
-        if not args.early_stopping:
+        if args.early_stopping:
+            ckpt_tr = best_ckpt_tr if best_ckpt_tr is not None else {
+                "epoch": epoch,
+                "batches_done": batches_done,
+                "transformer": transformer.state_dict(),
+                "optimizer_transformer": opt_transformer.state_dict(),
+                "loss": loss.item(),
+                "val_loss": float("nan"),
+                "lv_active_mask": lv_pruner.active_mask_float(th.device("cpu")).cpu(),
+                "codebook_active_codes": vqvae.codebook.active_codes.detach().cpu(),
+            }
+        else:
             ckpt_tr = {
                 "epoch": epoch,
                 "batches_done": batches_done,
                 "transformer": transformer.state_dict(),
                 "optimizer_transformer": opt_transformer.state_dict(),
                 "loss": loss.item(),
+                "lv_active_mask": lv_pruner.active_mask_float(th.device("cpu")).cpu(),
+                "codebook_active_codes": vqvae.codebook.active_codes.detach().cpu(),
             }
             th.save(ckpt_tr, "transformer.pth")
 

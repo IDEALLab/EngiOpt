@@ -1,6 +1,6 @@
 """Vector Quantized Generative Adversarial Network (VQGAN).
 
-Based on https://github.com/dome272/VQGAN-pyth with an "Online Clustered Codebook" for better codebook usage from https://github.com/lyndonzheng/CVQ-VAE/blob/main/quantise.py
+Based on https://github.com/dome272/VQGAN-pytorch with an "Online Clustered Codebook" for better codebook usage from https://github.com/lyndonzheng/CVQ-VAE/blob/main/quantise.py
 
 VQGAN is composed of two primary Stages:
     - Stage 1 is similar to an autoencoder (AE) but with a discrete latent space represented by a codebook.

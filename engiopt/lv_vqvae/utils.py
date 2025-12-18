@@ -1,40 +1,41 @@
-"""Architectural blocks and other utils for the Vector Quantized Generative Adversarial Network (VQGAN)."""
+"""Architectural blocks and utilities for LV-VQVAE.
+
+This module contains:
+- An "Online Clustered Codebook" vector quantizer (used by VQVAE/CVQVAE).
+- Standard encoder/decoder building blocks (residual, attention, up/downsample, etc.).
+- LV + dynamic pruning utilities for latent channel dimension reduction (n_z).
+- A minimal GPT-2 style Transformer (nanoGPT-style) used for Stage 2 token modeling.
+
+Notes for this version:
+- Discriminator/adversarial training is removed.
+- Perceptual loss (LPIPS/VGG) is removed.
+"""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import math
-import os
 import warnings
 
 from einops import rearrange
-import requests
 import torch as th
 from torch import nn
 from torch.nn import functional as f
-from torchvision.models import vgg16
-from torchvision.models import VGG16_Weights
-import tqdm
-
-# URL and checkpoint for LPIPS model
-URL_MAP = {"vgg_lpips": "https://heibox.uni-heidelberg.de/f/607503859c864bc1b30b/?dl=1"}
-
-CKPT_MAP = {"vgg_lpips": "vgg.pth"}
 
 
 class Codebook(nn.Module):
-    """Improved version over vector quantizer, with the dynamic initialization for the unoptimized "dead" vectors.
+    """Online Clustered Codebook (vector quantizer) with dynamic re-initialization of "dead" vectors.
 
     Parameters:
-        num_codebook_vectors (int): number of codebook entries
-        latent_dim (int): dimensionality of codebook entries
+        num_codebook_vectors (int): number of codebook entries (|Z|)
+        latent_dim (int): dimensionality of codebook entries (n_z)
         beta (float): weight for the commitment loss
         decay (float): decay for the moving average of code usage
-        distance (str): distance type for looking up the closest code
-        anchor (str): anchor sampling methods
-        first_batch (bool): if true, the offline version of the model
-        contras_loss (bool): if true, use the contras_loss to further improve the performance
-        init (bool): if true, the codebook has been initialized
+        distance (str): distance type for nearest neighbor lookup ("l2" or "cos")
+        anchor (str): anchor sampling method for re-init ("closest", "random", "probrandom")
+        first_batch (bool): if True, perform one-time init behavior
+        contras_loss (bool): if True, add a contrastive term (optional)
+        init (bool): if True, the codebook has been initialized
     """
 
     def __init__(  # noqa: PLR0913
@@ -49,6 +50,7 @@ class Codebook(nn.Module):
         first_batch: bool = False,
         contras_loss: bool = False,
         init: bool = False,
+        reinit_enabled: bool = True
     ):
         super().__init__()
 
@@ -61,82 +63,103 @@ class Codebook(nn.Module):
         self.first_batch = first_batch
         self.contras_loss = contras_loss
         self.init = init
+        self.reinit_enabled = reinit_enabled
 
         self.pool = FeaturePool(self.num_embed, self.embed_dim)
         self.embedding = nn.Embedding(self.num_embed, self.embed_dim)
         self.embedding.weight.data.uniform_(-1.0 / self.num_embed, 1.0 / self.num_embed)
         self.register_buffer("embed_prob", th.zeros(self.num_embed))
+        self.register_buffer("active_codes", th.ones(self.num_embed, dtype=th.bool))
 
-    def forward(self, z: th.Tensor) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+    def forward(  # noqa: C901, PLR0912, PLR0915
+        self,
+        z: th.Tensor,
+        active_mask: th.Tensor | None = None,
+    ) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         # reshape z -> (batch, height, width, channel) and flatten
         z = rearrange(z, "b c h w -> b h w c").contiguous()
         z_flattened = z.view(-1, self.embed_dim)
 
-        # clculate the distance
+        # Optional latent-dimension masking (for LV pruning)
+        if active_mask is not None:
+            m = active_mask.to(device=z_flattened.device, dtype=z_flattened.dtype).view(1, -1)  # (1, D)
+            z_flat = z_flattened * m
+            embed_weight = self.embedding.weight * m  # (K, D)
+        else:
+            z_flat = z_flattened
+            embed_weight = self.embedding.weight
+
+        # Calculate similarity / negative distance
         if self.distance == "l2":
-            # l2 distances from z to embeddings e_j (z - e)^2 = z^2 + e^2 - 2 e * z
+            # negative squared distance (so argmax == nearest)
             d = (
-                -th.sum(z_flattened.detach() ** 2, dim=1, keepdim=True)
-                - th.sum(self.embedding.weight**2, dim=1)
-                + 2 * th.einsum("bd, dn-> bn", z_flattened.detach(), rearrange(self.embedding.weight, "n d-> d n"))
+                -th.sum(z_flat.detach() ** 2, dim=1, keepdim=True)
+                - th.sum(embed_weight**2, dim=1)
+                + 2 * th.einsum("bd,dn->bn", z_flat.detach(), rearrange(embed_weight, "n d-> d n"))
             )
         elif self.distance == "cos":
-            # cosine distances from z to embeddings e_j
-            normed_z_flattened = f.normalize(z_flattened, dim=1).detach()
-            normed_codebook = f.normalize(self.embedding.weight, dim=1)
+            # cosine similarity (argmax == nearest)
+            normed_z_flattened = f.normalize(z_flat, dim=1).detach()
+            normed_codebook = f.normalize(embed_weight, dim=1)
             d = th.einsum("bd,dn->bn", normed_z_flattened, rearrange(normed_codebook, "n d -> d n"))
+        else:
+            raise ValueError(f"Unknown distance type: {self.distance!r}")
 
-        # encoding
-        sort_distance, indices = d.sort(dim=1)
-        # look up the closest point for the indices
+        # Encoding (take best index per token)
+        _, indices = d.sort(dim=1)
         encoding_indices = indices[:, -1]
         encodings = th.zeros(encoding_indices.unsqueeze(1).shape[0], self.num_embed, device=z.device)
         encodings.scatter_(1, encoding_indices.unsqueeze(1), 1)
 
-        # quantize and unflatten
-        z_q = th.matmul(encodings, self.embedding.weight).view(z.shape)
-        # compute loss for embedding
+        # Quantize and unflatten
+        z_q = th.matmul(encodings, embed_weight).view(z.shape)
+
+        # Commitment + codebook loss
         loss = self.beta * th.mean((z_q.detach() - z) ** 2) + th.mean((z_q - z.detach()) ** 2)
-        # preserve gradients
+
+        # Straight-through estimator
         z_q = z + (z_q - z).detach()
+
         # reshape back to match original input shape
         z_q = rearrange(z_q, "b h w c -> b c h w").contiguous()
-        # count
+
+        # Usage stats
         avg_probs = th.mean(encodings, dim=0)
         perplexity = th.exp(-th.sum(avg_probs * th.log(avg_probs + 1e-10)))
         min_encodings = encodings
 
-        # online clustered reinitialization for unoptimized points
-        if self.training:
-            # calculate the average usage of code entries
+        # Online clustered reinitialization for underused points
+        if self.training and self.reinit_enabled:
             self.embed_prob.mul_(self.decay).add_(avg_probs, alpha=1 - self.decay)
-            # running average updates
+
             if self.anchor in ["closest", "random", "probrandom"] and (not self.init):
-                # closest sampling
                 if self.anchor == "closest":
-                    sort_distance, indices = d.sort(dim=0)
-                    random_feat = z_flattened.detach()[indices[-1, :]]
-                # feature pool based random sampling
+                    _, idx0 = d.sort(dim=0)
+                    random_feat = z_flattened.detach()[idx0[-1, :]]
                 elif self.anchor == "random":
                     random_feat = self.pool.query(z_flattened.detach())
-                # probabilitical based random sampling
-                elif self.anchor == "probrandom":
+                else:  # "probrandom"
                     norm_distance = f.softmax(d.t(), dim=1)
                     prob = th.multinomial(norm_distance, num_samples=1).view(-1)
                     random_feat = z_flattened.detach()[prob]
-                # decay parameter based on the average usage
+
                 decay = (
                     th.exp(-(self.embed_prob * self.num_embed * 10) / (1 - self.decay) - 1e-3)
                     .unsqueeze(1)
                     .repeat(1, self.embed_dim)
                 )
+                # Do not reinitialize pruned (inactive) codebook entries.
+                if hasattr(self, "active_codes"):
+                    decay = decay * self.active_codes.to(device=decay.device, dtype=decay.dtype).unsqueeze(1)
                 self.embedding.weight.data = self.embedding.weight.data * (1 - decay) + random_feat * decay
                 if self.first_batch:
                     self.init = True
-            # contrastive loss
+
             if self.contras_loss:
-                sort_distance, indices = d.sort(dim=0)
-                dis_pos = sort_distance[-max(1, int(sort_distance.size(0) / self.num_embed)) :, :].mean(dim=0, keepdim=True)
+                sort_distance, _ = d.sort(dim=0)
+                dis_pos = sort_distance[-max(1, int(sort_distance.size(0) / self.num_embed)) :, :].mean(
+                    dim=0, keepdim=True
+                )
                 dis_neg = sort_distance[: int(sort_distance.size(0) * 1 / 2), :]
                 dis = th.cat([dis_pos, dis_neg], dim=0).t() / 0.07
                 contra_loss = f.cross_entropy(dis, th.zeros((dis.size(0),), dtype=th.long, device=dis.device))
@@ -146,14 +169,7 @@ class Codebook(nn.Module):
 
 
 class FeaturePool:
-    """Implements a feature buffer that stores previously encoded features.
-
-    This buffer enables us to initialize the codebook using a history of generated features rather than the ones produced by the latest encoders.
-
-    Parameters:
-        pool_size (int): the size of feature buffer
-        dim (int): the dimension of each feature
-    """
+    """Feature buffer storing previously encoded features (for codebook re-init)."""
 
     def __init__(self, pool_size: int, dim: int = 64):
         self.pool_size = pool_size
@@ -165,12 +181,11 @@ class FeaturePool:
         """Return features from the pool."""
         self.features = self.features.to(features.device)
         if self.nums_features < self.pool_size:
-            if features.size(0) > self.pool_size:  # if the batch size is large enough, directly update the whole codebook
+            if features.size(0) > self.pool_size:
                 random_feat_id = th.randint(0, features.size(0), (int(self.pool_size),))
                 self.features = features[random_feat_id]
                 self.nums_features = self.pool_size
             else:
-                # if the mini-batch is not large nuough, just store it for the next update
                 num = self.nums_features + features.size(0)
                 self.features[self.nums_features : num] = features
                 self.nums_features = num
@@ -184,71 +199,8 @@ class FeaturePool:
         return self.features
 
 
-class Discriminator(nn.Module):
-    """PatchGAN-style discriminator.
-
-    Adapted from: https://github.com/junyanz/pytorch-CycleGAN-and-pix2pix/blob/master/models/networks.py#L538
-    This assumes we never use a discriminator for the CVQGAN, since it is generally a much simpler model.
-
-    Parameters:
-        num_filters_last: Number of filters in the last conv layer.
-        n_layers: Number of convolutional layers.
-        image_channels: Number of channels in the input image.
-    """
-
-    def __init__(self, num_filters_last: int = 64, n_layers: int = 3, image_channels: int = 1):
-        super().__init__()
-
-        # Convolutional backbone (PatchGAN)
-        layers: list[nn.Module] = [
-            nn.Conv2d(image_channels, num_filters_last, kernel_size=4, stride=2, padding=1),
-            nn.LeakyReLU(0.2, inplace=True),
-        ]
-        num_filters_mult = 1
-
-        for i in range(1, n_layers + 1):
-            num_filters_mult_last = num_filters_mult
-            num_filters_mult = min(2**i, 8)
-            layers += [
-                nn.Conv2d(
-                    num_filters_last * num_filters_mult_last,
-                    num_filters_last * num_filters_mult,
-                    kernel_size=4,
-                    stride=2 if i < n_layers else 1,
-                    padding=1,
-                    bias=False,
-                ),
-                nn.BatchNorm2d(num_filters_last * num_filters_mult),
-                nn.LeakyReLU(0.2, inplace=True),
-            ]
-
-        layers.append(nn.Conv2d(num_filters_last * num_filters_mult, 1, kernel_size=4, stride=1, padding=1))
-        self.model = nn.Sequential(*layers)
-
-        # Initialize weights
-        self.apply(self._weights_init)
-
-    @staticmethod
-    def _weights_init(m: nn.Module) -> None:
-        """Custom weight initialization (DCGAN-style)."""
-        classname = m.__class__.__name__
-        if "Conv" in classname:
-            nn.init.normal_(m.weight.data, mean=0.0, std=0.02)
-        elif "BatchNorm" in classname:
-            nn.init.normal_(m.weight.data, mean=1.0, std=0.02)
-            nn.init.constant_(m.bias.data, 0.0)
-
-    def forward(self, x: th.Tensor) -> th.Tensor:
-        """Forward pass with optional CVQGAN adapter."""
-        return self.model(x)
-
-
 class GroupNorm(nn.Module):
-    """Group Normalization block to be used in VQGAN Encoder and Decoder.
-
-    Parameters:
-        channels (int): number of channels in the input feature map
-    """
+    """Group Normalization block used in encoder/decoder."""
 
     def __init__(self, channels: int):
         super().__init__()
@@ -259,19 +211,14 @@ class GroupNorm(nn.Module):
 
 
 class Swish(nn.Module):
-    """Swish activation function to be used in VQGAN Encoder and Decoder."""
+    """Swish activation used in encoder/decoder."""
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         return x * th.sigmoid(x)
 
 
 class ResidualBlock(nn.Module):
-    """Residual block to be used in VQGAN Encoder and Decoder.
-
-    Parameters:
-        in_channels (int): number of input channels
-        out_channels (int): number of output channels
-    """
+    """Residual block used in encoder/decoder."""
 
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
@@ -296,11 +243,7 @@ class ResidualBlock(nn.Module):
 
 
 class UpSampleBlock(nn.Module):
-    """Up-sampling block to be used in VQGAN Decoder.
-
-    Parameters:
-        channels (int): number of channels in the input feature map
-    """
+    """Up-sampling block used in the decoder."""
 
     def __init__(self, channels: int):
         super().__init__()
@@ -312,11 +255,7 @@ class UpSampleBlock(nn.Module):
 
 
 class DownSampleBlock(nn.Module):
-    """Down-sampling block to be used in VQGAN Encoder.
-
-    Parameters:
-        channels (int): number of channels in the input feature map
-    """
+    """Down-sampling block used in the encoder."""
 
     def __init__(self, channels: int):
         super().__init__()
@@ -329,11 +268,7 @@ class DownSampleBlock(nn.Module):
 
 
 class NonLocalBlock(nn.Module):
-    """Non-local attention block to be used in VQGAN Encoder and Decoder.
-
-    Parameters:
-        channels (int): number of channels in the input feature map
-    """
+    """Non-local self-attention block used in the encoder/decoder."""
 
     def __init__(self, channels: int):
         super().__init__()
@@ -353,30 +288,21 @@ class NonLocalBlock(nn.Module):
 
         b, c, h, w = q.shape
 
-        q = q.reshape(b, c, h * w)
-        q = q.permute(0, 2, 1)
-        k = k.reshape(b, c, h * w)
-        v = v.reshape(b, c, h * w)
+        q = q.reshape(b, c, h * w).permute(0, 2, 1)  # (B, HW, C)
+        k = k.reshape(b, c, h * w)                   # (B, C, HW)
+        v = v.reshape(b, c, h * w)                   # (B, C, HW)
 
-        attn = th.bmm(q, k)
-        attn = attn * (int(c) ** (-0.5))
+        attn = th.bmm(q, k) * (int(c) ** (-0.5))     # (B, HW, HW)
         attn = f.softmax(attn, dim=2)
-        attn = attn.permute(0, 2, 1)
+        attn = attn.permute(0, 2, 1)                 # (B, HW, HW)
 
-        a = th.bmm(v, attn)
-        a = a.reshape(b, c, h, w)
-
+        a = th.bmm(v, attn).reshape(b, c, h, w)      # (B, C, H, W)
+        a = self.proj_out(a)
         return x + a
 
 
 class LinearCombo(nn.Module):
-    """Regular fully connected layer combo for the CVQGAN if enabled.
-
-    Parameters:
-        in_features (int): number of input features
-        out_features (int): number of output features
-        alpha (float): negative slope for LeakyReLU
-    """
+    """Regular fully connected layer combo for the CVQVAE if enabled."""
 
     def __init__(self, in_features: int, out_features: int, alpha: float = 0.2):
         super().__init__()
@@ -386,160 +312,224 @@ class LinearCombo(nn.Module):
         return self.model(x)
 
 
-class ScalingLayer(nn.Module):
-    """Channel-wise affine normalization used by LPIPS."""
+class LatentDimPruner(nn.Module):
+    """LV + Dynamic Pruning for latent channel dimension (n_z).
 
-    def __init__(self):
-        super().__init__()
-        self.register_buffer("shift", th.tensor([-0.030, -0.088, -0.188])[None, :, None, None])
-        self.register_buffer("scale", th.tensor([0.458, 0.448, 0.450])[None, :, None, None])
-
-    def forward(self, x: th.Tensor) -> th.Tensor:
-        return (x - self.shift) / self.scale
-
-
-class NetLinLayer(nn.Module):
-    """1x1 conv with dropout (per-layer LPIPS linear head)."""
-
-    def __init__(self, in_channels: int, out_channels: int = 1):
-        super().__init__()
-        self.model = nn.Sequential(
-            nn.Dropout(),
-            nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=1, padding=0, bias=False),
-        )
-
-    def forward(self, x: th.Tensor) -> th.Tensor:
-        return self.model(x)
-
-
-class VGG16(nn.Module):
-    """Torchvision VGG16 feature extractor sliced at LPIPS tap points."""
-
-    def __init__(self):
-        super().__init__()
-        vgg_feats = vgg16(weights=VGG16_Weights.IMAGENET1K_V1).features
-        blocks = [vgg_feats[i] for i in range(30)]
-        self.slice1 = nn.Sequential(*blocks[0:4])  # relu1_2
-        self.slice2 = nn.Sequential(*blocks[4:9])  # relu2_2
-        self.slice3 = nn.Sequential(*blocks[9:16])  # relu3_3
-        self.slice4 = nn.Sequential(*blocks[16:23])  # relu4_3
-        self.slice5 = nn.Sequential(*blocks[23:30])  # relu5_3
-        self.requires_grad_(requires_grad=False)
-
-    def forward(self, x: th.Tensor) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
-        h1 = self.slice1(x)
-        h2 = self.slice2(h1)
-        h3 = self.slice3(h2)
-        h4 = self.slice4(h3)
-        h5 = self.slice5(h4)
-        return (h1, h2, h3, h4, h5)
-
-
-class GreyscaleLPIPS(nn.Module):
-    """LPIPS for greyscale/topological data with optional 'raw' aggregation.
-
-    ``use_raw=True`` is often preferable for non-natural images since learned
-    linear heads are tuned on natural RGB photos.
-
-    Parameters:
-        use_raw: If True, average raw per-layer squared diffs (no linear heads).
-        clamp_output: Clamp the final loss to ``>= 0``.
-        robust_clamp: Clamp inputs to [0, 1] before feature extraction.
-        warn_on_clamp: If True, log warnings when inputs fall outside [0, 1].
-        freeze: If True, disables grads on all params.
-        ckpt_name: Key in URL_MAP/CKPT_MAP for loading LPIPS heads.
+    - Tracks EMA std per latent dim (decision signal).
+    - Adds a differentiable LV loss (pushes std down).
+    - Prunes lowest-std dims when val MAE is safe.
     """
 
     def __init__(  # noqa: PLR0913
         self,
         *,
-        use_raw: bool = True,
-        clamp_output: bool = False,
-        robust_clamp: bool = True,
-        warn_on_clamp: bool = False,
-        freeze: bool = True,
-        ckpt_name: str = "vgg_lpips",
+        latent_dim: int,
+        start_epoch_lv: int = 5,
+        start_epoch_prune: int = 10,
+        min_active_dims: int = 32,
+        max_prune_per_epoch: int = 8,
+        cooldown_epochs: int = 1,
+        k_consecutive: int = 1,
+        val_mae_target: float = 0.1,
+        val_mae_slack: float = 0.005,
+        ema_beta: float = 0.9,
+        eps: float = 1e-8,
+        eta: float = 1.0,
     ):
         super().__init__()
-        self.use_raw = use_raw
-        self.clamp_output = clamp_output
-        self.robust_clamp = robust_clamp
-        self.warn_on_clamp = warn_on_clamp
+        self.latent_dim = latent_dim
+        self.start_epoch_lv = start_epoch_lv
+        self.start_epoch_prune = start_epoch_prune
+        self.min_active_dims = min_active_dims
+        self.max_prune_per_epoch = max_prune_per_epoch
+        self.cooldown_epochs = cooldown_epochs
+        self.k_consecutive = k_consecutive
+        self.val_mae_target = val_mae_target
+        self.val_mae_slack = val_mae_slack
+        self.ema_beta = ema_beta
+        self.eps = eps
+        self.eta = eta
 
-        self.scaling_layer = ScalingLayer()
-        self.channels = (64, 128, 256, 512, 512)
-        self.vgg = VGG16()
-        self.linears = nn.ModuleList([NetLinLayer(c) for c in self.channels])
+        self.register_buffer("active", th.ones(latent_dim, dtype=th.bool))
+        self.register_buffer("ema_std", th.ones(latent_dim))
+        self._cooldown = 0
+        self._ok_streak = 0
 
-        self._load_from_pretrained(name=ckpt_name)
-        if freeze:
-            self.requires_grad_(requires_grad=False)
+    def active_mask_float(self, device: th.device) -> th.Tensor:
+        return self.active.to(device=device, dtype=th.float32)
 
-    def forward(self, real_x: th.Tensor, fake_x: th.Tensor) -> th.Tensor:
-        """Compute greyscale-aware LPIPS distance between two batches."""
-        if self.robust_clamp:
-            real_x = th.clamp(real_x, 0.0, 1.0)
-            fake_x = th.clamp(fake_x, 0.0, 1.0)
+    @property
+    def n_active(self) -> int:
+        return int(self.active.sum().item())
 
-        # Promote greyscale -> RGB for VGG features
-        if real_x.shape[1] == 1:
-            real_x = real_x.repeat(1, 3, 1, 1)
-        if fake_x.shape[1] == 1:
-            fake_x = fake_x.repeat(1, 3, 1, 1)
+    @th.no_grad()
+    def update_stats(self, z: th.Tensor) -> None:
+        # z: (B, C, H, W) -> (N, C)
+        b, c, h, w = z.shape
+        flat = z.permute(0, 2, 3, 1).reshape(b * h * w, c)  # (N, C)
+        std = flat.std(dim=0)  # (C,)
+        self.ema_std.mul_(self.ema_beta).add_(std, alpha=1.0 - self.ema_beta)
 
-        fr = self.vgg(self.scaling_layer(real_x))
-        ff = self.vgg(self.scaling_layer(fake_x))
-        diffs = [(self._norm_tensor(a) - self._norm_tensor(b)) ** 2 for a, b in zip(fr, ff)]
+    def lv_loss(self, z: th.Tensor) -> th.Tensor:
+        # differentiable LV on current batch
+        b, c, h, w = z.shape
+        flat = z.permute(0, 2, 3, 1).reshape(b * h * w, c)  # (N, C)
+        active = self.active.to(device=z.device)
+        if active.sum() == 0:
+            return th.tensor(0.0, device=z.device)
+        std = flat[:, active].std(dim=0)
+        # log-volume (diag approx)
+        return self.eta * th.log(std + self.eps).sum()
 
-        if self.use_raw:
-            parts = [self._spatial_average(d).mean(dim=1, keepdim=True) for d in diffs]
-        else:
-            parts = [self._spatial_average(self.linears[i](d)) for i, d in enumerate(diffs)]
+    @th.no_grad()
+    def maybe_prune(self, *, epoch: int, val_mae: float, codebook: nn.Embedding) -> bool:
+        """Returns True if a prune event occurred.
 
-        loss = th.stack(parts, dim=0).sum()
-        if self.clamp_output:
-            loss = th.clamp(loss, min=0.0)
-        return loss
+        Also hard-zeros pruned dims in the embedding table for Stage-2 consistency.
+        """
+        if epoch < self.start_epoch_prune:
+            return False
+        if self._cooldown > 0:
+            self._cooldown -= 1
+            return False
 
-    # Helpers
-    @staticmethod
-    def _norm_tensor(x: th.Tensor) -> th.Tensor:
-        """L2-normalize channels per spatial location: BxCxHxW -> BxCxHxW."""
-        norm = th.sqrt(th.sum(x**2, dim=1, keepdim=True))
-        return x / (norm + 1e-10)
+        safe = val_mae <= (self.val_mae_target - self.val_mae_slack)
+        self._ok_streak = (self._ok_streak + 1) if safe else 0
+        if self._ok_streak < self.k_consecutive:
+            return False
 
-    @staticmethod
-    def _spatial_average(x: th.Tensor) -> th.Tensor:
-        """Average over spatial dimensions with dims kept: BxCxHxW -> BxCx1x1."""
-        return x.mean(dim=(2, 3), keepdim=True)
+        active_idx = th.where(self.active)[0]
+        if active_idx.numel() <= self.min_active_dims:
+            return False
 
-    def _load_from_pretrained(self, *, name: str) -> None:
-        """Load LPIPS linear heads (and any required buffers) from a checkpoint."""
-        ckpt = self._get_ckpt_path(name, "vgg_lpips")
-        state_dict = th.load(ckpt, map_location=th.device("cpu"), weights_only=True)
-        self.load_state_dict(state_dict, strict=False)
+        scores = self.ema_std[active_idx]
+        n_can_prune = max(0, int(active_idx.numel() - self.min_active_dims))
+        n_prune = min(self.max_prune_per_epoch, n_can_prune)
+        if n_prune <= 0:
+            return False
 
-    @staticmethod
-    def _download(url: str, local_path: str, *, chunk_size: int = 1024) -> None:
-        """Stream a file to disk with a progress bar."""
-        os.makedirs(os.path.split(local_path)[0], exist_ok=True)
-        with requests.get(url, stream=True, timeout=10) as r:
-            total_size = int(r.headers.get("content-length", 0))
-            with tqdm.tqdm(total=total_size, unit="B", unit_scale=True) as pbar, open(local_path, "wb") as f:
-                for data in r.iter_content(chunk_size=chunk_size):
-                    if data:
-                        f.write(data)
-                        pbar.update(len(data))
+        _, order = th.sort(scores)  # ascending
+        prune_dims = active_idx[order[:n_prune]]
+        self.active[prune_dims] = False
 
-    def _get_ckpt_path(self, name: str, root: str) -> str:
-        """Return local path to a pretrained LPIPS checkpoint; download if missing."""
-        assert name in URL_MAP, f"Unknown LPIPS checkpoint name: {name!r}"
-        path = os.path.join(root, CKPT_MAP[name])
-        if not os.path.exists(path):
-            self._download(URL_MAP[name], path)
-        return path
+        # hard-zero embedding dims so transformer decode stays consistent
+        codebook.weight.data[:, prune_dims] = 0.0
+
+        self._cooldown = self.cooldown_epochs
+        self._ok_streak = 0
+        return True
 
 
+
+
+class CodebookPruner(nn.Module):
+    """Explicit pruning for codebook entries (|Z|).
+
+    This is separate from LV + latent-dimension pruning (n_z). Here we:
+      - Track EMA usage per codebook entry (token).
+      - Permanently deactivate low-usage entries once reconstruction quality is "safe".
+      - Deactivation is enforced inside Codebook.forward by masking distances, and by
+        preventing online reinitialization from touching inactive entries.
+
+    Notes:
+      - This prunes *tokens* (codebook entries), not latent dimensions.
+      - The transformer should also be told which image-token IDs are valid so it never samples
+        deactivated tokens (see VQVAETransformer token masking).
+    """
+
+    def __init__(  # noqa: PLR0913
+        self,
+        *,
+        num_codebook_vectors: int,
+        start_epoch_prune: int = 10,
+        min_active_codes: int = 64,
+        max_prune_per_epoch: int = 32,
+        cooldown_epochs: int = 1,
+        k_consecutive: int = 1,
+        val_mae_target: float = 0.1,
+        val_mae_slack: float = 0.005,
+        ema_beta: float = 0.9,
+        eps: float = 1e-12,
+    ):
+        super().__init__()
+        self.num_codebook_vectors = num_codebook_vectors
+        self.start_epoch_prune = start_epoch_prune
+        self.min_active_codes = min_active_codes
+        self.max_prune_per_epoch = max_prune_per_epoch
+        self.cooldown_epochs = cooldown_epochs
+        self.k_consecutive = k_consecutive
+        self.val_mae_target = val_mae_target
+        self.val_mae_slack = val_mae_slack
+        self.ema_beta = ema_beta
+        self.eps = eps
+
+        self.register_buffer("active_codes", th.ones(num_codebook_vectors, dtype=th.bool))
+        # Initialize to a uniform prior to avoid overreacting to the first batches.
+        self.register_buffer("ema_usage", th.ones(num_codebook_vectors) / float(num_codebook_vectors))
+
+        self._cooldown = 0
+        self._ok_streak = 0
+
+    @property
+    def n_active(self) -> int:
+        return int(self.active_codes.sum().item())
+
+    @th.no_grad()
+    def update_stats(self, encoding_indices: th.Tensor) -> None:
+        """Update EMA token-usage statistics from a batch of encoding indices.
+
+        encoding_indices is expected to be a 1D tensor of length (B*H*W).
+        """
+        if encoding_indices.numel() == 0:
+            return
+        idx = encoding_indices.to(device=self.ema_usage.device, dtype=th.long)
+        counts = th.bincount(idx, minlength=self.num_codebook_vectors).float()
+        probs = counts / counts.sum().clamp_min(1.0)
+        self.ema_usage.mul_(self.ema_beta).add_(probs, alpha=1.0 - self.ema_beta)
+
+    @th.no_grad()
+    def maybe_prune(self, *, epoch: int, val_mae: float, codebook: nn.Module) -> bool:
+        """Returns True if a prune event occurred.
+
+        `codebook` is expected to be the Codebook instance (not the embedding table).
+        """
+        if epoch < self.start_epoch_prune:
+            return False
+        if self._cooldown > 0:
+            self._cooldown -= 1
+            return False
+
+        safe = val_mae <= (self.val_mae_target - self.val_mae_slack)
+        self._ok_streak = (self._ok_streak + 1) if safe else 0
+        if self._ok_streak < self.k_consecutive:
+            return False
+
+        active_idx = th.where(self.active_codes)[0]
+        if active_idx.numel() <= self.min_active_codes:
+            return False
+
+        # prune lowest-usage active codes
+        scores = self.ema_usage[active_idx]
+        n_can_prune = max(0, int(active_idx.numel() - self.min_active_codes))
+        n_prune = min(self.max_prune_per_epoch, n_can_prune)
+        if n_prune <= 0:
+            return False
+
+        _, order = th.sort(scores)  # ascending
+        prune_codes = active_idx[order[:n_prune]]
+
+        self.active_codes[prune_codes] = False
+        # Mirror into the actual codebook (enforced in Codebook.forward).
+        if hasattr(codebook, "active_codes"):
+            codebook.active_codes[prune_codes] = False
+
+        # Optional: hard-zero pruned embeddings for safety if they are ever looked up directly.
+        if hasattr(codebook, "embedding"):
+            codebook.embedding.weight.data[prune_codes] = 0.0
+
+        self._cooldown = self.cooldown_epochs
+        self._ok_streak = 0
+        return True
 ###########################################
 ########## GPT-2 BASE CODE BELOW ##########
 ###########################################
@@ -553,6 +543,17 @@ class LayerNorm(nn.Module):
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         return f.layer_norm(x, self.weight.shape, self.weight, self.bias, 1e-5)
+
+
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 50304  # GPT-2 uses 50257; padded to multiple of 64
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    dropout: float = 0.0
+    bias: bool = True  # GPT-2 uses biases in Linear/LayerNorm
 
 
 class CausalSelfAttention(nn.Module):
@@ -640,17 +641,6 @@ class Block(nn.Module):
     def forward(self, x: th.Tensor) -> th.Tensor:
         x = x + self.attn(self.ln_1(x))
         return x + self.mlp(self.ln_2(x))
-
-
-@dataclass
-class GPTConfig:
-    block_size: int = 1024
-    vocab_size: int = 50304  # GPT-2 uses 50257; padded to multiple of 64
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
-    dropout: float = 0.0
-    bias: bool = True  # GPT-2 uses biases in Linear/LayerNorm
 
 
 class GPT(nn.Module):
