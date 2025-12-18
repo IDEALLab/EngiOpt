@@ -50,7 +50,7 @@ class Codebook(nn.Module):
         first_batch: bool = False,
         contras_loss: bool = False,
         init: bool = False,
-        reinit_enabled: bool = True
+        reinit_enabled: bool = True,
     ):
         super().__init__()
 
@@ -105,6 +105,14 @@ class Codebook(nn.Module):
         else:
             raise ValueError(f"Unknown distance type: {self.distance!r}")
 
+        # Prevent selecting pruned/inactive codebook entries.
+        # This is required for consistency with downstream transformer masking of inactive tokens.
+        if hasattr(self, "active_codes"):
+            a = self.active_codes.to(device=d.device, dtype=th.bool)
+            if not bool(a.any()):
+                raise RuntimeError("All codebook entries are inactive (active_codes is all False).")
+            d = d.masked_fill(~a.view(1, -1), -float("inf"))
+
         # Encoding (take best index per token)
         _, indices = d.sort(dim=1)
         encoding_indices = indices[:, -1]
@@ -139,7 +147,17 @@ class Codebook(nn.Module):
                 elif self.anchor == "random":
                     random_feat = self.pool.query(z_flattened.detach())
                 else:  # "probrandom"
-                    norm_distance = f.softmax(d.t(), dim=1)
+                    # Use a safe logits tensor for sampling so inactive codes don't create all -inf rows -> NaNs in softmax.
+                    d_for_sample = d
+                    if hasattr(self, "active_codes"):
+                        a = self.active_codes.to(device=d.device, dtype=th.bool)
+                        if not bool(a.any()):
+                            raise RuntimeError("All codebook entries are inactive (active_codes is all False).")
+                        if (~a).any():
+                            d_for_sample = d.clone()
+                            d_for_sample[:, ~a] = 0.0  # any finite value works; inactive codes won't be updated anyway
+
+                    norm_distance = f.softmax(d_for_sample.t(), dim=1)
                     prob = th.multinomial(norm_distance, num_samples=1).view(-1)
                     random_feat = z_flattened.detach()[prob]
 
