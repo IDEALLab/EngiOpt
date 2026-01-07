@@ -36,6 +36,7 @@ As much as we can, we follow the [CleanRL](https://github.com/vwxyzjn/cleanrl) p
 [gan_cnn_2d](engiopt/gan_cnn_2d/) | Inverse Design | 2D | ❌ | GAN + CNN
 [surrogate_model](engiopt/surrogate_model/) | Surrogate Model | 1D | ❌ | MLP
 [vqgan](engiopt/vqgan) | Inverse Design | 2D | ✅ | VQVAE + Transformer
+[pixel_cnn_pp_2d](engiopt/pixel_cnn_pp_2d) | Inverse Design | 2D | ✅ | PixelCNN++ Autoregressive Model
 
 ## Dashboards
 The integration with WandB allows us to access live dashboards of our runs (on the cluster or not). We also upload the trained models there. You can access some of our runs at https://wandb.ai/engibench/engiopt.
