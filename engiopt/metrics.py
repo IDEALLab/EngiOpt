@@ -175,6 +175,7 @@ def metrics(
             - "fog": Average Final Optimality Gap (float).
             - "mmd": Maximum Mean Discrepancy (float).
             - "dpp": Determinantal Point Process diversity (float).
+            - "viol": Average violation ratio (float).
     """
     n_samples = len(gen_designs)
 
