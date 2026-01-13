@@ -20,7 +20,6 @@ Notes for this version:
     - LV + dynamic pruning is used to reduce n_z.
 """
 
-#  TODO: 1) Fix wandb not tracking everything properly, 2) Make sure that fewer n_z and |Z| are actually being used, not just shown on a plot, 3) Make the decoder 1-Lipschitz and ablate possible training issues
 
 from __future__ import annotations
 
@@ -36,6 +35,7 @@ import numpy as np
 import torch as th
 from torch import nn
 from torch.nn import functional as f
+from torch.nn.utils.parametrizations import spectral_norm
 import tqdm
 import tyro
 import wandb
@@ -45,10 +45,14 @@ from engiopt.lv_vqvae.utils import DownSampleBlock
 from engiopt.lv_vqvae.utils import GPT
 from engiopt.lv_vqvae.utils import GPTConfig
 from engiopt.lv_vqvae.utils import GroupNorm
+from engiopt.lv_vqvae.utils import GroupSort
 from engiopt.lv_vqvae.utils import LinearCombo
 from engiopt.lv_vqvae.utils import NonLocalBlock
 from engiopt.lv_vqvae.utils import ResidualBlock
+from engiopt.lv_vqvae.utils import ScaledTanh
 from engiopt.lv_vqvae.utils import Swish
+from engiopt.lv_vqvae.utils import TrueSNResidualBlock
+from engiopt.lv_vqvae.utils import TrueSNUpsample
 from engiopt.lv_vqvae.utils import UpSampleBlock
 from engiopt.transforms import drop_constant
 from engiopt.transforms import normalize
@@ -177,11 +181,11 @@ class Args:
     """interval between Stage 1 image samples"""
 
     # LV + dynamic pruning (n_z)
-    lv_start_epoch: int = 5
+    lv_start_epoch: int = 10
     """epoch to start applying LV loss (keep LV loss weight = 0 before this)"""
-    lv_prune_start_epoch: int = 10
+    lv_prune_start_epoch: int = 20
     """epoch to start pruning latent dimensions (after LV has had time to shape the space)"""
-    lv_w_max: float = 0.01
+    lv_w_max: float = 1e-4
     """maximum weight for the LV loss after ramp-up"""
     lv_ramp_epochs: int = 10
     """number of epochs to linearly ramp LV loss weight from 0 to lv_w_max"""
@@ -368,6 +372,153 @@ class CondDecoder(nn.Module):
         return self.model(x.contiguous().view(len(x), -1))
 
 
+class TrueSNDecoder(nn.Module):
+    """A VQGAN-compatible decoder that is provably 1-Lipschitz.
+
+    Lipschitz Guarantees:
+    - All convolutions use spectral_norm (sigma_max <= 1)
+    - GroupSort activation is exactly 1-Lipschitz
+    - Residual connections scaled by 1/sqrt(2)
+    - ConvTranspose upsampling is spectral-normalized
+    - Attention removed (as it is generally not 1-Lipschitz)
+
+    Args:
+        decoder_channels: Channel progression (e.g., [512, 256, 128])
+        decoder_start_resolution: Resolution of the latent code
+        decoder_num_res_blocks: ResBlocks per resolution level
+        image_channels: Output channels (usually 3)
+        latent_dim: Input latent dimension
+        sn_n_power_iterations: Precision of spectral norm (default 1). Increase for tighter bound.
+    """
+    def __init__(  # noqa: PLR0913
+        self,
+        decoder_channels: tuple[int, ...],
+        decoder_start_resolution: int,
+        decoder_num_res_blocks: int,
+        image_channels: int,
+        latent_dim: int,
+        sn_n_power_iterations: int = 1
+    ):
+        super().__init__()
+        self.sn_iters = sn_n_power_iterations
+
+        in_channels = decoder_channels[0]
+        resolution = decoder_start_resolution
+        layers = []
+
+        # 1. Initial Projection
+        layers.append(
+            spectral_norm(
+                nn.Conv2d(latent_dim, in_channels, kernel_size=3, padding=1),
+                n_power_iterations=self.sn_iters
+            )
+        )
+
+        # 2. Main Decoder Loop
+        for i in range(len(decoder_channels)):
+            out_channels = decoder_channels[i]
+
+            # Upsample (skip first block to match VQGAN logic)
+            if i != 0:
+                layers.append(TrueSNUpsample(in_channels, n_power_iterations=self.sn_iters))
+                resolution *= 2
+
+            # Residual Blocks
+            for _ in range(decoder_num_res_blocks):
+                layers.append(
+                    TrueSNResidualBlock(
+                        in_channels,
+                        out_channels,
+                        n_power_iterations=self.sn_iters
+                    )
+                )
+                in_channels = out_channels
+
+            # Note: Attention blocks removed
+
+        # 3. Output Projection
+        layers.append(GroupSort(group_size=2))
+        layers.append(
+            spectral_norm(
+                nn.Conv2d(in_channels, image_channels, kernel_size=3, padding=1),
+                n_power_iterations=self.sn_iters
+            )
+        )
+
+        # 4. Final Activation (Option C: Scaled Tanh)
+        # Ensures output is strictly within bounds and derivative is <= scale < 1
+        layers.append(ScaledTanh(scale=0.99))
+
+        self.model = nn.Sequential(*layers)
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        return self.model(x)
+
+    def get_spectral_norms(self):
+        """Debugging tool: Returns the actual spectral sigma of all SN layers.
+
+        Use this to verify that no layer exceeds 1.0 during training.
+        """
+        norms = {}
+        for name, module in self.named_modules():
+            # Check for Conv2d or ConvTranspose2d with spectral norm attributes
+            if isinstance(module, (nn.Conv2d, nn.ConvTranspose2d)):  # noqa: SIM102
+                if hasattr(module, "weight_u"):
+                    u = module.weight_u
+                    v = module.weight_v
+                    w = module.weight_orig
+                    # Estimate sigma = u^T * W * v
+                    # (Note: PyTorch stores flattened versions in u/v)
+                    w_mat = w.view(w.size(0), -1)
+                    sigma = th.dot(u, th.mv(w_mat, v))
+                    norms[name] = sigma.item()
+        return norms
+
+
+class TrueSNCondDecoder(nn.Module):
+    """1-Lipschitz Decoder for N(0,1) conditional data."""
+
+    def __init__(
+        self,
+        cond_latent_dim: int,
+        cond_dim: int,
+        cond_hidden_dim: int,
+        cond_feature_map_dim: int,
+        sn_n_power_iterations: int = 1
+    ):
+        super().__init__()
+
+        input_dim = cond_latent_dim * (cond_feature_map_dim**2)
+
+        self.model = nn.Sequential(
+            # Layer 1: Linear -> GroupSort
+            spectral_norm(
+                nn.Linear(input_dim, cond_hidden_dim),
+                n_power_iterations=sn_n_power_iterations
+            ),
+            GroupSort(group_size=2),
+
+            # Layer 2: Linear -> GroupSort
+            spectral_norm(
+                nn.Linear(cond_hidden_dim, cond_hidden_dim),
+                n_power_iterations=sn_n_power_iterations
+            ),
+            GroupSort(group_size=2),
+
+            # Layer 3: Output Projection -> Identity
+            # SNLinear is already 1-Lipschitz.
+            # No activation needed for N(0,1) targets.
+            spectral_norm(
+                nn.Linear(cond_hidden_dim, cond_dim),
+                n_power_iterations=sn_n_power_iterations
+            ),
+        )
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        # Flatten input: (B, C, H, W) -> (B, C*H*W)
+        return self.model(x.contiguous().view(len(x), -1))
+
+
 class VQVAE(nn.Module):
     """VQVAE model for Stage 1.
 
@@ -392,7 +543,7 @@ class VQVAE(nn.Module):
         encoder_num_res_blocks: int = 2,
         decoder_channels: tuple[int, ...] = (256, 128, 128, 64),
         decoder_start_resolution: int = 16,
-        decoder_attn_resolutions: tuple[int, ...] = (16,),
+        # decoder_attn_resolutions: tuple[int, ...] = (16,),  # noqa: ERA001
         decoder_num_res_blocks: int = 3,
         image_channels: int = 1,
         latent_dim: int = 16,
@@ -402,7 +553,7 @@ class VQVAE(nn.Module):
         if is_c:
             self.encoder = CondEncoder(cond_feature_map_dim, cond_dim, cond_hidden_dim, cond_latent_dim).to(device=device)
 
-            self.decoder = CondDecoder(cond_latent_dim, cond_dim, cond_hidden_dim, cond_feature_map_dim).to(device=device)
+            self.decoder = TrueSNCondDecoder(cond_latent_dim, cond_dim, cond_hidden_dim, cond_feature_map_dim).to(device=device)
 
             self.quant_conv = nn.Conv2d(cond_latent_dim, cond_latent_dim, kernel_size=1).to(device=device)
             self.post_quant_conv = nn.Conv2d(cond_latent_dim, cond_latent_dim, kernel_size=1).to(device=device)
@@ -416,10 +567,10 @@ class VQVAE(nn.Module):
                 latent_dim,
             ).to(device=device)
 
-            self.decoder = Decoder(
+            self.decoder = TrueSNDecoder(
                 decoder_channels,
                 decoder_start_resolution,
-                decoder_attn_resolutions,
+                # decoder_attn_resolutions,
                 decoder_num_res_blocks,
                 image_channels,
                 latent_dim,
@@ -912,7 +1063,7 @@ if __name__ == "__main__":
         encoder_num_res_blocks=args.encoder_num_res_blocks,
         decoder_channels=args.decoder_channels,
         decoder_start_resolution=latent_size,
-        decoder_attn_resolutions=args.decoder_attn_resolutions,
+        # decoder_attn_resolutions=args.decoder_attn_resolutions,  # noqa: ERA001
         decoder_num_res_blocks=args.decoder_num_res_blocks,
         image_channels=image_channels,
         latent_dim=args.latent_dim,

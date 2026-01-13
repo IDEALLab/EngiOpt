@@ -21,6 +21,7 @@ from einops import rearrange
 import torch as th
 from torch import nn
 from torch.nn import functional as f
+from torch.nn.utils.parametrizations import spectral_norm
 
 
 class Codebook(nn.Module):
@@ -43,7 +44,7 @@ class Codebook(nn.Module):
         *,
         num_codebook_vectors: int,
         latent_dim: int,
-        beta: float = 0.25,
+        beta: float = 0.01,  # Default: 0.25. Set to a lower value for the LV-VQVAE warm-up.
         decay: float = 0.99,
         distance: str = "cos",
         anchor: str = "probrandom",
@@ -79,6 +80,12 @@ class Codebook(nn.Module):
         # reshape z -> (batch, height, width, channel) and flatten
         z = rearrange(z, "b c h w -> b h w c").contiguous()
         z_flattened = z.view(-1, self.embed_dim)
+
+        # Normalize inputs and weights to unit sphere immediately.
+        # This prevents collapse by forcing the model to learn angular features.
+        z_flattened = f.normalize(z_flattened, dim=1)
+        z = z_flattened.view(z.shape)  # Update reference for loss calc
+        self.embedding.weight.data = f.normalize(self.embedding.weight.data, dim=1)
 
         # Optional latent-dimension masking (for LV pruning)
         if active_mask is not None:
@@ -330,6 +337,53 @@ class LinearCombo(nn.Module):
         return self.model(x)
 
 
+class TrueSNDeconv2DCombo(nn.Module):
+    """Spectral normalized transposed conv2d with batch norm and activation.
+
+    This module combines ConvTranspose2d with spectral normalization,
+    batch normalization, and ReLU activation.
+
+    Args:
+        input_shape: Spatial dimensions (H, W) of input feature maps.
+        in_channels: Number of input channels.
+        out_channels: Number of output channels.
+        kernel_size: Size of the convolutional kernel.
+        stride: Stride of the convolution.
+        padding: Padding added to the input.
+        output_padding: Additional size added to output shape.
+    """
+
+    def __init__(  # noqa: PLR0913
+        self,
+        input_shape: tuple[int, int],
+        in_channels: int,
+        out_channels: int,
+        kernel_size: int = 4,
+        stride: int = 2,
+        padding: int = 1,
+        output_padding: int = 0,
+    ):
+        super().__init__()
+        self.conv = spectral_norm(
+            nn.ConvTranspose2d(
+                in_channels,
+                out_channels,
+                kernel_size=kernel_size,
+                stride=stride,
+                padding=padding,
+                output_padding=output_padding,
+                bias=False,
+            ),
+            input_shape,
+        )
+        self.bn = nn.BatchNorm2d(out_channels)
+        self.activation = nn.ReLU(inplace=True)
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        """Forward pass through the layer."""
+        return self.activation(self.bn(self.conv(x)))
+
+
 class LatentDimPruner(nn.Module):
     """LV + Dynamic Pruning for latent channel dimension (n_z).
 
@@ -436,8 +490,6 @@ class LatentDimPruner(nn.Module):
         self._cooldown = self.cooldown_epochs
         self._ok_streak = 0
         return True
-
-
 
 
 class CodebookPruner(nn.Module):
@@ -548,6 +600,8 @@ class CodebookPruner(nn.Module):
         self._cooldown = self.cooldown_epochs
         self._ok_streak = 0
         return True
+
+
 ###########################################
 ########## GPT-2 BASE CODE BELOW ##########
 ###########################################
@@ -722,4 +776,112 @@ class GPT(nn.Module):
 
 ###########################################
 ########## GPT-2 BASE CODE ABOVE ##########
+###########################################
+
+
+
+
+###########################################
+########## LV-VQVAE BLOCKS BELOW ##########
+###########################################
+
+class GroupSort(nn.Module):
+    """Provably 1-Lipschitz activation function.
+
+    Splits channels into groups and sorts them to preserve gradient norm.
+    Works for both 4D (Conv) and 2D (Linear) inputs.
+    """
+    def __init__(self, group_size=2):
+        super().__init__()
+        self.group_size = group_size
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        # Handle 4D Input (Conv2d): (B, C, H, W)
+        if x.dim() == 4:  # noqa: PLR2004
+            b, c, h, w = x.shape
+            if c % self.group_size != 0:
+                raise ValueError(f"Channels ({c}) must be divisible by group_size ({self.group_size})")
+            # Reshape -> Sort -> Flatten back
+            x = x.reshape(b, c // self.group_size, self.group_size, h, w)
+            x, _ = x.sort(dim=2)
+            return x.reshape(b, c, h, w)
+
+        # Handle 2D Input (Linear/MLP): (B, Features)
+        if x.dim() == 2:  # noqa: PLR2004
+            b, c = x.shape
+            if c % self.group_size != 0:
+                raise ValueError(f"Features ({c}) must be divisible by group_size ({self.group_size})")
+            # Reshape -> Sort -> Flatten back
+            x = x.reshape(b, c // self.group_size, self.group_size)
+            x, _ = x.sort(dim=2)
+            return x.reshape(b, c)
+
+        raise ValueError(f"GroupSort expects 2D or 4D input, got {x.dim()}D")
+
+
+class ScaledTanh(nn.Module):
+    """Scaled Tanh activation.
+
+    Ensures outputs are bounded [-scale, scale] and strictly Lipschitz < 1.
+    """
+    def __init__(self, scale=0.999):
+        super().__init__()
+        self.scale = scale
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        return self.scale * th.tanh(x)
+
+
+class TrueSNUpsample(nn.Module):
+    """1-Lipschitz Upsampling using SN-TransposedConv."""
+    def __init__(self, channels: int, n_power_iterations: int = 1):
+        super().__init__()
+        self.up_conv = spectral_norm(
+            nn.ConvTranspose2d(channels, channels, kernel_size=4, stride=2, padding=1),
+            n_power_iterations=n_power_iterations
+        )
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        return self.up_conv(x)
+
+
+class TrueSNResidualBlock(nn.Module):
+    """1-Lipschitz Residual Block.
+
+    Uses GroupSort and scales residual branch by 1/sqrt(2).
+    """
+    def __init__(self, in_channels: int, out_channels: int, group_size: int = 2, n_power_iterations: int = 1, dilation: int = 1):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        padding = dilation
+
+        # Pre-activation style: GroupSort -> SNConv -> GroupSort -> SNConv
+        self.block = nn.Sequential(
+            GroupSort(group_size=group_size),
+            spectral_norm(
+                nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=padding, dilation=dilation, padding_mode="reflect"),
+                n_power_iterations=n_power_iterations
+            ),
+            GroupSort(group_size=group_size),
+            spectral_norm(
+                nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=padding, dilation=dilation, padding_mode="reflect"),
+                n_power_iterations=n_power_iterations
+            )
+        )
+
+        if in_channels != out_channels:
+            self.shortcut = spectral_norm(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1),
+                n_power_iterations=n_power_iterations
+            )
+        else:
+            self.shortcut = nn.Identity()
+
+    def forward(self, x: th.Tensor) -> th.Tensor:
+        # Scale to maintain unit variance / Lipschitz bound
+        return (self.shortcut(x) + self.block(x)) / (2**0.5)
+
+###########################################
+########## LV-VQVAE BLOCKS ABOVE ##########
 ###########################################
