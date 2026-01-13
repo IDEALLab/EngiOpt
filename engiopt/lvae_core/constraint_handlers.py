@@ -167,11 +167,7 @@ class WeightedSumHandler(ConstraintHandler):
     ) -> torch.Tensor:
         # Apply polynomial warmup schedule to volume weight
         volume_weight = self._get_volume_weight()
-        return (
-            volume_weight * self.w_v * losses.volume
-            + self.w_r * losses.reconstruction
-            + self.w_p * losses.performance
-        )
+        return volume_weight * self.w_v * losses.volume + self.w_r * losses.reconstruction + self.w_p * losses.performance
 
     def step(self, losses: ConstraintLosses, thresholds: ConstraintThresholds) -> None:
         pass  # No state to update
@@ -412,9 +408,7 @@ class PrimalDualHandler(ConstraintHandler):
         # Apply polynomial warmup schedule to volume loss
         volume_weight = self._get_volume_weight()
 
-        total_loss = (
-            volume_weight * losses.volume + self.lambda_r * rec_violation + self.lambda_p * perf_violation
-        )
+        total_loss = volume_weight * losses.volume + self.lambda_r * rec_violation + self.lambda_p * perf_violation
 
         return total_loss
 
@@ -554,11 +548,13 @@ class AdaptiveWeightHandler(ConstraintHandler):
 
         # Include gradient norms if available
         if self._grad_norms is not None:
-            metrics.update({
-                "constraint/grad_norm_volume": self._grad_norms["volume"],
-                "constraint/grad_norm_reconstruction": self._grad_norms["reconstruction"],
-                "constraint/grad_norm_performance": self._grad_norms["performance"],
-            })
+            metrics.update(
+                {
+                    "constraint/grad_norm_volume": self._grad_norms["volume"],
+                    "constraint/grad_norm_reconstruction": self._grad_norms["reconstruction"],
+                    "constraint/grad_norm_performance": self._grad_norms["performance"],
+                }
+            )
 
         return metrics
 
@@ -708,8 +704,6 @@ def create_constraint_handler(
     }
 
     if method not in handlers:
-        raise ValueError(
-            f"Unknown constraint method: {method}. " f"Available methods: {list(handlers.keys())}"
-        )
+        raise ValueError(f"Unknown constraint method: {method}. Available methods: {list(handlers.keys())}")
 
     return handlers[method](device=device, **kwargs)

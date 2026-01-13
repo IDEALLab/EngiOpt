@@ -1,14 +1,9 @@
-"""Neural network components for 1D LVAE models with Lipschitz constraints.
+"""1D-specific neural network components for LVAE models.
 
-This module provides building blocks for constructing spectrally normalized
-encoders and decoders that maintain 1-Lipschitz bounds, crucial for stable
-training of Least Volume Autoencoders (LVAE).
+This module provides building blocks specifically for 1D LVAE implementations,
+including convolutional encoders and Bezier curve decoders for airfoil problems.
 
 Key Components:
-- Normalizer: Min-max normalization/denormalization utility
-- Scale: Learnable or fixed scaling layer
-- MLP: Multi-layer perceptron with optional spectral normalization
-- SNMLP: Spectrally normalized MLP (Lipschitz ≤ 1)
 - Conv1DEncoder: 1D convolutional encoder
 - SNConv1DEncoder: Spectrally normalized 1D convolutional encoder
 - BezierLayer: Rational Bezier curve generation layer
@@ -16,9 +11,6 @@ Key Components:
 - FactorizedConv1DEncoder: Factorized encoder for sequences + auxiliary scalars
 - FactorizedBezierDecoder: Factorized Bezier decoder for curves + auxiliary outputs
 
-References:
-- Spectral Normalization: https://arxiv.org/abs/1802.05957
-- Least Volume Autoencoder: (add paper reference)
 """
 
 from __future__ import annotations
@@ -27,208 +19,26 @@ import torch as th
 from torch import nn
 from torch.nn.utils.parametrizations import spectral_norm
 
+from engiopt.lvae_core.components import (
+    MLP,
+    SNMLP,
+    Normalizer,
+    Scale,
+)
 
-class Normalizer:
-    """Min-max normalization utility for tensors.
-
-    Provides normalization and denormalization using min-max scaling to a
-    configurable target range. Useful for preprocessing inputs and postprocessing
-    outputs in neural networks.
-
-    Args:
-        min_val: Minimum value(s) for normalization (scalar or tensor)
-        max_val: Maximum value(s) for normalization (scalar or tensor)
-        target_range: Target range for normalized values (default: [0, 1])
-        eps: Small constant to avoid division by zero (default: 1e-7)
-
-    Example:
-        >>> # Normalize angles from [-10, 10] to [0, 1]
-        >>> normalizer = Normalizer(min_val=-10.0, max_val=10.0)
-        >>> angle_norm = normalizer.normalize(angle)  # → [0, 1]
-        >>> angle_orig = normalizer.denormalize(angle_norm)  # → [-10, 10]
-    """
-
-    def __init__(
-        self,
-        min_val: float | th.Tensor,
-        max_val: float | th.Tensor,
-        target_range: tuple[float, float] = (0.0, 1.0),
-        eps: float = 1e-7,
-    ):
-        """Initialize normalizer with min and max values.
-
-        Args:
-            min_val: Minimum value(s) for normalization
-            max_val: Maximum value(s) for normalization
-            target_range: Target range for normalization (default: [0, 1])
-            eps: Small constant to avoid division by zero
-        """
-        self.eps = eps
-        self.min_val = th.as_tensor(min_val) if not isinstance(min_val, th.Tensor) else min_val
-        self.max_val = th.as_tensor(max_val) if not isinstance(max_val, th.Tensor) else max_val
-        self.target_min, self.target_max = target_range
-
-    def normalize(self, x: th.Tensor) -> th.Tensor:
-        """Normalize input to target range.
-
-        Args:
-            x: Input tensor in original range
-
-        Returns:
-            Normalized tensor in target range
-        """
-        # First normalize to [0, 1]
-        x_01 = (x - self.min_val) / (self.max_val - self.min_val + self.eps)
-        # Then scale to target range
-        return x_01 * (self.target_max - self.target_min) + self.target_min
-
-    def denormalize(self, x: th.Tensor) -> th.Tensor:
-        """Denormalize input from target range to original range.
-
-        Args:
-            x: Normalized tensor in target range
-
-        Returns:
-            Denormalized tensor in original range
-        """
-        # First scale from target range to [0, 1]
-        x_01 = (x - self.target_min) / (self.target_max - self.target_min + self.eps)
-        # Then denormalize to original range
-        return x_01 * (self.max_val - self.min_val + self.eps) + self.min_val
-
-
-class Scale(nn.Module):
-    """Learnable or fixed scalar multiplication layer.
-
-    This layer multiplies input by a scalar value, useful for controlling
-    the Lipschitz constant of the overall network.
-
-    Args:
-        scale: Initial scale value (can be float or tensor)
-
-    Shape:
-        - Input: (*, H_in) where * means any number of dimensions
-        - Output: (*, H_in) same shape as input
-    """
-
-    def __init__(self, scale: float | th.Tensor) -> None:
-        super().__init__()
-        self.register_buffer("s", th.as_tensor(scale, dtype=th.float32))
-
-    def forward(self, x: th.Tensor) -> th.Tensor:
-        """Multiply input by scale factor.
-
-        Args:
-            x: Input tensor
-
-        Returns:
-            Scaled tensor: x * scale
-        """
-        return self.s * x
-
-
-class MLP(nn.Module):
-    """Multi-layer perceptron with flexible architecture.
-
-    Constructs a fully connected network with specified hidden layer widths.
-    The final layer is always a linear transformation without activation.
-    Hidden layers use LeakyReLU(0.2) activation by default.
-
-    Args:
-        in_features: Number of input features
-        out_features: Number of output features
-        hidden_widths: List of hidden layer widths (empty list = single linear layer)
-        activation: Activation function for hidden layers (default: LeakyReLU(0.2))
-        use_spectral_norm: Whether to apply spectral normalization (default: False)
-
-    Shape:
-        - Input: (N, H_in) where H_in = in_features
-        - Output: (N, H_out) where H_out = out_features
-
-    Example:
-        >>> mlp = MLP(128, 64, hidden_widths=[256, 128])
-        >>> # Network: 128 -> 256 -> 128 -> 64
-    """
-
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        hidden_widths: list[int],
-        activation: nn.Module | None = None,
-        use_spectral_norm: bool = False,
-    ):
-        super().__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.hidden_widths = list(hidden_widths)
-
-        if activation is None:
-            activation = nn.LeakyReLU(0.2)
-
-        # Build layer specifications: [in_features] + hidden_widths + [out_features]
-        layer_sizes = (
-            [in_features] + self.hidden_widths + [out_features]
-        )
-
-        # Build sequential model
-        layers: list[nn.Module] = []
-        for i in range(len(layer_sizes) - 1):
-            # Create linear layer
-            linear = nn.Linear(layer_sizes[i], layer_sizes[i + 1])
-            if use_spectral_norm:
-                linear = spectral_norm(linear)
-            layers.append(linear)
-
-            # Add activation for all layers except the last
-            if i < len(layer_sizes) - 2:
-                layers.append(activation)
-
-        self.model = nn.Sequential(*layers)
-
-    def forward(self, x: th.Tensor) -> th.Tensor:
-        """Forward pass through MLP.
-
-        Args:
-            x: Input tensor (N, in_features)
-
-        Returns:
-            Output tensor (N, out_features)
-        """
-        return self.model(x)
-
-
-class SNMLP(MLP):
-    """Spectrally normalized MLP with Lipschitz constant ≤ 1.
-
-    This is a convenience wrapper around MLP that automatically enables
-    spectral normalization on all linear layers.
-
-    Args:
-        in_features: Number of input features
-        out_features: Number of output features
-        hidden_widths: List of hidden layer widths
-        activation: Activation function for hidden layers (default: LeakyReLU(0.2))
-
-    Shape:
-        - Input: (N, H_in) where H_in = in_features
-        - Output: (N, H_out) where H_out = out_features
-    """
-
-    def __init__(
-        self,
-        in_features: int,
-        out_features: int,
-        hidden_widths: list[int],
-        activation: nn.Module | None = None,
-    ):
-        super().__init__(
-            in_features=in_features,
-            out_features=out_features,
-            hidden_widths=hidden_widths,
-            activation=activation,
-            use_spectral_norm=True,
-        )
+# Re-export for backward compatibility with existing imports
+__all__ = [
+    "BezierLayer",
+    "Conv1DEncoder",
+    "FactorizedBezierDecoder",
+    "FactorizedConv1DEncoder",
+    "MLP",
+    "Normalizer",
+    "SNBezierDecoder",
+    "SNMLP",
+    "SNConv1DEncoder",
+    "Scale",
+]
 
 
 class Conv1DEncoder(nn.Module):
@@ -251,11 +61,7 @@ class Conv1DEncoder(nn.Module):
 
     Example:
         >>> encoder = Conv1DEncoder(
-        ...     in_channels=2,
-        ...     in_features=192,
-        ...     latent_dim=100,
-        ...     conv_channels=[64, 128, 256],
-        ...     mlp_hidden=[512, 256]
+        ...     in_channels=2, in_features=192, latent_dim=100, conv_channels=[64, 128, 256], mlp_hidden=[512, 256]
         ... )
         >>> z = encoder(coords)  # coords shape: (B, 2, 192)
     """
@@ -299,7 +105,7 @@ class Conv1DEncoder(nn.Module):
         # Calculate flattened size after convolutions
         # Each conv layer with stride=2 halves the spatial dimension
         n_conv_layers = len(conv_channels)
-        final_length = in_features // (2 ** n_conv_layers)
+        final_length = in_features // (2**n_conv_layers)
         m_features = final_length * conv_channels[-1]
 
         # MLP to project to latent space
@@ -502,12 +308,7 @@ class SNBezierDecoder(nn.Module):
         - Output scalar: (N, 1)
 
     Example:
-        >>> decoder = SNBezierDecoder(
-        ...     latent_dim=100,
-        ...     n_control_points=64,
-        ...     n_data_points=192,
-        ...     lipschitz_scale=1.0
-        ... )
+        >>> decoder = SNBezierDecoder(latent_dim=100, n_control_points=64, n_data_points=192, lipschitz_scale=1.0)
         >>> coords, scalar = decoder(z)  # z shape: (B, 100)
 
     Note:
@@ -557,7 +358,7 @@ class SNBezierDecoder(nn.Module):
         # 2. Control Point and Weight (CPW) generator
         # 2a. Calculate required deconv input dimensions
         n_deconv_layers = len(cpw_deconv_channels) - 1
-        self.cpw_in_width = n_control_points // (2 ** n_deconv_layers)
+        self.cpw_in_width = n_control_points // (2**n_deconv_layers)
         self.cpw_in_channels = cpw_deconv_channels[0]
 
         # 2b. MLP to generate flattened deconv input
@@ -627,7 +428,7 @@ class SNBezierDecoder(nn.Module):
         x = self.cpw_dense(z).view(-1, self.cpw_in_channels, self.cpw_in_width)
         x = self.deconv(x)
         cp = self.cp_gen(x)  # (N, 2, n_control_points)
-        w = self.w_gen(x)    # (N, 1, n_control_points)
+        w = self.w_gen(x)  # (N, 1, n_control_points)
 
         # Generate Bezier curve
         coords, _, _ = self.bezier_layer(features, cp, w)
@@ -680,7 +481,7 @@ class FactorizedConv1DEncoder(nn.Module):
         ...     n_aux=1,
         ...     conv_channels=[64, 128, 256],
         ...     mlp_hidden=[512, 256],
-        ...     use_spectral_norm=True
+        ...     use_spectral_norm=True,
         ... )
         >>> z = encoder(coords, angle)  # coords: (B, 2, 192), angle: (B, 1)
     """
@@ -783,11 +584,7 @@ class FactorizedBezierDecoder(nn.Module):
 
     Example:
         >>> decoder = FactorizedBezierDecoder(
-        ...     latent_dim=100,
-        ...     n_aux=1,
-        ...     n_control_points=64,
-        ...     n_data_points=192,
-        ...     lipschitz_scale=1.0
+        ...     latent_dim=100, n_aux=1, n_control_points=64, n_data_points=192, lipschitz_scale=1.0
         ... )
         >>> coords, angle = decoder(z)  # z: (B, 100)
     """

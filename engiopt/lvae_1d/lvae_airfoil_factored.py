@@ -44,12 +44,12 @@ import tqdm
 import tyro
 import wandb
 
-from engiopt.lvae_1d.cmpnts import FactorizedBezierDecoder, FactorizedConv1DEncoder, Normalizer
-from engiopt.lvae_2d.aes import LeastVolumeAE_DynamicPruning
-from engiopt.lvae_2d.constraint_handlers import (
+from engiopt.lvae_1d.components_1d import FactorizedBezierDecoder, FactorizedConv1DEncoder, Normalizer
+from engiopt.lvae_core import (
     ConstraintHandler,
     ConstraintLosses,
     ConstraintThresholds,
+    LeastVolumeAE_DynamicPruning,
     create_constraint_handler,
 )
 

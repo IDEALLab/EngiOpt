@@ -30,6 +30,7 @@ import time
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import matplotlib.pyplot as plt
 import numpy as np
+from sklearn.preprocessing import RobustScaler
 import torch as th
 from torch import nn
 from torch.nn.utils.parametrizations import spectral_norm
@@ -39,16 +40,16 @@ from torch.utils.data import TensorDataset
 from torchvision import transforms
 import tqdm
 import tyro
-import wandb
 
-from engiopt.lvae_2d.constraint_handlers import ConstraintHandler
-from engiopt.lvae_2d.constraint_handlers import ConstraintLosses
-from engiopt.lvae_2d.constraint_handlers import ConstraintThresholds
-from engiopt.lvae_2d.constraint_handlers import create_constraint_handler
-from engiopt.lvae_2d.aes import InterpretableDesignLeastVolumeAE_DP
-from engiopt.lvae_2d.utils import SNLinearCombo
-from engiopt.lvae_2d.utils import spectral_norm_conv
-from engiopt.lvae_2d.utils import TrueSNDeconv2DCombo
+from engiopt.lvae_core import ConstrainedDesignLeastVolumeAE_DP
+from engiopt.lvae_core import ConstraintHandler
+from engiopt.lvae_core import ConstraintLosses
+from engiopt.lvae_core import ConstraintThresholds
+from engiopt.lvae_core import create_constraint_handler
+from engiopt.lvae_core import SNLinearCombo
+from engiopt.lvae_core import spectral_norm_conv
+from engiopt.lvae_core import TrueSNDeconv2DCombo
+import wandb
 
 
 @dataclass
@@ -151,8 +152,8 @@ class Args:
     """Epoch to start pruning dimensions."""
     beta: float = 0.9
     """Momentum for the pruning ratio calculation."""
-    eta: float = 1e-4
-    """Scaling factor for the volume loss."""
+    eta: float = 0
+    """Low volume offset to prevent gradient loss at zero volume."""
     resize_dimensions: tuple[int, int] = (100, 100)
     """Dimensions to resize input images to before encoding/decoding."""
 
@@ -169,7 +170,7 @@ class Args:
     """Lipschitz constant multiplier for TrueSNDecoder (1.0 = strict 1-Lipschitz, >1 = relaxed c-Lipschitz for higher expressiveness)."""
 
     # Dynamic pruning
-    pruning_strategy: str = "lognorm"
+    pruning_strategy: str = "plummet"
     """Which pruning strategy to use: [plummet, pca_cdf, lognorm, probabilistic]."""
     cdf_threshold: float = 0.99
     """(pca_cdf) Cumulative variance threshold."""
@@ -177,7 +178,7 @@ class Args:
     """(probabilistic) Sampling temperature."""
     plummet_threshold: float = 0.02
     """(plummet) Threshold for pruning dimensions."""
-    alpha: float = 0.2
+    alpha: float = 0
     """(lognorm) Weighting factor for blending reference and current distribution."""
     percentile: float = 0.01
     """(lognorm) Percentile threshold for pruning."""
@@ -358,106 +359,6 @@ class SNMLPPredictor(nn.Module):
         return self.net(x) * self.lipschitz_scale
 
 
-class ConfigIDLVAE(InterpretableDesignLeastVolumeAE_DP):
-    """Wrapper around InterpretableDesignLeastVolumeAE_DP with conditional/unconditional prediction.
-
-    This variant uses only the first perf_dim latent dimensions for performance prediction,
-    making those dimensions interpretable as performance-relevant features.
-
-    Supports multiple constraint optimization methods via constraint_handler.
-    """
-
-    def __init__(
-        self,
-        *args,
-        conditional_predictor: bool = True,
-        constraint_handler: ConstraintHandler,
-        reconstruction_threshold: float = 0.001,
-        performance_threshold: float = 0.01,
-        **kwargs,
-    ):
-        """Initialize with conditional flag and constraint handler.
-
-        Args:
-            conditional_predictor: If True, predictor uses [z[:perf_dim], c]. If False, uses only [z[:perf_dim]].
-            constraint_handler: Constraint optimization method handler
-            reconstruction_threshold: Constraint on reconstruction MSE
-            performance_threshold: Constraint on performance MSE
-            *args, **kwargs: Passed to parent InterpretableDesignLeastVolumeAE_DP
-        """
-        super().__init__(*args, **kwargs)
-        self.conditional_predictor = conditional_predictor
-        self.constraint_handler = constraint_handler
-        self.reconstruction_threshold = reconstruction_threshold
-        self.performance_threshold = performance_threshold
-
-    def loss(self, batch, **kwargs):
-        """Compute loss components and total loss using constraint handler.
-
-        Note: Performance values (p) should be pre-scaled externally before training.
-        Returns: [reconstruction_loss, performance_loss, volume_loss] for logging
-        """
-        x, c, p = batch  # p is already scaled externally
-        z = self.encode(x)
-        x_hat = self.decode(z)
-
-        # Update moving mean for pruning statistics
-        self._update_moving_mean(z)
-
-        # Only the first pdim dimensions are used for performance prediction
-        pz = z[:, : self.pdim]
-
-        # Conditional: predictor uses first perf_dim latent codes + conditions,
-        # otherwise uses only the first perf_dim latent codes
-        p_hat = self.predictor(th.cat([pz, c], dim=-1)) if self.conditional_predictor else self.predictor(pz)
-
-        # Compute individual loss components
-        reconstruction_loss = self.loss_rec(x, x_hat)
-        performance_loss = self.loss_rec(p, p_hat)  # Both already scaled
-        active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
-        volume_loss = active_ratio * self.loss_vol(z[:, ~self._p])
-
-        # Store components for handler
-        self._loss_components = ConstraintLosses(
-            volume=volume_loss,
-            reconstruction=reconstruction_loss,
-            performance=performance_loss,
-        )
-
-        # Return as tensor for logging
-        return th.stack([reconstruction_loss, performance_loss, volume_loss])
-
-    def compute_total_loss(self):
-        """Compute total loss using constraint handler.
-
-        This should be called after loss() to get the actual loss for backprop.
-        """
-        thresholds = ConstraintThresholds(
-            reconstruction=self.reconstruction_threshold,
-            performance=self.performance_threshold,
-        )
-        return self.constraint_handler.compute_loss(self._loss_components, thresholds)
-
-    def update_constraint_handler(self):
-        """Update constraint handler state (e.g., dual variables, barrier parameter)."""
-        thresholds = ConstraintThresholds(
-            reconstruction=self.reconstruction_threshold,
-            performance=self.performance_threshold,
-        )
-        # Detach loss components for handler updates
-        detached_losses = ConstraintLosses(
-            volume=self._loss_components.volume.detach(),
-            reconstruction=self._loss_components.reconstruction.detach(),
-            performance=self._loss_components.performance.detach(),
-        )
-        self.constraint_handler.step(detached_losses, thresholds)
-
-    def epoch_hook(self, epoch, *args, **kwargs):
-        """Update current epoch for constraint handler."""
-        super().epoch_hook(epoch, *args, **kwargs)
-        self.constraint_handler.epoch_hook(epoch)
-
-
 if __name__ == "__main__":
     args = tyro.cli(Args)
 
@@ -602,7 +503,7 @@ if __name__ == "__main__":
 
     # Initialize DesignLVAE with dynamic pruning and constraint handler
     # Always use interpretable version (generalizes to regular when perf_dim = latent_dim)
-    d_lvae = ConfigIDLVAE(
+    d_lvae = ConstrainedDesignLeastVolumeAE_DP(
         encoder=enc,
         decoder=dec,
         predictor=predictor,
@@ -612,7 +513,6 @@ if __name__ == "__main__":
         ),
         latent_dim=args.latent_dim,
         perf_dim=perf_dim,
-        weights=[1.0, 0.0, 1.0],  # Dummy weights (not directly used, handler controls loss)
         pruning_epoch=args.pruning_epoch,
         beta=args.beta,
         eta=args.eta,
@@ -649,8 +549,6 @@ if __name__ == "__main__":
     p_test = test_ds[problem.objectives_keys[0]][:].unsqueeze(-1)
 
     # Scale performance values using RobustScaler
-    from sklearn.preprocessing import RobustScaler
-
     p_scaler = RobustScaler()
     p_train_scaled = th.from_numpy(p_scaler.fit_transform(p_train.numpy())).to(p_train.dtype)
     p_val_scaled = th.from_numpy(p_scaler.transform(p_val.numpy())).to(p_val.dtype)

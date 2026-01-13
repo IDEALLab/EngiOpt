@@ -30,8 +30,7 @@ import tqdm
 import tyro
 import wandb
 
-from engiopt.lvae_2d.aes import LeastVolumeAE_DynamicPruning
-from engiopt.lvae_2d.utils import polynomial_schedule
+from engiopt.lvae_core import LeastVolumeAE_DynamicPruning, polynomial_schedule
 
 
 @dataclass
