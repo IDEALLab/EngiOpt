@@ -515,8 +515,9 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         z = self.encode(x)
         x_hat = self.decode(z)
         self._update_moving_mean(z)
-        m = self.dim / len(self._p)
-        return torch.stack([self.loss_rec(x, x_hat), m * self.loss_vol(z[:, ~self._p])])
+        # Volume loss over whole latent space (not scaled by active dimensions)
+        vol_loss = self.loss_vol(z[:, ~self._p]) if (~self._p).any() else torch.tensor(0.0, device=z.device)
+        return torch.stack([self.loss_rec(x, x_hat), vol_loss])
 
     @torch.no_grad()
     def _update_moving_mean(self, z):
@@ -733,13 +734,14 @@ class DesignLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         p_hat_n = self._norm_perf(p_hat)
 
         # Note: _update_moving_mean and pruning logic handled by parent class
-        active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
+        # Volume loss over whole latent space (not scaled by active dimensions)
+        vol_loss = self.loss_vol(z[:, ~self._p]) if (~self._p).any() else torch.tensor(0.0, device=z.device)
 
         return torch.stack(
             [
                 self.loss_rec(x, x_hat),
                 self.loss_rec(p_n, p_hat_n),  # normalized prediction loss
-                active_ratio * self.loss_vol(z[:, ~self._p]),
+                vol_loss,
             ]
         )
 
@@ -848,13 +850,14 @@ class InterpretableDesignLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa
         p_hat = self.predictor(torch.cat([pz, c], dim=-1))
 
         # Direct MSE on pre-scaled values (no runtime normalization)
-        active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
+        # Volume loss over whole latent space (not scaled by active dimensions)
+        vol_loss = self.loss_vol(z[:, ~self._p]) if (~self._p).any() else torch.tensor(0.0, device=z.device)
 
         return torch.stack(
             [
                 self.loss_rec(x, x_hat),
                 self.loss_rec(p, p_hat),  # Both already scaled
-                active_ratio * self.loss_vol(z[:, ~self._p]),
+                vol_loss,
             ]
         )
 
@@ -943,6 +946,20 @@ class ConstrainedDesignLeastVolumeAE_DP(InterpretableDesignLeastVolumeAE_DP):  #
         self.reconstruction_threshold = reconstruction_threshold
         self.performance_threshold = performance_threshold
         self._loss_components: ConstraintLosses | None = None  # Cache for constraint handler
+        self._constraints_satisfied = False  # Track if constraints are satisfied for pruning
+
+    def _check_constraints_satisfied(self) -> bool:
+        """Check if reconstruction and performance constraints are satisfied.
+
+        Returns:
+            True if both constraints are satisfied, False otherwise
+        """
+        if self._loss_components is None:
+            return False
+
+        recon_satisfied = self._loss_components.reconstruction.item() <= self.reconstruction_threshold
+        perf_satisfied = self._loss_components.performance.item() <= self.performance_threshold
+        return recon_satisfied and perf_satisfied
 
     def epoch_hook(self, epoch, *args, **kwargs):
         """Update weight schedule and constraint handler epoch."""
@@ -974,8 +991,8 @@ class ConstrainedDesignLeastVolumeAE_DP(InterpretableDesignLeastVolumeAE_DP):  #
         # Compute individual loss components
         reconstruction_loss = self.loss_rec(x, x_hat)
         performance_loss = self.loss_rec(p, p_hat)
-        active_ratio = self.dim / len(self._p)
-        volume_loss = active_ratio * self.loss_vol(z[:, ~self._p])
+        # Volume loss over whole latent space (not scaled by active dimensions)
+        volume_loss = self.loss_vol(z[:, ~self._p]) if (~self._p).any() else torch.tensor(0.0, device=z.device)
 
         # Import here to avoid circular dependency
         from engiopt.lvae_core.constraint_handlers import ConstraintLosses
@@ -1028,3 +1045,17 @@ class ConstrainedDesignLeastVolumeAE_DP(InterpretableDesignLeastVolumeAE_DP):  #
     def get_constraint_metrics(self) -> dict[str, float]:
         """Get constraint handler metrics for logging."""
         return self.constraint_handler.get_metrics()
+
+    def _prune_step(self, epoch, val_recon=None):
+        """Core pruning step with constraint satisfaction check.
+
+        Overrides parent to add check: pruning only occurs when both reconstruction
+        and performance constraints are satisfied.
+        """
+        # First check if constraints are satisfied
+        if not self._check_constraints_satisfied():
+            # Constraints not satisfied - skip pruning
+            return
+
+        # Constraints satisfied - proceed with normal pruning logic
+        super()._prune_step(epoch, val_recon=val_recon)

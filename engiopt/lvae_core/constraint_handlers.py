@@ -191,24 +191,28 @@ class AugmentedLagrangianHandler(ConstraintHandler):
     Lagrange multipliers (λ) are updated via gradient ascent:
         λ ← max(0, λ + α * violation)
 
+    IMPORTANT: Penalty coefficients (μ) must be large enough to compete with volume loss!
+    Volume loss is typically O(1), while reconstruction is O(0.001-0.01), requiring
+    penalty coefficients of 100-1000 to provide adequate pressure on constraints.
+
     Args:
-        mu_r_init: Initial quadratic penalty coefficient for reconstruction (default: 1.0)
-        mu_p_init: Initial quadratic penalty coefficient for performance (default: 1.0)
-        mu_r_final: Final quadratic penalty coefficient for reconstruction (default: 10.0)
-        mu_p_final: Final quadratic penalty coefficient for performance (default: 10.0)
-        alpha_r: Learning rate for reconstruction multiplier (default: 0.1)
-        alpha_p: Learning rate for performance multiplier (default: 0.1)
+        mu_r_init: Initial quadratic penalty coefficient for reconstruction (default: 100.0)
+        mu_p_init: Initial quadratic penalty coefficient for performance (default: 100.0)
+        mu_r_final: Final quadratic penalty coefficient for reconstruction (default: 1000.0)
+        mu_p_final: Final quadratic penalty coefficient for performance (default: 1000.0)
+        alpha_r: Learning rate for reconstruction multiplier (default: 1.0)
+        alpha_p: Learning rate for performance multiplier (default: 1.0)
         warmup_epochs: Epochs to linearly ramp up penalty coefficients (default: 100)
     """
 
     def __init__(
         self,
-        mu_r_init: float = 1.0,
-        mu_p_init: float = 1.0,
-        mu_r_final: float = 10.0,
-        mu_p_final: float = 10.0,
-        alpha_r: float = 0.1,
-        alpha_p: float = 0.1,
+        mu_r_init: float = 100.0,  # Increased default from 1.0 to 100.0
+        mu_p_init: float = 100.0,  # Increased default from 1.0 to 100.0
+        mu_r_final: float = 1000.0,  # Increased default from 10.0 to 1000.0
+        mu_p_final: float = 1000.0,  # Increased default from 10.0 to 1000.0
+        alpha_r: float = 1.0,  # Increased default from 0.1 to 1.0 for faster adaptation
+        alpha_p: float = 1.0,  # Increased default from 0.1 to 1.0 for faster adaptation
         warmup_epochs: int = 100,
         device: torch.device = torch.device("cpu"),
         volume_warmup_epochs: int = 0,
@@ -222,9 +226,10 @@ class AugmentedLagrangianHandler(ConstraintHandler):
         self.alpha_p = alpha_p
         self.warmup_epochs = warmup_epochs
 
-        # State variables
-        self.lambda_r = torch.tensor(0.0, device=device)
-        self.lambda_p = torch.tensor(0.0, device=device)
+        # State variables - initialize with positive values (warm start)
+        # Provides immediate attention to constraints instead of zero-initialization
+        self.lambda_r = torch.tensor(1.0, device=device)
+        self.lambda_p = torch.tensor(1.0, device=device)
 
     def _get_penalty_coefficients(self) -> tuple[float, float]:
         """Get current penalty coefficients based on warmup schedule."""
@@ -576,22 +581,29 @@ class SoftplusALHandler(ConstraintHandler):
         - Otherwise identical to augmented Lagrangian
         - Easy drop-in replacement
 
+    IMPORTANT: Like AugmentedLagrangianHandler, penalty coefficients must be scaled
+    appropriately (100-1000) to compete with volume loss magnitude.
+
     Args:
         beta: Smoothness parameter for softplus (default: 10.0, larger = sharper)
-        mu_r_init, mu_p_init, mu_r_final, mu_p_final: Penalty coefficients
-        alpha_r, alpha_p: Multiplier learning rates
-        warmup_epochs: Penalty coefficient warmup duration
+        mu_r_init: Initial penalty coefficient for reconstruction (default: 100.0)
+        mu_p_init: Initial penalty coefficient for performance (default: 100.0)
+        mu_r_final: Final penalty coefficient for reconstruction (default: 1000.0)
+        mu_p_final: Final penalty coefficient for performance (default: 1000.0)
+        alpha_r: Multiplier learning rate for reconstruction (default: 1.0)
+        alpha_p: Multiplier learning rate for performance (default: 1.0)
+        warmup_epochs: Penalty coefficient warmup duration (default: 100)
     """
 
     def __init__(
         self,
         beta: float = 10.0,
-        mu_r_init: float = 1.0,
-        mu_p_init: float = 1.0,
-        mu_r_final: float = 10.0,
-        mu_p_final: float = 10.0,
-        alpha_r: float = 0.1,
-        alpha_p: float = 0.1,
+        mu_r_init: float = 100.0,  # Increased default from 1.0 to 100.0
+        mu_p_init: float = 100.0,  # Increased default from 1.0 to 100.0
+        mu_r_final: float = 1000.0,  # Increased default from 10.0 to 1000.0
+        mu_p_final: float = 1000.0,  # Increased default from 10.0 to 1000.0
+        alpha_r: float = 1.0,  # Increased default from 0.1 to 1.0
+        alpha_p: float = 1.0,  # Increased default from 0.1 to 1.0
         warmup_epochs: int = 100,
         device: torch.device = torch.device("cpu"),
         volume_warmup_epochs: int = 0,
@@ -606,9 +618,9 @@ class SoftplusALHandler(ConstraintHandler):
         self.alpha_p = alpha_p
         self.warmup_epochs = warmup_epochs
 
-        # State variables
-        self.lambda_r = torch.tensor(0.0, device=device)
-        self.lambda_p = torch.tensor(0.0, device=device)
+        # State variables - warm start
+        self.lambda_r = torch.tensor(1.0, device=device)
+        self.lambda_p = torch.tensor(1.0, device=device)
 
     def _get_penalty_coefficients(self) -> tuple[float, float]:
         """Get current penalty coefficients based on warmup schedule."""

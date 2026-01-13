@@ -349,8 +349,8 @@ class ConstrainedLVAE(LeastVolumeAE_DynamicPruning):
 
         # Compute individual loss components
         reconstruction_loss = self.loss_rec(x, x_hat)
-        active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
-        volume_loss = active_ratio * self.loss_vol(z[:, ~self._p])
+        # active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
+        volume_loss = self.loss_vol(z[:, ~self._p])
 
         # Store components for handler (performance=0 since no performance prediction)
         self._loss_components = ConstraintLosses(
