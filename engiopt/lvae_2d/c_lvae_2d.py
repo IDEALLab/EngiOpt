@@ -98,11 +98,11 @@ class Args:
     """Weight for reconstruction loss in weighted sum method."""
 
     # Augmented Lagrangian parameters (used when constraint_method='augmented_lagrangian' or 'softplus_al')
-    alpha_r: float = 0.1
+    alpha_r: float = 1.0
     """Learning rate for reconstruction Lagrange multiplier (dual ascent)."""
-    mu_r_init: float = 1.0
+    mu_r_init: float = 100.0
     """Initial penalty coefficient for reconstruction constraint."""
-    mu_r: float = 10.0
+    mu_r: float = 1000.0
     """Final penalty coefficient for reconstruction constraint (augmented Lagrangian)."""
     warmup_epochs: int = 100
     """Number of epochs to linearly ramp up penalty coefficients (mu_r) from init to final values."""
