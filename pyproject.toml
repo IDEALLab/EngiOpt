@@ -27,7 +27,7 @@ dependencies = [
     "numpy",
     "torch >= 2.5.0",
     "torchvision >= 0.20.1",
-    "wandb == 0.22.0",  #https://github.com/wandb/wandb/issues/10647
+    "wandb >= 0.22.0",
     "tqdm >= 4.67.1",
     "matplotlib >= 3.9.2",
     "denoising_diffusion_pytorch",
