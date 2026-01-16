@@ -20,12 +20,12 @@ from torch.utils.data import TensorDataset
 from torchvision import transforms
 import tqdm
 import tyro
-import wandb
 
-from engiopt.lvae_2d.aes import LeastVolumeAE_DynamicPruning
-from engiopt.lvae_2d.utils import polynomial_schedule
-from engiopt.lvae_2d.utils import spectral_norm_conv
-from engiopt.lvae_2d.utils import TrueSNDeconv2DCombo
+from engiopt.lvae_core import LeastVolumeAE_DynamicPruning
+from engiopt.lvae_core import polynomial_schedule
+from engiopt.lvae_core import spectral_norm_conv
+from engiopt.lvae_core import TrueSNDeconv2DCombo
+import wandb
 
 
 @dataclass
@@ -69,13 +69,13 @@ class Args:
     """Epoch to start pruning dimensions."""
     beta: float = 0.9
     """Momentum for the pruning ratio calculation."""
-    eta: float = 1e-4
-    """Scaling factor for the volume loss."""
+    eta: float = 0
+    """Low volume offset to prevent gradient loss at zero volume."""
     resize_dimensions: tuple[int, int] = (100, 100)
     """Dimensions to resize input images to before encoding/decoding."""
 
     # Dynamic pruning
-    pruning_strategy: str = "lognorm"
+    pruning_strategy: str = "plummet"
     """Which pruning strategy to use: [plummet, pca_cdf, lognorm, probabilistic]."""
     cdf_threshold: float = 0.99
     """(pca_cdf) Cumulative variance threshold."""

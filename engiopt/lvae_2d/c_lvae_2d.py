@@ -40,13 +40,15 @@ import tqdm
 import tyro
 import wandb
 
-from engiopt.lvae_2d.aes import LeastVolumeAE_DynamicPruning
-from engiopt.lvae_2d.constraint_handlers import ConstraintHandler
-from engiopt.lvae_2d.constraint_handlers import ConstraintLosses
-from engiopt.lvae_2d.constraint_handlers import ConstraintThresholds
-from engiopt.lvae_2d.constraint_handlers import create_constraint_handler
-from engiopt.lvae_2d.utils import spectral_norm_conv
-from engiopt.lvae_2d.utils import TrueSNDeconv2DCombo
+from engiopt.lvae_core import (
+    ConstraintHandler,
+    ConstraintLosses,
+    ConstraintThresholds,
+    LeastVolumeAE_DynamicPruning,
+    TrueSNDeconv2DCombo,
+    create_constraint_handler,
+    spectral_norm_conv,
+)
 
 
 @dataclass
@@ -96,11 +98,11 @@ class Args:
     """Weight for reconstruction loss in weighted sum method."""
 
     # Augmented Lagrangian parameters (used when constraint_method='augmented_lagrangian' or 'softplus_al')
-    alpha_r: float = 0.1
+    alpha_r: float = 1.0
     """Learning rate for reconstruction Lagrange multiplier (dual ascent)."""
-    mu_r_init: float = 1.0
+    mu_r_init: float = 100.0
     """Initial penalty coefficient for reconstruction constraint."""
-    mu_r: float = 10.0
+    mu_r: float = 1000.0
     """Final penalty coefficient for reconstruction constraint (augmented Lagrangian)."""
     warmup_epochs: int = 100
     """Number of epochs to linearly ramp up penalty coefficients (mu_r) from init to final values."""
@@ -305,7 +307,7 @@ class ConstrainedLVAE(LeastVolumeAE_DynamicPruning):
     """Wrapper around LeastVolumeAE_DynamicPruning with constraint-based optimization.
 
     This variant omits performance prediction and only minimizes volume subject to
-    reconstruction constraints (like lvae_airfoil.py but for 2D problems).
+    reconstruction constraints.
 
     Supports multiple constraint optimization methods via constraint_handler.
     """
@@ -347,8 +349,8 @@ class ConstrainedLVAE(LeastVolumeAE_DynamicPruning):
 
         # Compute individual loss components
         reconstruction_loss = self.loss_rec(x, x_hat)
-        active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
-        volume_loss = active_ratio * self.loss_vol(z[:, ~self._p])
+        # active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
+        volume_loss = self.loss_vol(z[:, ~self._p])
 
         # Store components for handler (performance=0 since no performance prediction)
         self._loss_components = ConstraintLosses(
@@ -447,53 +449,65 @@ if __name__ == "__main__":
     # Create constraint handler based on method
     handler_kwargs = {"device": device, "volume_warmup_epochs": args.volume_warmup_epochs}
     if args.constraint_method == "weighted_sum":
-        handler_kwargs.update({
-            "w_volume": args.w_volume,
-            "w_reconstruction": args.w_reconstruction,
-            "w_performance": 0.0,  # Not used
-        })
+        handler_kwargs.update(
+            {
+                "w_volume": args.w_volume,
+                "w_reconstruction": args.w_reconstruction,
+                "w_performance": 0.0,  # Not used
+            }
+        )
     elif args.constraint_method == "augmented_lagrangian":
-        handler_kwargs.update({
-            "mu_r_init": args.mu_r_init,
-            "mu_p_init": 0.0,  # Not used
-            "mu_r_final": args.mu_r,
-            "mu_p_final": 0.0,
-            "alpha_r": args.alpha_r,
-            "alpha_p": 0.0,  # Not used
-            "warmup_epochs": args.warmup_epochs,
-        })
+        handler_kwargs.update(
+            {
+                "mu_r_init": args.mu_r_init,
+                "mu_p_init": 0.0,  # Not used
+                "mu_r_final": args.mu_r,
+                "mu_p_final": 0.0,
+                "alpha_r": args.alpha_r,
+                "alpha_p": 0.0,  # Not used
+                "warmup_epochs": args.warmup_epochs,
+            }
+        )
     elif args.constraint_method == "log_barrier":
-        handler_kwargs.update({
-            "t_init": args.t_init,
-            "t_growth": args.t_growth,
-            "t_max": args.t_max,
-            "epsilon": args.barrier_epsilon,
-            "fallback_penalty": args.fallback_penalty,
-        })
+        handler_kwargs.update(
+            {
+                "t_init": args.t_init,
+                "t_growth": args.t_growth,
+                "t_max": args.t_max,
+                "epsilon": args.barrier_epsilon,
+                "fallback_penalty": args.fallback_penalty,
+            }
+        )
     elif args.constraint_method == "primal_dual":
-        handler_kwargs.update({
-            "lr_dual": args.lr_dual,
-            "clip_lambda": args.clip_lambda,
-        })
+        handler_kwargs.update(
+            {
+                "lr_dual": args.lr_dual,
+                "clip_lambda": args.clip_lambda,
+            }
+        )
     elif args.constraint_method == "adaptive":
-        handler_kwargs.update({
-            "w_volume_init": args.w_volume,
-            "w_reconstruction_init": args.w_reconstruction,
-            "w_performance_init": 0.0,  # Not used
-            "adaptation_lr": args.adaptation_lr,
-            "update_frequency": args.update_frequency,
-        })
+        handler_kwargs.update(
+            {
+                "w_volume_init": args.w_volume,
+                "w_reconstruction_init": args.w_reconstruction,
+                "w_performance_init": 0.0,  # Not used
+                "adaptation_lr": args.adaptation_lr,
+                "update_frequency": args.update_frequency,
+            }
+        )
     elif args.constraint_method == "softplus_al":
-        handler_kwargs.update({
-            "beta": args.softplus_beta,
-            "mu_r_init": args.mu_r_init,
-            "mu_p_init": 0.0,
-            "mu_r_final": args.mu_r,
-            "mu_p_final": 0.0,
-            "alpha_r": args.alpha_r,
-            "alpha_p": 0.0,
-            "warmup_epochs": args.warmup_epochs,
-        })
+        handler_kwargs.update(
+            {
+                "beta": args.softplus_beta,
+                "mu_r_init": args.mu_r_init,
+                "mu_p_init": 0.0,
+                "mu_r_final": args.mu_r,
+                "mu_p_final": 0.0,
+                "alpha_r": args.alpha_r,
+                "alpha_p": 0.0,
+                "warmup_epochs": args.warmup_epochs,
+            }
+        )
     else:
         raise ValueError(f"Unknown constraint_method: {args.constraint_method}")
 

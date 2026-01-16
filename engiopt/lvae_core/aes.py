@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 from types import SimpleNamespace
+from typing import TYPE_CHECKING
 
 from scipy.stats import norm
 import torch
@@ -24,6 +25,9 @@ from torch.distributions.independent import Independent
 from torch.distributions.kl import kl_divergence
 import torch.nn.functional as f
 from tqdm import tqdm
+
+if TYPE_CHECKING:
+    from engiopt.lvae_core.constraint_handlers import ConstraintHandler, ConstraintLosses, ConstraintThresholds
 
 
 class _AutoEncoder(nn.Module):
@@ -511,8 +515,9 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         z = self.encode(x)
         x_hat = self.decode(z)
         self._update_moving_mean(z)
-        m = self.dim / len(self._p)
-        return torch.stack([self.loss_rec(x, x_hat), m * self.loss_vol(z[:, ~self._p])])
+        # Volume loss over whole latent space (not scaled by active dimensions)
+        vol_loss = self.loss_vol(z[:, ~self._p]) if (~self._p).any() else torch.tensor(0.0, device=z.device)
+        return torch.stack([self.loss_rec(x, x_hat), vol_loss])
 
     @torch.no_grad()
     def _update_moving_mean(self, z):
@@ -729,13 +734,14 @@ class DesignLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         p_hat_n = self._norm_perf(p_hat)
 
         # Note: _update_moving_mean and pruning logic handled by parent class
-        active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
+        # Volume loss over whole latent space (not scaled by active dimensions)
+        vol_loss = self.loss_vol(z[:, ~self._p]) if (~self._p).any() else torch.tensor(0.0, device=z.device)
 
         return torch.stack(
             [
                 self.loss_rec(x, x_hat),
                 self.loss_rec(p_n, p_hat_n),  # normalized prediction loss
-                active_ratio * self.loss_vol(z[:, ~self._p]),
+                vol_loss,
             ]
         )
 
@@ -844,12 +850,212 @@ class InterpretableDesignLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa
         p_hat = self.predictor(torch.cat([pz, c], dim=-1))
 
         # Direct MSE on pre-scaled values (no runtime normalization)
-        active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
+        # Volume loss over whole latent space (not scaled by active dimensions)
+        vol_loss = self.loss_vol(z[:, ~self._p]) if (~self._p).any() else torch.tensor(0.0, device=z.device)
 
         return torch.stack(
             [
                 self.loss_rec(x, x_hat),
                 self.loss_rec(p, p_hat),  # Both already scaled
-                active_ratio * self.loss_vol(z[:, ~self._p]),
+                vol_loss,
             ]
         )
+
+
+class ConstrainedDesignLeastVolumeAE_DP(InterpretableDesignLeastVolumeAE_DP):  # noqa: N801
+    """Interpretable design LVAE with constraint handling for multi-objective optimization.
+
+    Extends InterpretableDesignLeastVolumeAE_DP to support various constraint optimization
+    methods (weighted sum, augmented Lagrangian, log barrier, etc.) for balancing
+    reconstruction, performance, and volume objectives.
+
+    This eliminates the need for wrapper classes in training scripts - all constraint
+    handling logic is built into this base class.
+    """
+
+    def __init__(  # noqa: PLR0913
+        self,
+        encoder,
+        decoder,
+        predictor,
+        optimizer,
+        latent_dim,
+        perf_dim,
+        constraint_handler,
+        reconstruction_threshold: float = 0.001,
+        performance_threshold: float = 0.01,
+        *,
+        conditional_predictor: bool = True,
+        weights=None,
+        w_r: float | None = None,
+        w_p: float | None = None,
+        w_v: float | None = None,
+        eta=1,
+        beta=0.9,
+        ratio_threshold=0.02,
+        pruning_epoch=500,
+        pruning_strategy="plummet",
+        pruning_params=None,
+        min_active_dims: int = 0,
+        max_prune_per_epoch: int | None = None,
+        cooldown_epochs: int = 0,
+        k_consecutive: int = 1,
+        recon_tol: float = float("inf"),
+    ):
+        """Initialize constrained design LVAE.
+
+        Args:
+            encoder: Encoder network
+            decoder: Decoder network
+            predictor: Performance prediction network
+            optimizer: Optimizer instance
+            latent_dim: Total latent dimensions
+            perf_dim: Number of dimensions for performance prediction
+            constraint_handler: ConstraintHandler instance for multi-objective optimization
+            reconstruction_threshold: Constraint threshold for reconstruction loss
+            performance_threshold: Constraint threshold for performance loss
+            conditional_predictor: Whether predictor uses conditions (True) or only latent (False)
+            All other args: Same as InterpretableDesignLeastVolumeAE_DP
+        """
+        super().__init__(
+            encoder=encoder,
+            decoder=decoder,
+            predictor=predictor,
+            optimizer=optimizer,
+            latent_dim=latent_dim,
+            perf_dim=perf_dim,
+            weights=weights,
+            w_r=w_r,
+            w_p=w_p,
+            w_v=w_v,
+            eta=eta,
+            beta=beta,
+            ratio_threshold=ratio_threshold,
+            pruning_epoch=pruning_epoch,
+            pruning_strategy=pruning_strategy,
+            pruning_params=pruning_params,
+            min_active_dims=min_active_dims,
+            max_prune_per_epoch=max_prune_per_epoch,
+            cooldown_epochs=cooldown_epochs,
+            k_consecutive=k_consecutive,
+            recon_tol=recon_tol,
+        )
+
+        self.conditional_predictor = conditional_predictor
+        self.constraint_handler: ConstraintHandler = constraint_handler
+        self.reconstruction_threshold = reconstruction_threshold
+        self.performance_threshold = performance_threshold
+        self._loss_components: ConstraintLosses | None = None  # Cache for constraint handler
+        self._constraints_satisfied = False  # Track if constraints are satisfied for pruning
+
+    def _check_constraints_satisfied(self) -> bool:
+        """Check if reconstruction and performance constraints are satisfied.
+
+        Returns:
+            True if both constraints are satisfied, False otherwise
+        """
+        if self._loss_components is None:
+            return False
+
+        recon_satisfied = self._loss_components.reconstruction.item() <= self.reconstruction_threshold
+        perf_satisfied = self._loss_components.performance.item() <= self.performance_threshold
+        return recon_satisfied and perf_satisfied
+
+    def epoch_hook(self, epoch, *args, **kwargs):
+        """Update weight schedule and constraint handler epoch."""
+        super().epoch_hook(epoch, *args, **kwargs)
+        self.constraint_handler.epoch_hook(epoch)
+
+    def loss(self, batch, **kwargs):  # noqa: ARG002
+        """Compute loss components and cache for constraint handler.
+
+        Returns individual loss components for logging: [reconstruction, performance, volume]
+        Call compute_total_loss() after this to get the actual backprop loss.
+        """
+        x, c, p = batch
+        z = self.encode(x)
+        x_hat = self.decode(z)
+
+        # Update moving mean for pruning statistics
+        self._update_moving_mean(z)
+
+        # Only the first pdim dimensions are used for performance prediction
+        pz = z[:, : self.pdim]
+
+        # Conditional: use [z[:perf_dim], c] or just z[:perf_dim]
+        if self.conditional_predictor:
+            p_hat = self.predictor(torch.cat([pz, c], dim=-1))
+        else:
+            p_hat = self.predictor(pz)
+
+        # Compute individual loss components
+        reconstruction_loss = self.loss_rec(x, x_hat)
+        performance_loss = self.loss_rec(p, p_hat)
+        # Volume loss over whole latent space (not scaled by active dimensions)
+        volume_loss = self.loss_vol(z[:, ~self._p]) if (~self._p).any() else torch.tensor(0.0, device=z.device)
+
+        # Import here to avoid circular dependency
+        from engiopt.lvae_core.constraint_handlers import ConstraintLosses
+
+        # Cache components for constraint handler
+        self._loss_components = ConstraintLosses(
+            volume=volume_loss,
+            reconstruction=reconstruction_loss,
+            performance=performance_loss,
+        )
+
+        # Return as tensor for logging
+        return torch.stack([reconstruction_loss, performance_loss, volume_loss])
+
+    def compute_total_loss(self):
+        """Compute total loss using constraint handler.
+
+        Call this after loss() to get the actual loss for backprop.
+        """
+        from engiopt.lvae_core.constraint_handlers import ConstraintThresholds
+
+        if self._loss_components is None:
+            raise RuntimeError("Must call loss() before compute_total_loss()")
+
+        thresholds = ConstraintThresholds(
+            reconstruction=self.reconstruction_threshold,
+            performance=self.performance_threshold,
+        )
+        return self.constraint_handler.compute_loss(self._loss_components, thresholds)
+
+    def update_constraint_handler(self):
+        """Update constraint handler state (e.g., dual variables, barrier parameter)."""
+        from engiopt.lvae_core.constraint_handlers import ConstraintLosses, ConstraintThresholds
+
+        if self._loss_components is None:
+            raise RuntimeError("Must call loss() before update_constraint_handler()")
+
+        thresholds = ConstraintThresholds(
+            reconstruction=self.reconstruction_threshold,
+            performance=self.performance_threshold,
+        )
+        # Detach to avoid backprop through constraint handler updates
+        detached_losses = ConstraintLosses(
+            volume=self._loss_components.volume.detach(),
+            reconstruction=self._loss_components.reconstruction.detach(),
+            performance=self._loss_components.performance.detach(),
+        )
+        self.constraint_handler.step(detached_losses, thresholds)
+
+    def get_constraint_metrics(self) -> dict[str, float]:
+        """Get constraint handler metrics for logging."""
+        return self.constraint_handler.get_metrics()
+
+    def _prune_step(self, epoch, val_recon=None):
+        """Core pruning step with constraint satisfaction check.
+
+        Overrides parent to add check: pruning only occurs when both reconstruction
+        and performance constraints are satisfied.
+        """
+        # First check if constraints are satisfied
+        if not self._check_constraints_satisfied():
+            # Constraints not satisfied - skip pruning
+            return
+
+        # Constraints satisfied - proceed with normal pruning logic
+        super()._prune_step(epoch, val_recon=val_recon)

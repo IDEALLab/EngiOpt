@@ -40,8 +40,7 @@ import tqdm
 import tyro
 import wandb
 
-from engiopt.lvae_2d.aes import InterpretableDesignLeastVolumeAE_DP
-from engiopt.lvae_2d.utils import SNLinearCombo
+from engiopt.lvae_core import InterpretableDesignLeastVolumeAE_DP, SNLinearCombo
 
 
 @dataclass

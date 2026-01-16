@@ -34,12 +34,14 @@ from torch.utils.data import TensorDataset
 import tqdm
 import tyro
 
-from engiopt.lvae_2d.aes import InterpretableDesignLeastVolumeAE_DP
-from engiopt.lvae_2d.constraint_handlers import ConstraintHandler
-from engiopt.lvae_2d.constraint_handlers import ConstraintLosses
-from engiopt.lvae_2d.constraint_handlers import ConstraintThresholds
-from engiopt.lvae_2d.constraint_handlers import create_constraint_handler
-from engiopt.lvae_2d.utils import SNLinearCombo
+from engiopt.lvae_core import (
+    ConstraintHandler,
+    ConstraintLosses,
+    ConstraintThresholds,
+    InterpretableDesignLeastVolumeAE_DP,
+    SNLinearCombo,
+    create_constraint_handler,
+)
 import wandb
 
 
