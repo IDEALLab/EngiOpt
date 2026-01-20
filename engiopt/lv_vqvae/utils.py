@@ -25,18 +25,18 @@ from torch.nn.utils.parametrizations import spectral_norm
 
 
 class Codebook(nn.Module):
-    """Online Clustered Codebook (vector quantizer) with dynamic re-initialization of "dead" vectors.
+    """Improved version over vector quantizer, with the dynamic initialization for the unoptimized "dead" vectors.
 
     Parameters:
-        num_codebook_vectors (int): number of codebook entries (|Z|)
-        latent_dim (int): dimensionality of codebook entries (n_z)
+        num_codebook_vectors (int): number of codebook entries
+        latent_dim (int): dimensionality of codebook entries
         beta (float): weight for the commitment loss
         decay (float): decay for the moving average of code usage
-        distance (str): distance type for nearest neighbor lookup ("l2" or "cos")
-        anchor (str): anchor sampling method for re-init ("closest", "random", "probrandom")
-        first_batch (bool): if True, perform one-time init behavior
-        contras_loss (bool): if True, add a contrastive term (optional)
-        init (bool): if True, the codebook has been initialized
+        distance (str): distance type for looking up the closest code
+        anchor (str): anchor sampling methods
+        first_batch (bool): if true, the offline version of the model
+        contras_loss (bool): if true, use the contras_loss to further improve the performance
+        init (bool): if true, the codebook has been initialized
     """
 
     def __init__(  # noqa: PLR0913
@@ -51,7 +51,6 @@ class Codebook(nn.Module):
         first_batch: bool = False,
         contras_loss: bool = False,
         init: bool = False,
-        reinit_enabled: bool = True,
     ):
         super().__init__()
 
@@ -64,19 +63,13 @@ class Codebook(nn.Module):
         self.first_batch = first_batch
         self.contras_loss = contras_loss
         self.init = init
-        self.reinit_enabled = reinit_enabled
 
         self.pool = FeaturePool(self.num_embed, self.embed_dim)
         self.embedding = nn.Embedding(self.num_embed, self.embed_dim)
         self.embedding.weight.data.uniform_(-1.0 / self.num_embed, 1.0 / self.num_embed)
         self.register_buffer("embed_prob", th.zeros(self.num_embed))
-        self.register_buffer("active_codes", th.ones(self.num_embed, dtype=th.bool))
 
-    def forward(  # noqa: C901, PLR0912, PLR0915
-        self,
-        z: th.Tensor,
-        active_mask: th.Tensor | None = None,
-    ) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
+    def forward(self, z: th.Tensor) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         # reshape z -> (batch, height, width, channel) and flatten
         z = rearrange(z, "b c h w -> b h w c").contiguous()
         z_flattened = z.view(-1, self.embed_dim)
@@ -87,104 +80,74 @@ class Codebook(nn.Module):
         z = z_flattened.view(z.shape)  # Update reference for loss calc
         self.embedding.weight.data = f.normalize(self.embedding.weight.data, dim=1)
 
-        # Optional latent-dimension masking (for LV pruning)
-        if active_mask is not None:
-            m = active_mask.to(device=z_flattened.device, dtype=z_flattened.dtype).view(1, -1)  # (1, D)
-            z_flat = z_flattened * m
-            embed_weight = self.embedding.weight * m  # (K, D)
-        else:
-            z_flat = z_flattened
-            embed_weight = self.embedding.weight
-
-        # Calculate similarity / negative distance
+        # clculate the distance
         if self.distance == "l2":
             # negative squared distance (so argmax == nearest)
             d = (
-                -th.sum(z_flat.detach() ** 2, dim=1, keepdim=True)
-                - th.sum(embed_weight**2, dim=1)
-                + 2 * th.einsum("bd,dn->bn", z_flat.detach(), rearrange(embed_weight, "n d-> d n"))
+                -th.sum(z_flattened.detach() ** 2, dim=1, keepdim=True)
+                - th.sum(self.embedding.weight**2, dim=1)
+                + 2 * th.einsum("bd,dn->bn", z_flattened.detach(), rearrange(self.embedding.weight, "n d-> d n"))
             )
         elif self.distance == "cos":
             # cosine similarity (argmax == nearest)
-            normed_z_flattened = f.normalize(z_flat, dim=1).detach()
-            normed_codebook = f.normalize(embed_weight, dim=1)
+            normed_z_flattened = f.normalize(z_flattened, dim=1).detach()
+            normed_codebook = f.normalize(self.embedding.weight, dim=1)
             d = th.einsum("bd,dn->bn", normed_z_flattened, rearrange(normed_codebook, "n d -> d n"))
-        else:
-            raise ValueError(f"Unknown distance type: {self.distance!r}")
 
-        # Prevent selecting pruned/inactive codebook entries.
-        # This is required for consistency with downstream transformer masking of inactive tokens.
-        if hasattr(self, "active_codes"):
-            a = self.active_codes.to(device=d.device, dtype=th.bool)
-            if not bool(a.any()):
-                raise RuntimeError("All codebook entries are inactive (active_codes is all False).")
-            d = d.masked_fill(~a.view(1, -1), -float("inf"))
+        #  TODO: Prevent selecting pruned/inactive codebook entries.
+        #  This is required for consistency with downstream transformer masking of inactive tokens.
 
-        # Encoding (take best index per token)
-        _, indices = d.sort(dim=1)
+        # encoding
+        sort_distance, indices = d.sort(dim=1)
+        # look up the closest point for the indices
         encoding_indices = indices[:, -1]
         encodings = th.zeros(encoding_indices.unsqueeze(1).shape[0], self.num_embed, device=z.device)
         encodings.scatter_(1, encoding_indices.unsqueeze(1), 1)
 
-        # Quantize and unflatten
-        z_q = th.matmul(encodings, embed_weight).view(z.shape)
-
-        # Commitment + codebook loss
+        # quantize and unflatten
+        z_q = th.matmul(encodings, self.embedding.weight).view(z.shape)
+        # compute loss for embedding
         loss = self.beta * th.mean((z_q.detach() - z) ** 2) + th.mean((z_q - z.detach()) ** 2)
-
-        # Straight-through estimator
+        # preserve gradients
         z_q = z + (z_q - z).detach()
-
         # reshape back to match original input shape
         z_q = rearrange(z_q, "b h w c -> b c h w").contiguous()
-
-        # Usage stats
+        # count
         avg_probs = th.mean(encodings, dim=0)
         perplexity = th.exp(-th.sum(avg_probs * th.log(avg_probs + 1e-10)))
         min_encodings = encodings
 
-        # Online clustered reinitialization for underused points
-        if self.training and self.reinit_enabled:
+        # online clustered reinitialization for unoptimized points
+        if self.training:
+            # calculate the average usage of code entries
             self.embed_prob.mul_(self.decay).add_(avg_probs, alpha=1 - self.decay)
-
+            # running average updates
             if self.anchor in ["closest", "random", "probrandom"] and (not self.init):
+                # closest sampling
                 if self.anchor == "closest":
-                    _, idx0 = d.sort(dim=0)
-                    random_feat = z_flattened.detach()[idx0[-1, :]]
+                    sort_distance, indices = d.sort(dim=0)
+                    random_feat = z_flattened.detach()[indices[-1, :]]
+                # feature pool based random sampling
                 elif self.anchor == "random":
                     random_feat = self.pool.query(z_flattened.detach())
-                else:  # "probrandom"
-                    # Use a safe logits tensor for sampling so inactive codes don't create all -inf rows -> NaNs in softmax.
-                    d_for_sample = d
-                    if hasattr(self, "active_codes"):
-                        a = self.active_codes.to(device=d.device, dtype=th.bool)
-                        if not bool(a.any()):
-                            raise RuntimeError("All codebook entries are inactive (active_codes is all False).")
-                        if (~a).any():
-                            d_for_sample = d.clone()
-                            d_for_sample[:, ~a] = 0.0  # any finite value works; inactive codes won't be updated anyway
-
-                    norm_distance = f.softmax(d_for_sample.t(), dim=1)
+                # probabilitical based random sampling
+                elif self.anchor == "probrandom":
+                    norm_distance = f.softmax(d.t(), dim=1)
                     prob = th.multinomial(norm_distance, num_samples=1).view(-1)
                     random_feat = z_flattened.detach()[prob]
-
+                # decay parameter based on the average usage
                 decay = (
                     th.exp(-(self.embed_prob * self.num_embed * 10) / (1 - self.decay) - 1e-3)
                     .unsqueeze(1)
                     .repeat(1, self.embed_dim)
                 )
-                # Do not reinitialize pruned (inactive) codebook entries.
-                if hasattr(self, "active_codes"):
-                    decay = decay * self.active_codes.to(device=decay.device, dtype=decay.dtype).unsqueeze(1)
                 self.embedding.weight.data = self.embedding.weight.data * (1 - decay) + random_feat * decay
                 if self.first_batch:
                     self.init = True
-
+            # contrastive loss
             if self.contras_loss:
-                sort_distance, _ = d.sort(dim=0)
-                dis_pos = sort_distance[-max(1, int(sort_distance.size(0) / self.num_embed)) :, :].mean(
-                    dim=0, keepdim=True
-                )
+                sort_distance, indices = d.sort(dim=0)
+                dis_pos = sort_distance[-max(1, int(sort_distance.size(0) / self.num_embed)) :, :].mean(dim=0, keepdim=True)
                 dis_neg = sort_distance[: int(sort_distance.size(0) * 1 / 2), :]
                 dis = th.cat([dis_pos, dis_neg], dim=0).t() / 0.07
                 contra_loss = f.cross_entropy(dis, th.zeros((dis.size(0),), dtype=th.long, device=dis.device))
@@ -194,7 +157,14 @@ class Codebook(nn.Module):
 
 
 class FeaturePool:
-    """Feature buffer storing previously encoded features (for codebook re-init)."""
+    """Implements a feature buffer that stores previously encoded features.
+
+    This buffer enables us to initialize the codebook using a history of generated features rather than the ones produced by the latest encoders.
+
+    Parameters:
+        pool_size (int): the size of feature buffer
+        dim (int): the dimension of each feature
+    """
 
     def __init__(self, pool_size: int, dim: int = 64):
         self.pool_size = pool_size
@@ -206,11 +176,12 @@ class FeaturePool:
         """Return features from the pool."""
         self.features = self.features.to(features.device)
         if self.nums_features < self.pool_size:
-            if features.size(0) > self.pool_size:
+            if features.size(0) > self.pool_size:  # if the batch size is large enough, directly update the whole codebook
                 random_feat_id = th.randint(0, features.size(0), (int(self.pool_size),))
                 self.features = features[random_feat_id]
                 self.nums_features = self.pool_size
             else:
+                # if the mini-batch is not large nuough, just store it for the next update
                 num = self.nums_features + features.size(0)
                 self.features[self.nums_features : num] = features
                 self.nums_features = num
@@ -225,7 +196,11 @@ class FeaturePool:
 
 
 class GroupNorm(nn.Module):
-    """Group Normalization block used in encoder/decoder."""
+    """Group Normalization block to be used in VQVAE Encoder.
+
+    Parameters:
+        channels (int): number of channels in the input feature map
+    """
 
     def __init__(self, channels: int):
         super().__init__()
@@ -236,14 +211,19 @@ class GroupNorm(nn.Module):
 
 
 class Swish(nn.Module):
-    """Swish activation used in encoder/decoder."""
+    """Swish activation function to be used in VQVAE Encoder."""
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         return x * th.sigmoid(x)
 
 
 class ResidualBlock(nn.Module):
-    """Residual block used in encoder/decoder."""
+    """Residual block to be used in VQVAE Encoder.
+
+    Parameters:
+        in_channels (int): number of input channels
+        out_channels (int): number of output channels
+    """
 
     def __init__(self, in_channels: int, out_channels: int):
         super().__init__()
@@ -267,20 +247,12 @@ class ResidualBlock(nn.Module):
         return x + self.block(x)
 
 
-class UpSampleBlock(nn.Module):
-    """Up-sampling block used in the decoder."""
-
-    def __init__(self, channels: int):
-        super().__init__()
-        self.conv = nn.Conv2d(channels, channels, kernel_size=3, stride=1, padding=1)
-
-    def forward(self, x: th.Tensor) -> th.Tensor:
-        x = f.interpolate(x, scale_factor=2.0)
-        return self.conv(x)
-
-
 class DownSampleBlock(nn.Module):
-    """Down-sampling block used in the encoder."""
+    """Down-sampling block to be used in VQVAE Encoder.
+
+    Parameters:
+        channels (int): number of channels in the input feature map
+    """
 
     def __init__(self, channels: int):
         super().__init__()
@@ -293,7 +265,11 @@ class DownSampleBlock(nn.Module):
 
 
 class NonLocalBlock(nn.Module):
-    """Non-local self-attention block used in the encoder/decoder."""
+    """Non-local attention block to be used in VQVAE Encoder.
+
+    Parameters:
+        channels (int): number of channels in the input feature map
+    """
 
     def __init__(self, channels: int):
         super().__init__()
@@ -313,21 +289,30 @@ class NonLocalBlock(nn.Module):
 
         b, c, h, w = q.shape
 
-        q = q.reshape(b, c, h * w).permute(0, 2, 1)  # (B, HW, C)
-        k = k.reshape(b, c, h * w)                   # (B, C, HW)
-        v = v.reshape(b, c, h * w)                   # (B, C, HW)
+        q = q.reshape(b, c, h * w)
+        q = q.permute(0, 2, 1)
+        k = k.reshape(b, c, h * w)
+        v = v.reshape(b, c, h * w)
 
-        attn = th.bmm(q, k) * (int(c) ** (-0.5))     # (B, HW, HW)
+        attn = th.bmm(q, k)
+        attn = attn * (int(c) ** (-0.5))
         attn = f.softmax(attn, dim=2)
-        attn = attn.permute(0, 2, 1)                 # (B, HW, HW)
+        attn = attn.permute(0, 2, 1)
 
-        a = th.bmm(v, attn).reshape(b, c, h, w)      # (B, C, H, W)
-        a = self.proj_out(a)
+        a = th.bmm(v, attn)
+        a = a.reshape(b, c, h, w)
+
         return x + a
 
 
 class LinearCombo(nn.Module):
-    """Regular fully connected layer combo for the CVQVAE if enabled."""
+    """Regular fully connected layer combo for the CVQVAE if enabled.
+
+    Parameters:
+        in_features (int): number of input features
+        out_features (int): number of output features
+        alpha (float): negative slope for LeakyReLU
+    """
 
     def __init__(self, in_features: int, out_features: int, alpha: float = 0.2):
         super().__init__()
@@ -384,224 +369,6 @@ class TrueSNDeconv2DCombo(nn.Module):
         return self.activation(self.bn(self.conv(x)))
 
 
-class LatentDimPruner(nn.Module):
-    """LV + Dynamic Pruning for latent channel dimension (n_z).
-
-    - Tracks EMA std per latent dim (decision signal).
-    - Adds a differentiable LV loss (pushes std down).
-    - Prunes lowest-std dims when val MAE is safe.
-    """
-
-    def __init__(  # noqa: PLR0913
-        self,
-        *,
-        latent_dim: int,
-        start_epoch_lv: int = 5,
-        start_epoch_prune: int = 10,
-        min_active_dims: int = 32,
-        max_prune_per_epoch: int = 8,
-        cooldown_epochs: int = 1,
-        k_consecutive: int = 1,
-        val_mae_target: float = 0.1,
-        val_mae_slack: float = 0.005,
-        ema_beta: float = 0.9,
-        eps: float = 1e-8,
-        eta: float = 1.0,
-    ):
-        super().__init__()
-        self.latent_dim = latent_dim
-        self.start_epoch_lv = start_epoch_lv
-        self.start_epoch_prune = start_epoch_prune
-        self.min_active_dims = min_active_dims
-        self.max_prune_per_epoch = max_prune_per_epoch
-        self.cooldown_epochs = cooldown_epochs
-        self.k_consecutive = k_consecutive
-        self.val_mae_target = val_mae_target
-        self.val_mae_slack = val_mae_slack
-        self.ema_beta = ema_beta
-        self.eps = eps
-        self.eta = eta
-
-        self.register_buffer("active", th.ones(latent_dim, dtype=th.bool))
-        self.register_buffer("ema_std", th.ones(latent_dim))
-        self._cooldown = 0
-        self._ok_streak = 0
-
-    def active_mask_float(self, device: th.device) -> th.Tensor:
-        return self.active.to(device=device, dtype=th.float32)
-
-    @property
-    def n_active(self) -> int:
-        return int(self.active.sum().item())
-
-    @th.no_grad()
-    def update_stats(self, z: th.Tensor) -> None:
-        # z: (B, C, H, W) -> (N, C)
-        b, c, h, w = z.shape
-        flat = z.permute(0, 2, 3, 1).reshape(b * h * w, c)  # (N, C)
-        std = flat.std(dim=0)  # (C,)
-        self.ema_std.mul_(self.ema_beta).add_(std, alpha=1.0 - self.ema_beta)
-
-    def lv_loss(self, z: th.Tensor) -> th.Tensor:
-        # differentiable LV on current batch
-        b, c, h, w = z.shape
-        flat = z.permute(0, 2, 3, 1).reshape(b * h * w, c)  # (N, C)
-        active = self.active.to(device=z.device)
-        if active.sum() == 0:
-            return th.tensor(0.0, device=z.device)
-        std = flat[:, active].std(dim=0)
-        # log-volume (diag approx)
-        return self.eta * th.log(std + self.eps).sum()
-
-    @th.no_grad()
-    def maybe_prune(self, *, epoch: int, val_mae: float, codebook: nn.Embedding) -> bool:
-        """Returns True if a prune event occurred.
-
-        Also hard-zeros pruned dims in the embedding table for Stage-2 consistency.
-        """
-        if epoch < self.start_epoch_prune:
-            return False
-        if self._cooldown > 0:
-            self._cooldown -= 1
-            return False
-
-        safe = val_mae <= (self.val_mae_target - self.val_mae_slack)
-        self._ok_streak = (self._ok_streak + 1) if safe else 0
-        if self._ok_streak < self.k_consecutive:
-            return False
-
-        active_idx = th.where(self.active)[0]
-        if active_idx.numel() <= self.min_active_dims:
-            return False
-
-        scores = self.ema_std[active_idx]
-        n_can_prune = max(0, int(active_idx.numel() - self.min_active_dims))
-        n_prune = min(self.max_prune_per_epoch, n_can_prune)
-        if n_prune <= 0:
-            return False
-
-        _, order = th.sort(scores)  # ascending
-        prune_dims = active_idx[order[:n_prune]]
-        self.active[prune_dims] = False
-
-        # hard-zero embedding dims so transformer decode stays consistent
-        codebook.weight.data[:, prune_dims] = 0.0
-
-        self._cooldown = self.cooldown_epochs
-        self._ok_streak = 0
-        return True
-
-
-class CodebookPruner(nn.Module):
-    """Explicit pruning for codebook entries (|Z|).
-
-    This is separate from LV + latent-dimension pruning (n_z). Here we:
-      - Track EMA usage per codebook entry (token).
-      - Permanently deactivate low-usage entries once reconstruction quality is "safe".
-      - Deactivation is enforced inside Codebook.forward by masking distances, and by
-        preventing online reinitialization from touching inactive entries.
-
-    Notes:
-      - This prunes *tokens* (codebook entries), not latent dimensions.
-      - The transformer should also be told which image-token IDs are valid so it never samples
-        deactivated tokens (see VQVAETransformer token masking).
-    """
-
-    def __init__(  # noqa: PLR0913
-        self,
-        *,
-        num_codebook_vectors: int,
-        start_epoch_prune: int = 10,
-        min_active_codes: int = 64,
-        max_prune_per_epoch: int = 32,
-        cooldown_epochs: int = 1,
-        k_consecutive: int = 1,
-        val_mae_target: float = 0.1,
-        val_mae_slack: float = 0.005,
-        ema_beta: float = 0.9,
-        eps: float = 1e-12,
-    ):
-        super().__init__()
-        self.num_codebook_vectors = num_codebook_vectors
-        self.start_epoch_prune = start_epoch_prune
-        self.min_active_codes = min_active_codes
-        self.max_prune_per_epoch = max_prune_per_epoch
-        self.cooldown_epochs = cooldown_epochs
-        self.k_consecutive = k_consecutive
-        self.val_mae_target = val_mae_target
-        self.val_mae_slack = val_mae_slack
-        self.ema_beta = ema_beta
-        self.eps = eps
-
-        self.register_buffer("active_codes", th.ones(num_codebook_vectors, dtype=th.bool))
-        # Initialize to a uniform prior to avoid overreacting to the first batches.
-        self.register_buffer("ema_usage", th.ones(num_codebook_vectors) / float(num_codebook_vectors))
-
-        self._cooldown = 0
-        self._ok_streak = 0
-
-    @property
-    def n_active(self) -> int:
-        return int(self.active_codes.sum().item())
-
-    @th.no_grad()
-    def update_stats(self, encoding_indices: th.Tensor) -> None:
-        """Update EMA token-usage statistics from a batch of encoding indices.
-
-        encoding_indices is expected to be a 1D tensor of length (B*H*W).
-        """
-        if encoding_indices.numel() == 0:
-            return
-        idx = encoding_indices.to(device=self.ema_usage.device, dtype=th.long)
-        counts = th.bincount(idx, minlength=self.num_codebook_vectors).float()
-        probs = counts / counts.sum().clamp_min(1.0)
-        self.ema_usage.mul_(self.ema_beta).add_(probs, alpha=1.0 - self.ema_beta)
-
-    @th.no_grad()
-    def maybe_prune(self, *, epoch: int, val_mae: float, codebook: nn.Module) -> bool:
-        """Returns True if a prune event occurred.
-
-        `codebook` is expected to be the Codebook instance (not the embedding table).
-        """
-        if epoch < self.start_epoch_prune:
-            return False
-        if self._cooldown > 0:
-            self._cooldown -= 1
-            return False
-
-        safe = val_mae <= (self.val_mae_target - self.val_mae_slack)
-        self._ok_streak = (self._ok_streak + 1) if safe else 0
-        if self._ok_streak < self.k_consecutive:
-            return False
-
-        active_idx = th.where(self.active_codes)[0]
-        if active_idx.numel() <= self.min_active_codes:
-            return False
-
-        # prune lowest-usage active codes
-        scores = self.ema_usage[active_idx]
-        n_can_prune = max(0, int(active_idx.numel() - self.min_active_codes))
-        n_prune = min(self.max_prune_per_epoch, n_can_prune)
-        if n_prune <= 0:
-            return False
-
-        _, order = th.sort(scores)  # ascending
-        prune_codes = active_idx[order[:n_prune]]
-
-        self.active_codes[prune_codes] = False
-        # Mirror into the actual codebook (enforced in Codebook.forward).
-        if hasattr(codebook, "active_codes"):
-            codebook.active_codes[prune_codes] = False
-
-        # Optional: hard-zero pruned embeddings for safety if they are ever looked up directly.
-        if hasattr(codebook, "embedding"):
-            codebook.embedding.weight.data[prune_codes] = 0.0
-
-        self._cooldown = self.cooldown_epochs
-        self._ok_streak = 0
-        return True
-
-
 ###########################################
 ########## GPT-2 BASE CODE BELOW ##########
 ###########################################
@@ -615,17 +382,6 @@ class LayerNorm(nn.Module):
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         return f.layer_norm(x, self.weight.shape, self.weight, self.bias, 1e-5)
-
-
-@dataclass
-class GPTConfig:
-    block_size: int = 1024
-    vocab_size: int = 50304  # GPT-2 uses 50257; padded to multiple of 64
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
-    dropout: float = 0.0
-    bias: bool = True  # GPT-2 uses biases in Linear/LayerNorm
 
 
 class CausalSelfAttention(nn.Module):
@@ -713,6 +469,17 @@ class Block(nn.Module):
     def forward(self, x: th.Tensor) -> th.Tensor:
         x = x + self.attn(self.ln_1(x))
         return x + self.mlp(self.ln_2(x))
+
+
+@dataclass
+class GPTConfig:
+    block_size: int = 1024
+    vocab_size: int = 50304  # GPT-2 uses 50257; padded to multiple of 64
+    n_layer: int = 12
+    n_head: int = 12
+    n_embd: int = 768
+    dropout: float = 0.0
+    bias: bool = True  # GPT-2 uses biases in Linear/LayerNorm
 
 
 class GPT(nn.Module):

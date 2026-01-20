@@ -15,9 +15,8 @@ The transformer is then trained to autoregressively predict each token in the se
 To make Stage 2 conditional, we train a separate VQVAE on the conditions only (CVQVAE) and replace the start-of-sequence tokens of the transformer with the CVQVAE latent tokens.
 
 Notes for this version:
-    - Discriminator/adversarial training is removed.
-    - Perceptual loss is removed.
-    - LV + dynamic pruning is used to reduce n_z.
+    - Check noqa's to remove later and implement the needed features
+    - Need to reimplement features such as masking, including in the transformer stage, as well as extensive wandb metrics
 """
 
 
@@ -53,46 +52,11 @@ from engiopt.lv_vqvae.utils import ScaledTanh
 from engiopt.lv_vqvae.utils import Swish
 from engiopt.lv_vqvae.utils import TrueSNResidualBlock
 from engiopt.lv_vqvae.utils import TrueSNUpsample
-from engiopt.lv_vqvae.utils import UpSampleBlock
+from engiopt.lvae_core import polynomial_schedule  # noqa: F401
+from engiopt.lvae_core import PruningPolicy  # noqa: F401
 from engiopt.transforms import drop_constant
 from engiopt.transforms import normalize
 from engiopt.transforms import resize_to
-
-
-def _entropy_from_probs(p: th.Tensor) -> th.Tensor:
-    """Shannon entropy (nats) of a probability vector."""
-    p = p.clamp_min(1e-12)
-    return -(p * p.log()).sum()
-
-
-def _token_stats_from_indices(
-    indices: th.Tensor,
-    *,
-    vocab_size: int,
-    active_codes: th.Tensor | None = None,
-) -> dict[str, float]:
-    """Compute basic token-usage stats from a flat index tensor."""
-    idx = indices.view(-1).to(dtype=th.long)
-    counts = th.bincount(idx, minlength=vocab_size).float()
-    if active_codes is not None:
-        a = active_codes.to(device=counts.device, dtype=th.bool)
-        counts = counts[a]
-        active_n = int(a.sum().item())
-    else:
-        active_n = vocab_size
-
-    total = counts.sum().clamp_min(1.0)
-    probs = counts / total
-    entropy = _entropy_from_probs(probs)
-    perplexity = float(entropy.exp().item())
-    unique = int((counts > 0).sum().item())
-    usage_frac = float(unique / max(1, active_n))
-    return {
-        "token_entropy": float(entropy.item()),
-        "token_perplexity": perplexity,
-        "unique_tokens": float(unique),
-        "token_usage_frac": usage_frac,
-    }
 
 
 @dataclass
@@ -189,43 +153,26 @@ class Args:
     """maximum weight for the LV loss after ramp-up"""
     lv_ramp_epochs: int = 10
     """number of epochs to linearly ramp LV loss weight from 0 to lv_w_max"""
-    lv_eta: float = 1.0
-    """scaling inside LV loss (multiplies the log-volume term)"""
-    lv_ema_beta: float = 0.9
-    """EMA momentum for tracking per-dimension std used by pruning decisions"""
-    lv_min_active_dims: int = 1
+    lv_min_active_dims: int = 16
     """minimum number of latent dimensions allowed to remain active (pruning will not go below this)"""
     lv_max_prune_per_epoch: int = 16
     """maximum number of latent dimensions to prune per epoch"""
     lv_cooldown_epochs: int = 1
     """number of epochs to wait after a prune event before pruning again"""
-    lv_k_consecutive: int = 1
-    """require this many consecutive 'safe' epochs (val MAE below threshold) before pruning"""
-    lv_val_mae_target: float = 0.05
+    lv_val_mae_target: float = 0.03
     """validation MAE reconstruction target used as the pruning guardrail"""
-    lv_val_mae_slack: float = 0.005
-    """safety margin below lv_val_mae_target required before allowing pruning"""
 
     # Codebook pruning (|Z|)
-    cb_prune_start_epoch: int = 10
+    cb_prune_start_epoch: int = 20
     """epoch to start pruning codebook entries (tokens)"""
     cb_min_active_codes: int = 32
     """minimum number of codebook entries allowed to remain active"""
-    cb_max_prune_per_epoch: int = 64
-    """maximum number of codebook entries to prune per epoch"""
     cb_cooldown_epochs: int = 1
     """number of epochs to wait after a codebook prune event before pruning again"""
-    cb_k_consecutive: int = 1
-    """require this many consecutive 'safe' epochs before pruning codebook entries"""
-    cb_val_mae_target: float = 0.05
+    cb_val_mae_target: float = 0.03
     """validation MAE reconstruction target used as the codebook pruning guardrail"""
-    cb_val_mae_slack: float = 0.005
-    """safety margin below cb_val_mae_target required before allowing codebook pruning"""
-    cb_ema_beta: float = 0.9
-    """EMA momentum for tracking per-token usage used by codebook pruning decisions"""
-
-    lv_codebook_freeze_epochs: int = 2
-    """freeze online codebook reinitialization for this many epochs after a prune event"""
+    #  lv_codebook_freeze_epochs: int = 2  # noqa: ERA001
+    #  """freeze online codebook reinitialization for this many epochs after a prune event"""
 
     # Algorithm-specific: Stage 2 (Transformer)
     n_epochs_transformer: int = 100
@@ -313,67 +260,8 @@ class CondEncoder(nn.Module):
         return encoded.view(s[0], s[1] // self.c_feature_map_dim**2, self.c_feature_map_dim, self.c_feature_map_dim)
 
 
-class Decoder(nn.Module):
-    """Decoder module for Stage 1 (VQVAE)."""
-
-    def __init__(  # noqa: PLR0913
-        self,
-        decoder_channels: tuple[int, ...],
-        decoder_start_resolution: int,
-        decoder_attn_resolutions: tuple[int, ...],
-        decoder_num_res_blocks: int,
-        image_channels: int,
-        latent_dim: int,
-    ):
-        super().__init__()
-        in_channels = decoder_channels[0]
-        resolution = decoder_start_resolution
-        layers = [
-            nn.Conv2d(latent_dim, in_channels, kernel_size=3, stride=1, padding=1),
-            ResidualBlock(in_channels, in_channels),
-            NonLocalBlock(in_channels),
-            ResidualBlock(in_channels, in_channels),
-        ]
-
-        for i in range(len(decoder_channels)):
-            out_channels = decoder_channels[i]
-            for _ in range(decoder_num_res_blocks):
-                layers.append(ResidualBlock(in_channels, out_channels))
-                in_channels = out_channels
-                if resolution in decoder_attn_resolutions:
-                    layers.append(NonLocalBlock(in_channels))
-
-            if i != 0:
-                layers.append(UpSampleBlock(in_channels))
-                resolution *= 2
-
-        layers.append(GroupNorm(in_channels))
-        layers.append(Swish())
-        layers.append(nn.Conv2d(in_channels, image_channels, kernel_size=3, stride=1, padding=1))
-        self.model = nn.Sequential(*layers)
-
-    def forward(self, x: th.Tensor) -> th.Tensor:
-        return self.model(x)
-
-
-class CondDecoder(nn.Module):
-    """Simpler MLP-based decoder for the CVQVAE if enabled."""
-
-    def __init__(self, cond_latent_dim: int, cond_dim: int, cond_hidden_dim: int, cond_feature_map_dim: int):
-        super().__init__()
-
-        self.model = nn.Sequential(
-            LinearCombo(cond_latent_dim * cond_feature_map_dim**2, cond_hidden_dim),
-            LinearCombo(cond_hidden_dim, cond_hidden_dim),
-            nn.Linear(cond_hidden_dim, cond_dim),
-        )
-
-    def forward(self, x: th.Tensor) -> th.Tensor:
-        return self.model(x.contiguous().view(len(x), -1))
-
-
 class TrueSNDecoder(nn.Module):
-    """A VQGAN-compatible decoder that is provably 1-Lipschitz.
+    """A VQVAE decoder that is provably 1-Lipschitz. Mirrors the architecture of the encoder but without attention layers.
 
     Lipschitz Guarantees:
     - All convolutions use spectral_norm (sigma_max <= 1)
@@ -418,7 +306,7 @@ class TrueSNDecoder(nn.Module):
         for i in range(len(decoder_channels)):
             out_channels = decoder_channels[i]
 
-            # Upsample (skip first block to match VQGAN logic)
+            # Upsample (skip first block to match VQVAE logic)
             if i != 0:
                 layers.append(TrueSNUpsample(in_channels, n_power_iterations=self.sn_iters))
                 resolution *= 2
@@ -434,7 +322,7 @@ class TrueSNDecoder(nn.Module):
                 )
                 in_channels = out_channels
 
-            # Note: Attention blocks removed
+            # Attention blocks removed
 
         # 3. Output Projection
         layers.append(GroupSort(group_size=2))
@@ -445,8 +333,7 @@ class TrueSNDecoder(nn.Module):
             )
         )
 
-        # 4. Final Activation (Option C: Scaled Tanh)
-        # Ensures output is strictly within bounds and derivative is <= scale < 1
+        # 4. Final Activation (Scaled Tanh)
         layers.append(ScaledTanh(scale=0.99))
 
         self.model = nn.Sequential(*layers)
@@ -523,6 +410,29 @@ class VQVAE(nn.Module):
     """VQVAE model for Stage 1.
 
     Can be configured as a CVQVAE if desired.
+
+    Parameters:
+        device (th.device): torch device to use
+
+        **CVQVAE params**
+        is_c (bool): If True, use CVQVAE architecture (MLP-based encoder/decoder).
+        cond_feature_map_dim (int): Feature map dimension for the CVQVAE encoder output.
+        cond_dim (int): Number of input features for the CVQVAE encoder.
+        cond_hidden_dim (int): Hidden dimension of the CVQVAE MLP.
+        cond_latent_dim (int): Individual code dimension for CVQVAE.
+        cond_codebook_vectors (int): Number of codebook vectors for CVQVAE.
+
+        **VQVAE params**
+        encoder_channels (tuple[int, ...]): Tuple of channel sizes for each encoder layer.
+        encoder_start_resolution (int): Starting resolution for the encoder.
+        encoder_attn_resolutions (tuple[int, ...]): Tuple of resolutions at which to apply attention in the encoder.
+        encoder_num_res_blocks (int): Number of residual blocks per encoder layer.
+        decoder_channels (tuple[int, ...]): Tuple of channel sizes for each decoder layer.
+        decoder_start_resolution (int): Starting resolution for the decoder.
+        decoder_num_res_blocks (int): Number of residual blocks per decoder layer.
+        image_channels (int): Number of channels in the input/output image.
+        latent_dim (int): Dimensionality of the latent space.
+        num_codebook_vectors (int): Number of codebook vectors.
     """
 
     def __init__(  # noqa: PLR0913
@@ -543,7 +453,6 @@ class VQVAE(nn.Module):
         encoder_num_res_blocks: int = 2,
         decoder_channels: tuple[int, ...] = (256, 128, 128, 64),
         decoder_start_resolution: int = 16,
-        # decoder_attn_resolutions: tuple[int, ...] = (16,),  # noqa: ERA001
         decoder_num_res_blocks: int = 3,
         image_channels: int = 1,
         latent_dim: int = 16,
@@ -588,17 +497,12 @@ class VQVAE(nn.Module):
         self,
         designs: th.Tensor,
         *,
-        active_mask: th.Tensor | None = None,
         return_latents: bool = False,
     ):
         """Full VQVAE forward pass."""
         encoded = self.encoder(designs)
         quant_encoded = self.quant_conv(encoded)
-        if active_mask is not None:
-            quant_encoded = quant_encoded * active_mask.view(1, -1, 1, 1)
-        quant, indices, q_loss, _, _ = self.codebook(quant_encoded, active_mask=active_mask)
-        if active_mask is not None:
-            quant = quant * active_mask.view(1, -1, 1, 1)
+        quant, indices, q_loss, _, _ = self.codebook(quant_encoded)
         post_quant = self.post_quant_conv(quant)
         decoded = self.decoder(post_quant)
         if return_latents:
@@ -608,28 +512,88 @@ class VQVAE(nn.Module):
     def encode(
         self,
         designs: th.Tensor,
-        *,
-        active_mask: th.Tensor | None = None,
     ) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         """Encode image batch into quantized latent representation."""
         encoded = self.encoder(designs)
         quant_encoded = self.quant_conv(encoded)
-        if active_mask is not None:
-            quant_encoded = quant_encoded * active_mask.view(1, -1, 1, 1)
-        z_q, indices, loss, min_encodings, perplexity = self.codebook(quant_encoded, active_mask=active_mask)
-        if active_mask is not None:
-            z_q = z_q * active_mask.view(1, -1, 1, 1)
+        z_q, indices, loss, min_encodings, perplexity = self.codebook(quant_encoded)
         return z_q, indices, loss, min_encodings, perplexity
 
     def decode(self, z: th.Tensor) -> th.Tensor:
         """Decode quantized latent representation back to image space."""
         return self.decoder(self.post_quant_conv(z))
 
+    @th.no_grad()
+    def _prune_step(self, epoch, val_recon=None):
+        """Core pruning step.
+
+        Applies safeguards + policy to decide whether to prune dims this epoch.
+        """
+        # --- Safeguards ---
+        if self.dim <= self.cfg.min_active_dims:  # stop if we go below min dims
+            return
+        if epoch < self._next_prune_epoch:  # respect cooldown
+            return
+        if (
+            val_recon is not None
+            and self._best_val_recon < float("inf")
+            and (val_recon - self._best_val_recon) / self._best_val_recon > self.cfg.recon_tol
+        ):
+            # Do not prune if recon is already worse than best_val by > tol
+            return
+
+        # --- Candidate selection from policy ---
+        # Only consider active (unpruned) dimensions for pruning policy
+        z_std_active = self._zstd[~self._p]
+        cand_active = self.policy(z_std_active).to(self._below_counts.device)
+
+        # Map back to full dimension space
+        cand = th.zeros_like(self._p, dtype=th.bool)
+        cand[~self._p] = cand_active
+
+        # --- Debounce with consecutive evidence ---
+        # Keep a counter of how many epochs each dim has been marked as candidate
+        # If a dim is not a candidate in the current epoch, reset its count to 0.
+        if self.cfg.K_consecutive <= 1:
+            stable = cand
+            self._below_counts.zero_()
+        else:
+            # Count how many consecutive epochs each dim is a candidate
+            self._below_counts = (self._below_counts + cand.long()) * cand.long()
+            stable = self._below_counts >= self.cfg.K_consecutive
+
+        # Filter to *active* dims only (don not re-prune pruned ones)
+        candidates = th.where(stable & (~self._p))[0]
+        if len(candidates) == 0:
+            return
+
+        # --- Cap how many dims we prune at once ---
+        prune_idx = candidates[: self.cfg.max_prune_per_epoch]
+
+        # --- Commit pruning ---
+        self._p[prune_idx] = True  # mark as pruned
+        self._z[prune_idx] = self._zmean[prune_idx]  # freeze mean for reconstruction
+        self._next_prune_epoch = epoch + self.cfg.cooldown_epochs  # set next allowed prune epoch
+
 
 class VQVAETransformer(nn.Module):
-    """Wrapper for Stage 2: Transformer.
+    """Wrapper for LV-VQVAE Stage 2: Transformer.
 
     Generative component trained on the Stage 1 discrete latent space.
+
+    Parameters:
+        conditional (bool): If True, use CVQVAE for conditioning.
+        vqvae (VQVAE): Pretrained VQVAE model for primary image encoding/decoding.
+        cvqvae (VQVAE): Pretrained CVQVAE model for conditional encoding (if conditional=True).
+        image_size (int): Input image size (assumed square).
+        decoder_channels (tuple[int, ...]): Decoder channels from the VQVAE model.
+        cond_feature_map_dim (int): Feature map dimension from the CVQVAE encoder (if conditional=True).
+        num_codebook_vectors (int): Number of codebook vectors from the VQVAE model.
+        n_layer (int): Number of Transformer layers.
+        n_head (int): Number of attention heads in the Transformer.
+        n_embd (int): Embedding dimension in the Transformer.
+        dropout (float): Dropout rate in the Transformer.
+        bias (bool): If True, use bias terms in the Transformer layers.
     """
 
     def __init__(  # noqa: PLR0913
@@ -641,7 +605,6 @@ class VQVAETransformer(nn.Module):
         image_size: int,
         decoder_channels: tuple[int, ...],
         cond_feature_map_dim: int,
-        cond_codebook_vectors: int,
         num_codebook_vectors: int,
         n_layer: int,
         n_head: int,
@@ -650,18 +613,9 @@ class VQVAETransformer(nn.Module):
         bias: bool = True,
     ):
         super().__init__()
+        self.sos_token = 0
         self.vqvae = vqvae
         self.cvqvae = cvqvae
-
-        # Disjoint token namespaces:
-        #   - conditional tokens: [0, cond_codebook_vectors)
-        #   - image tokens:       [cond_codebook_vectors, cond_codebook_vectors + num_codebook_vectors)
-        #   - SOS token:          cond_codebook_vectors + num_codebook_vectors
-        self.cond_vocab = cond_codebook_vectors if conditional else 0
-        self.image_vocab = num_codebook_vectors
-        self.image_token_offset = self.cond_vocab
-        self.sos_token = self.cond_vocab + self.image_vocab
-        self.vqvae_active_mask: th.Tensor | None = None
 
         #  block_size is automatically set to the combined sequence length of the VQVAE and CVQVAE
         block_size = (image_size // (2 ** (len(decoder_channels) - 1))) ** 2
@@ -670,7 +624,7 @@ class VQVAETransformer(nn.Module):
 
         #  Create config object for NanoGPT
         transformer_config = GPTConfig(
-            vocab_size=(num_codebook_vectors + (cond_codebook_vectors if conditional else 0) + 1),
+            vocab_size=num_codebook_vectors,
             block_size=block_size,
             n_layer=n_layer,
             n_head=n_head,
@@ -688,24 +642,20 @@ class VQVAETransformer(nn.Module):
         if is_c:  #  For the conditional tokens, use the CVQVAE encoder
             quant_z, indices, _, _, _ = self.cvqvae.encode(x)
         else:
-            quant_z, indices, _, _, _ = self.vqvae.encode(x, active_mask=self.vqvae_active_mask)
+            quant_z, indices, _, _, _ = self.vqvae.encode(x)
         indices = indices.view(quant_z.shape[0], -1)
         return quant_z, indices
 
     @th.no_grad()
     def z_to_image(self, indices: th.Tensor) -> th.Tensor:
         """Convert quantized latent indices back to image space."""
-        indices = indices - self.image_token_offset
         ix_to_vectors = self.vqvae.codebook.embedding(indices).reshape(indices.shape[0], self.sidelen, self.sidelen, -1)
-        if self.vqvae_active_mask is not None:
-            ix_to_vectors = ix_to_vectors * self.vqvae_active_mask.view(1, 1, 1, -1)
         ix_to_vectors = ix_to_vectors.permute(0, 3, 1, 2)
         return self.vqvae.decode(ix_to_vectors)
 
     def forward(self, x: th.Tensor, c: th.Tensor, pkeep: float = 1.0) -> tuple[th.Tensor, th.Tensor]:
         """Forward pass through the Transformer. Returns logits and targets for loss computation."""
         _, indices = self.encode_to_z(x=x)
-        indices = indices + self.image_token_offset
 
         # Replace the start token with the encoded conditional input if using CVQVAE
         if self.conditional:
@@ -717,13 +667,7 @@ class VQVAETransformer(nn.Module):
         if pkeep < 1.0:
             mask = th.bernoulli(pkeep * th.ones(indices.shape, device=indices.device))
             mask = mask.round().to(dtype=th.int64)
-            random_indices = th.randint(
-                low=self.image_token_offset,
-                high=self.image_token_offset + self.image_vocab,
-                size=indices.shape,
-                device=indices.device,
-                dtype=indices.dtype,
-            )
+            random_indices = th.randint_like(indices, self.transformer.config.vocab_size)
             new_indices = mask * indices + (1 - mask) * random_indices
         else:
             new_indices = indices
@@ -736,7 +680,6 @@ class VQVAETransformer(nn.Module):
         # We're ignoring the loss returned by NanoGPT
         logits, _ = self.transformer(new_indices[:, :-1], None)
         logits = logits[:, -indices.shape[1] :]  # Always predict the last 256 tokens
-        logits = self._apply_image_token_constraints(logits)
 
         return logits, target
 
@@ -747,25 +690,6 @@ class VQVAETransformer(nn.Module):
         out[out < v[..., [-1]]] = -float("inf")
         return out
 
-    def _apply_image_token_constraints(self, logits: th.Tensor) -> th.Tensor:
-        """Mask logits so only *active image tokens* are ever produced.
-
-        This prevents:
-          - sampling conditional-token IDs at image positions
-          - sampling the SOS token at image positions
-          - sampling deactivated (pruned) image codebook entries
-        """
-        vocab = logits.size(-1)
-        mask = th.zeros(vocab, dtype=th.bool, device=logits.device)
-        start = self.image_token_offset
-        end = self.image_token_offset + self.image_vocab
-        active = (
-            self.vqvae.codebook.active_codes.to(device=logits.device)
-            if hasattr(self.vqvae.codebook, "active_codes")
-            else th.ones(self.image_vocab, dtype=th.bool, device=logits.device)
-        )
-        mask[start:end] = active
-        return logits.masked_fill(~mask.view(1, 1, -1), -float("inf"))
 
     @th.no_grad()
     def sample(
@@ -778,7 +702,6 @@ class VQVAETransformer(nn.Module):
         for _ in range(steps):
             logits, _ = self.transformer(x, None)
             logits = logits[:, -1, :] / temperature
-            logits = self._apply_image_token_constraints(logits.unsqueeze(1)).squeeze(1)
 
             if top_k is not None:
                 # Determine the actual vocabulary size for this batch
@@ -798,10 +721,7 @@ class VQVAETransformer(nn.Module):
                     logits = th.zeros_like(logits)
 
             probs = f.softmax(logits, dim=-1)
-
-            # In the VQGAN paper we use multinomial sampling (top_k=None, greedy=False)
-            ix = th.multinomial(probs, num_samples=1)
-
+            ix = th.multinomial(probs, num_samples=1)  # Use multinomial sampling for variety and to mitigate image collapse
             x = th.cat((x, ix), dim=1)
 
         return x[:, c.shape[1] :]
@@ -812,7 +732,6 @@ class VQVAETransformer(nn.Module):
         log = {}
 
         _, indices = self.encode_to_z(x=x)
-        indices = indices + self.image_token_offset
         # Replace the start token with the encoded conditional input if using CVQVAE
         if self.conditional:
             _, sos_tokens = self.encode_to_z(x=c, is_c=True)
@@ -913,7 +832,7 @@ if __name__ == "__main__":
         shuffle=True,
     )
 
-    # Create a validation dataloader (used for LV pruning and optionally transformer early stopping)
+    # Create a validation dataloader (used optionally for transformer early stopping)
     val_ds = problem.dataset.with_format("torch")["val"]
     val_ds = val_ds.map(
         lambda batch: {
@@ -976,47 +895,11 @@ if __name__ == "__main__":
         wandb.define_metric("cvqvae_loss", step_metric="cvqvae_step")
         wandb.define_metric("epoch_cvqvae", step_metric="cvqvae_step")
         wandb.define_metric("vqvae_step", summary="max")
-
         wandb.define_metric("vqvae_rec_loss", step_metric="vqvae_step")
         wandb.define_metric("vqvae_q_loss", step_metric="vqvae_step")
-        wandb.define_metric("vqvae_lv_loss", step_metric="vqvae_step")
-        wandb.define_metric("vqvae_lv_w", step_metric="vqvae_step")
-        wandb.define_metric("vqvae_val_mae", step_metric="vqvae_step")
-        wandb.define_metric("lv_active_dims", step_metric="vqvae_step")
-        wandb.define_metric("lv_pruned_this_epoch", step_metric="vqvae_step")
-        wandb.define_metric("lv_ema_std_active_mean", step_metric="vqvae_step")
-        wandb.define_metric("lv_ema_std_active_min", step_metric="vqvae_step")
-        wandb.define_metric("lv_ema_std_active_max", step_metric="vqvae_step")
-        wandb.define_metric("vqvae_z_abs_mean", step_metric="vqvae_step")
-        wandb.define_metric("vqvae_z_l2_rms", step_metric="vqvae_step")
-        wandb.define_metric("vqvae_z_std", step_metric="vqvae_step")
-        wandb.define_metric("vqvae_token_entropy", step_metric="vqvae_step")
-        wandb.define_metric("vqvae_token_perplexity", step_metric="vqvae_step")
-        wandb.define_metric("vqvae_unique_tokens", step_metric="vqvae_step")
-        wandb.define_metric("vqvae_token_usage_frac", step_metric="vqvae_step")
-        wandb.define_metric("codebook_active_codes", step_metric="vqvae_step")
-        wandb.define_metric("codebook_pruned_this_epoch", step_metric="vqvae_step")
-        wandb.define_metric("codebook_ema_entropy", step_metric="vqvae_step")
-        wandb.define_metric("codebook_ema_perplexity", step_metric="vqvae_step")
-        wandb.define_metric("lv_codebook_reinit_enabled", step_metric="vqvae_step")
-
-        # Normalized / ratio metrics for Stage 1 (VQVAE)
-        wandb.define_metric("vqvae_token_entropy_norm", step_metric="vqvae_step")
-        wandb.define_metric("vqvae_token_perplexity_frac", step_metric="vqvae_step")
-        wandb.define_metric("codebook_ema_entropy_norm", step_metric="vqvae_step")
-        wandb.define_metric("codebook_ema_perplexity_frac", step_metric="vqvae_step")
-        wandb.define_metric("lv_active_frac", step_metric="vqvae_step")
-        wandb.define_metric("codebook_active_frac", step_metric="vqvae_step")
-
         wandb.define_metric("vqvae_loss", step_metric="vqvae_step")
         wandb.define_metric("epoch_vqvae", step_metric="vqvae_step")
         wandb.define_metric("transformer_step", summary="max")
-
-        wandb.define_metric("transformer_target_entropy", step_metric="transformer_step")
-        wandb.define_metric("transformer_target_perplexity", step_metric="transformer_step")
-        wandb.define_metric("transformer_target_unique_tokens", step_metric="transformer_step")
-        wandb.define_metric("transformer_target_usage_frac", step_metric="transformer_step")
-        wandb.define_metric("transformer_logits_entropy", step_metric="transformer_step")
 
         wandb.define_metric("transformer_loss", step_metric="transformer_step")
         wandb.define_metric("epoch_transformer", step_metric="transformer_step")
@@ -1024,35 +907,6 @@ if __name__ == "__main__":
             wandb.define_metric("transformer_val_loss", step_metric="transformer_step")
         wandb.config["image_channels"] = image_channels
         wandb.config["latent_size"] = latent_size
-
-    from engiopt.lv_vqvae.utils import CodebookPruner
-    from engiopt.lv_vqvae.utils import LatentDimPruner
-
-    lv_pruner = LatentDimPruner(
-        latent_dim=args.latent_dim,
-        start_epoch_lv=args.lv_start_epoch,
-        start_epoch_prune=args.lv_prune_start_epoch,
-        min_active_dims=args.lv_min_active_dims,
-        max_prune_per_epoch=args.lv_max_prune_per_epoch,
-        cooldown_epochs=args.lv_cooldown_epochs,
-        k_consecutive=args.lv_k_consecutive,
-        val_mae_target=args.lv_val_mae_target,
-        val_mae_slack=args.lv_val_mae_slack,
-        ema_beta=args.lv_ema_beta,
-        eta=args.lv_eta,
-    ).to(device)
-
-    cb_pruner = CodebookPruner(
-        num_codebook_vectors=args.num_codebook_vectors,
-        start_epoch_prune=args.cb_prune_start_epoch,
-        min_active_codes=args.cb_min_active_codes,
-        max_prune_per_epoch=args.cb_max_prune_per_epoch,
-        cooldown_epochs=args.cb_cooldown_epochs,
-        k_consecutive=args.cb_k_consecutive,
-        val_mae_target=args.cb_val_mae_target,
-        val_mae_slack=args.cb_val_mae_slack,
-        ema_beta=args.cb_ema_beta,
-    ).to(device)
 
     vqvae = VQVAE(
         device=device,
@@ -1063,7 +917,6 @@ if __name__ == "__main__":
         encoder_num_res_blocks=args.encoder_num_res_blocks,
         decoder_channels=args.decoder_channels,
         decoder_start_resolution=latent_size,
-        # decoder_attn_resolutions=args.decoder_attn_resolutions,  # noqa: ERA001
         decoder_num_res_blocks=args.decoder_num_res_blocks,
         image_channels=image_channels,
         latent_dim=args.latent_dim,
@@ -1087,7 +940,6 @@ if __name__ == "__main__":
         image_size=args.image_size,
         decoder_channels=args.decoder_channels,
         cond_feature_map_dim=args.cond_feature_map_dim,
-        cond_codebook_vectors=args.cond_codebook_vectors,
         num_codebook_vectors=args.num_codebook_vectors,
         n_layer=args.n_layer,
         n_head=args.n_head,
@@ -1157,7 +1009,7 @@ if __name__ == "__main__":
 
         designs, *_ = next(iter(log_dataloader))
         designs = designs[:n_designs].to(device)
-        reconstructions, _, _ = vqvae(designs, active_mask=lv_pruner.active_mask_float(device))
+        reconstructions, _, _ = vqvae(designs)
 
         vqvae.train()
         return reconstructions
@@ -1251,73 +1103,15 @@ if __name__ == "__main__":
     vqvae.train()
     codebook_freeze = 0
     for epoch in tqdm.trange(args.n_epochs_vqvae):
-        if codebook_freeze > 0:
-            codebook_freeze -= 1
-        if hasattr(vqvae.codebook, "reinit_enabled"):
-            vqvae.codebook.reinit_enabled = (codebook_freeze == 0)
-
         for i, data in enumerate(dataloader_vqvae):
             # THIS IS PROBLEM DEPENDENT
             designs = data[0].to(dtype=th.float32, device=device)
-            mask = lv_pruner.active_mask_float(device) if (epoch >= args.lv_start_epoch) else None
             decoded_images, codebook_indices, q_loss, quant_encoded = vqvae(
-                designs, active_mask=mask, return_latents=True
+                designs, return_latents=True
             )
 
-            lv_pruner.update_stats(quant_encoded.detach())
-            cb_pruner.update_stats(codebook_indices.detach())
-
             rec_loss = th.abs(designs - decoded_images).mean()
-
-            # LV weight schedule: 0 until epoch 5, then ramp
-            lv_w = 0.0
-            lv_loss = th.tensor(0.0, device=device)
-            if epoch >= args.lv_start_epoch:
-                t = min(1.0, (epoch - args.lv_start_epoch + 1) / max(1, args.lv_ramp_epochs))
-                lv_w = args.lv_w_max * t
-                lv_loss = lv_pruner.lv_loss(quant_encoded)
-
-            vq_loss = args.rec_loss_factor * rec_loss + q_loss + lv_w * lv_loss
-
-            # Stats for tracking (computed on the continuous latents used for LV/pruning)
-            with th.no_grad():
-                z_abs_mean = float(quant_encoded.abs().mean().item())
-                z_l2_rms = float(quant_encoded.pow(2).mean().sqrt().item())
-                z_std = float(quant_encoded.std().item())
-
-                active_codes = getattr(vqvae.codebook, "active_codes", None)
-                token_stats = _token_stats_from_indices(
-                    codebook_indices,
-                    vocab_size=vqvae.codebook.num_embed,
-                    active_codes=active_codes,
-                )
-
-                # EMA token-usage stats from the codebook pruner (already a probability distribution)
-                cb_p = cb_pruner.ema_usage
-                cb_entropy = float(_entropy_from_probs(cb_p).item())
-                cb_perplexity = float(th.exp(_entropy_from_probs(cb_p)).item())
-
-                # LV stats on EMA std
-                active = lv_pruner.active.to(device=lv_pruner.ema_std.device)
-                if int(active.sum().item()) > 0:
-                    std_active = lv_pruner.ema_std[active]
-                    lv_std_mean = float(std_active.mean().item())
-                    lv_std_min = float(std_active.min().item())
-                    lv_std_max = float(std_active.max().item())
-                else:
-                    lv_std_mean = lv_std_min = lv_std_max = 0.0
-
-                codebook_active_n = int(vqvae.codebook.active_codes.sum().item())
-
-                # Normalized / ratio versions (stable as active codes/dims change)
-                _k = max(1, codebook_active_n)
-                _logk = float(np.log(_k)) if _k > 1 else 1.0
-                vqvae_token_entropy_norm = float(token_stats["token_entropy"] / _logk)
-                vqvae_token_perplexity_frac = float(token_stats["token_perplexity"] / _k)
-                codebook_ema_entropy_norm = float(cb_entropy / _logk)
-                codebook_ema_perplexity_frac = float(cb_perplexity / _k)
-                lv_active_frac = float(lv_pruner.n_active / max(1, args.latent_dim))
-                codebook_active_frac = float(codebook_active_n / max(1, args.num_codebook_vectors))
+            vq_loss = args.rec_loss_factor * rec_loss + q_loss  # + lv_w * lv_loss
 
             opt_vq.zero_grad()
             vq_loss.backward()
@@ -1334,28 +1128,6 @@ if __name__ == "__main__":
                     "vqvae_loss": vq_loss.item(),
                     "vqvae_rec_loss": rec_loss.item(),
                     "vqvae_q_loss": q_loss.item(),
-                    "vqvae_lv_loss": float(lv_loss.item()),
-                    "vqvae_lv_w": float(lv_w),
-                    "lv_active_dims": int(lv_pruner.n_active),
-                    "lv_active_frac": lv_active_frac,
-                    "lv_ema_std_active_mean": lv_std_mean,
-                    "lv_ema_std_active_min": lv_std_min,
-                    "lv_ema_std_active_max": lv_std_max,
-                    "vqvae_z_abs_mean": z_abs_mean,
-                    "vqvae_z_l2_rms": z_l2_rms,
-                    "vqvae_z_std": z_std,
-                    "vqvae_token_entropy": token_stats["token_entropy"],
-                    "vqvae_token_entropy_norm": vqvae_token_entropy_norm,
-                    "vqvae_token_perplexity": token_stats["token_perplexity"],
-                    "vqvae_token_perplexity_frac": vqvae_token_perplexity_frac,
-                    "vqvae_unique_tokens": token_stats["unique_tokens"],
-                    "vqvae_token_usage_frac": token_stats["token_usage_frac"],
-                    "codebook_active_codes": codebook_active_n,
-                    "codebook_active_frac": codebook_active_frac,
-                    "codebook_ema_entropy": cb_entropy,
-                    "codebook_ema_entropy_norm": codebook_ema_entropy_norm,
-                    "codebook_ema_perplexity": cb_perplexity,
-                    "codebook_ema_perplexity_frac": codebook_ema_perplexity_frac,
                 }
                 print(
                     f"[Epoch {epoch}/{args.n_epochs_vqvae}] [Batch {i}/{len(dataloader_vqvae)}] [VQ loss: {vq_loss.item()}]"
@@ -1396,8 +1168,6 @@ if __name__ == "__main__":
                         "vqvae": vqvae.state_dict(),
                         "optimizer_vqvae": opt_vq.state_dict(),
                         "loss": vq_loss.item(),
-                            "lv_active_mask": lv_pruner.active_mask_float(th.device("cpu")).cpu(),
-                            "codebook_active_codes": vqvae.codebook.active_codes.detach().cpu(),
                     }
 
                     th.save(ckpt_vq, "lv_vqvae.pth")
@@ -1405,54 +1175,23 @@ if __name__ == "__main__":
                     artifact_lv_vq.add_file("lv_vqvae.pth")
                     wandb.log_artifact(artifact_lv_vq, aliases=[f"seed_{args.seed}"])
 
-        # End-of-epoch: held-out val MAE + pruning (Stage 2-style block)
+        # End-of-epoch: held-out val MAE
         vqvae.eval()
         maes = []
         with th.no_grad():
             for val_data in dataloader_val:
                 val_designs = val_data[0].to(dtype=th.float32, device=device)
-                val_mask = lv_pruner.active_mask_float(device) if (epoch >= args.lv_start_epoch) else None
-                val_recon, _, _ = vqvae(val_designs, active_mask=val_mask)
+                val_recon, _, _ = vqvae(val_designs)
                 maes.append(th.abs(val_designs - val_recon).mean().item())
         val_mae = sum(maes) / max(1, len(maes))
 
-        pruned = lv_pruner.maybe_prune(
-            epoch=epoch,
-            val_mae=val_mae,
-            codebook=vqvae.codebook.embedding,
-        )
-
-        pruned_codes = cb_pruner.maybe_prune(
-            epoch=epoch,
-            val_mae=val_mae,
-            codebook=vqvae.codebook,
-        )
-
-        if pruned:
-            codebook_freeze = max(codebook_freeze, args.lv_codebook_freeze_epochs)
-
         if args.track:
             batches_done = epoch * len(dataloader_vqvae) + i
-            _k = max(1, int(vqvae.codebook.active_codes.sum().item()))
-            _logk = float(np.log(_k)) if _k > 1 else 1.0
-            _cb_entropy = float(_entropy_from_probs(cb_pruner.ema_usage).item())
-            _cb_perplexity = float(th.exp(_entropy_from_probs(cb_pruner.ema_usage)).item())
             wandb.log(
                 {
                     "vqvae_step": batches_done,
                     "epoch_vqvae": epoch,
                     "vqvae_val_mae": val_mae,
-                    "lv_active_dims": lv_pruner.n_active,
-                    "lv_active_frac": float(lv_pruner.n_active / max(1, args.latent_dim)),
-                    "lv_pruned_this_epoch": int(pruned),
-                    "lv_codebook_reinit_enabled": int(getattr(vqvae.codebook, "reinit_enabled", True)),
-                    "codebook_active_codes": int(vqvae.codebook.active_codes.sum().item()),
-                    "codebook_active_frac": float(int(vqvae.codebook.active_codes.sum().item()) / max(1, args.num_codebook_vectors)),
-                    "codebook_pruned_this_epoch": int(pruned_codes),
-                    "codebook_ema_entropy": _cb_entropy,
-                    "codebook_ema_entropy_norm": float(_cb_entropy / _logk),
-                    "codebook_ema_perplexity": _cb_perplexity,
-                    "codebook_ema_perplexity_frac": float(_cb_perplexity / _k),
                 }
             )
 
@@ -1463,8 +1202,7 @@ if __name__ == "__main__":
         p.requires_grad_(requires_grad=False)
     vqvae.eval()
 
-    # Persist the final active mask into Stage 2 so tokenization/decoding stays consistent
-    transformer.vqvae_active_mask = lv_pruner.active_mask_float(device)
+    #  TODO: Persist the final active mask into Stage 2 so tokenization/decoding stays consistent
 
     # --------------------------------
     #  Stage 2: Training Transformer
@@ -1488,22 +1226,6 @@ if __name__ == "__main__":
             opt_transformer.zero_grad()
             logits, targets = transformer(designs, conds)
             loss = f.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
-
-            # Token-usage / uncertainty stats for tracking
-            with th.no_grad():
-                targets_img = (targets - transformer.image_token_offset).clamp_min(0)
-                tstats = _token_stats_from_indices(
-                    targets_img,
-                    vocab_size=transformer.image_vocab,
-                    active_codes=getattr(vqvae.codebook, "active_codes", None),
-                )
-                probs = f.softmax(logits, dim=-1)
-                start = transformer.image_token_offset
-                end = transformer.image_token_offset + transformer.image_vocab
-                p_img = probs[..., start:end]
-                logits_entropy = float(
-                    (-(p_img.clamp_min(1e-12) * p_img.clamp_min(1e-12).log()).sum(dim=-1)).mean().item()
-                )
             loss.backward()
             opt_transformer.step()
 
@@ -1512,18 +1234,8 @@ if __name__ == "__main__":
             # ----------
             if args.track:
                 batches_done = epoch * len(dataloader_transformer) + i
-                wandb.log(
-                    {
-                        "transformer_step": batches_done,
-                        "epoch_transformer": epoch,
-                        "transformer_loss": loss.item(),
-                        "transformer_target_entropy": tstats["token_entropy"],
-                        "transformer_target_perplexity": tstats["token_perplexity"],
-                        "transformer_target_unique_tokens": tstats["unique_tokens"],
-                        "transformer_target_usage_frac": tstats["token_usage_frac"],
-                        "transformer_logits_entropy": logits_entropy,
-                    }
-                )
+                wandb.log({"transformer_loss": loss.item(), "transformer_step": batches_done})
+                wandb.log({"epoch_transformer": epoch, "transformer_step": batches_done})
                 print(
                     f"[Epoch {epoch}/{args.n_epochs_transformer}] [Batch {i}/{len(dataloader_transformer)}] [Transformer loss: {loss.item()}]"
                 )
@@ -1573,7 +1285,7 @@ if __name__ == "__main__":
                 best_val = val_loss
                 patience_counter = 0
 
-                # Cache best model in memory; we'll upload to W&B once at the end.
+                # Cache best model in memory; upload to W&B once at the end.
                 if args.save_model:
                     best_ckpt_tr = {
                         "epoch": epoch,
@@ -1582,8 +1294,6 @@ if __name__ == "__main__":
                         "optimizer_transformer": opt_transformer.state_dict(),
                         "loss": loss.item(),
                         "val_loss": val_loss,
-                        "lv_active_mask": lv_pruner.active_mask_float(th.device("cpu")).cpu(),
-                        "codebook_active_codes": vqvae.codebook.active_codes.detach().cpu(),
                     }
             else:
                 patience_counter += 1
@@ -1604,8 +1314,6 @@ if __name__ == "__main__":
                 "optimizer_transformer": opt_transformer.state_dict(),
                 "loss": loss.item(),
                 "val_loss": float("nan"),
-                "lv_active_mask": lv_pruner.active_mask_float(th.device("cpu")).cpu(),
-                "codebook_active_codes": vqvae.codebook.active_codes.detach().cpu(),
             }
         else:
             ckpt_tr = {
@@ -1614,8 +1322,6 @@ if __name__ == "__main__":
                 "transformer": transformer.state_dict(),
                 "optimizer_transformer": opt_transformer.state_dict(),
                 "loss": loss.item(),
-                "lv_active_mask": lv_pruner.active_mask_float(th.device("cpu")).cpu(),
-                "codebook_active_codes": vqvae.codebook.active_codes.detach().cpu(),
             }
 
         th.save(ckpt_tr, "transformer.pth")
