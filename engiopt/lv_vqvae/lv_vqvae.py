@@ -16,7 +16,8 @@ To make Stage 2 conditional, we train a separate VQVAE on the conditions only (C
 
 Notes for this version:
     - Check noqa's to remove later and implement the needed features
-    - Need to reimplement features such as masking, including in the transformer stage, as well as extensive wandb metrics
+    - Need to reimplement features such as pruning and masking, including masking in the codebook and transformer stage, as well as extensive wandb metrics to validate
+    - Implemented as of 20 January: spherical norm for codebook, commitment loss term beta 0.25 --> 0.01 for codebook, 1-Lipschitz decoder via new blocks and activation function (scaled tanh) + removal of non-Lipschitz blocks (i.e., self-attention)
 """
 
 
@@ -52,8 +53,8 @@ from engiopt.lv_vqvae.utils import ScaledTanh
 from engiopt.lv_vqvae.utils import Swish
 from engiopt.lv_vqvae.utils import TrueSNResidualBlock
 from engiopt.lv_vqvae.utils import TrueSNUpsample
-from engiopt.lvae_core import polynomial_schedule  # noqa: F401
-from engiopt.lvae_core import PruningPolicy  # noqa: F401
+from engiopt.lvae_core import polynomial_schedule
+from engiopt.lvae_core import PruningPolicy
 from engiopt.transforms import drop_constant
 from engiopt.transforms import normalize
 from engiopt.transforms import resize_to
@@ -144,10 +145,10 @@ class Args:
     sample_interval_vqvae: int = 100
     """interval between Stage 1 image samples"""
 
-    # LV + dynamic pruning (n_z)
+    # LV + dynamic pruning (n_z). NOTE: All LV params share the same names with the LVAE code, except the prefix "lv_" has been added to them.
     lv_start_epoch: int = 10
     """epoch to start applying LV loss (keep LV loss weight = 0 before this)"""
-    lv_prune_start_epoch: int = 20
+    lv_pruning_epoch: int = 20
     """epoch to start pruning latent dimensions (after LV has had time to shape the space)"""
     lv_w_max: float = 1e-4
     """maximum weight for the LV loss after ramp-up"""
@@ -155,22 +156,35 @@ class Args:
     """number of epochs to linearly ramp LV loss weight from 0 to lv_w_max"""
     lv_min_active_dims: int = 16
     """minimum number of latent dimensions allowed to remain active (pruning will not go below this)"""
-    lv_max_prune_per_epoch: int = 16
-    """maximum number of latent dimensions to prune per epoch"""
-    lv_cooldown_epochs: int = 1
-    """number of epochs to wait after a prune event before pruning again"""
+    lv_max_prune_per_epoch: int | None = None
+    """maximum number of latent dimensions to prune per epoch; None for no limit"""
     lv_val_mae_target: float = 0.03
     """validation MAE reconstruction target used as the pruning guardrail"""
+    lv_pruning_strategy: str = "plummet"
+    """strategy name (plummet, pca_cdf, lognorm, probabilistic)"""
+    lv_ratio_threshold: float = 0.02
+    """DEPRECATED - kept for backward compatibility only"""
+    lv_beta: float = 0.9
+    """EMA momentum for latent statistics"""
+    lv_eta: float = 0.0
+    """smoothing parameter for volume loss"""
+    lv_cooldown_epochs: int = 0
+    """epochs to wait between pruning events (default: 0 = no cooldown)"""
+    lv_k_consecutive: int = 1
+    """consecutive epochs below threshold required (default: 1 = immediate)"""
+    lv_recon_tol: float = np.inf
+    """relative tolerance to best validation recon (default: inf = no constraint)"""
+
 
     # Codebook pruning (|Z|)
-    cb_prune_start_epoch: int = 20
-    """epoch to start pruning codebook entries (tokens)"""
-    cb_min_active_codes: int = 32
-    """minimum number of codebook entries allowed to remain active"""
-    cb_cooldown_epochs: int = 1
-    """number of epochs to wait after a codebook prune event before pruning again"""
-    cb_val_mae_target: float = 0.03
-    """validation MAE reconstruction target used as the codebook pruning guardrail"""
+    # cb_prune_start_epoch: int = 20  # noqa: ERA001
+    # """epoch to start pruning codebook entries (tokens)"""  # noqa: ERA001
+    # cb_min_active_codes: int = 32  # noqa: ERA001
+    # """minimum number of codebook entries allowed to remain active"""
+    # cb_cooldown_epochs: int = 1  # noqa: ERA001
+    # """number of epochs to wait after a codebook prune event before pruning again"""
+    # cb_val_mae_target: float = 0.03  # noqa: ERA001
+    # """validation MAE reconstruction target used as the codebook pruning guardrail"""
     #  lv_codebook_freeze_epochs: int = 2  # noqa: ERA001
     #  """freeze online codebook reinitialization for this many epochs after a prune event"""
 
@@ -1102,6 +1116,10 @@ if __name__ == "__main__":
     print("Stage 1: Training VQVAE")
     vqvae.train()
     codebook_freeze = 0
+
+    lv_policy = PruningPolicy(args.lv_pruning_strategy, {"threshold": args.lv_ratio_threshold, "beta": args.lv_beta})  # We assume a plummet strategy here with the associated baseline parameters.
+    lv_w_schedule = polynomial_schedule(args.lv_w_max, args.lv_ramp_epochs, 1, 0, args.lv_start_epoch)  # The value of 1 specifies a linear schedule while the value of 0 specifies the starting LV weight
+
     for epoch in tqdm.trange(args.n_epochs_vqvae):
         for i, data in enumerate(dataloader_vqvae):
             # THIS IS PROBLEM DEPENDENT
