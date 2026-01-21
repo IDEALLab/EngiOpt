@@ -11,6 +11,7 @@ For more information, see: https://arxiv.org/abs/2404.17773
 from __future__ import annotations
 
 from dataclasses import dataclass
+from functools import partial
 from itertools import product
 import os
 import random
@@ -80,6 +81,10 @@ class Args:
     """Epoch to start pruning dimensions."""
     plummet_threshold: float = 0.02
     """Threshold for plummet pruning strategy."""
+
+    # Volume weight warmup
+    volume_warmup_epochs: int = 0
+    """Epochs to polynomially ramp volume weight from 0 to w_volume. 0 disables warmup."""
 
     # Architecture
     resize_dimensions: tuple[int, int] = (100, 100)
@@ -219,6 +224,25 @@ class MLPPredictor(nn.Module):
         return self.net(x)
 
 
+def volume_weight_schedule(epoch: int, w_rec: float, w_perf: float, w_vol: float, warmup_epochs: int) -> th.Tensor:
+    """Compute weights with polynomial ramp on volume weight.
+
+    Args:
+        epoch: Current epoch.
+        w_rec: Reconstruction weight (constant).
+        w_perf: Performance weight (constant).
+        w_vol: Final volume weight after warmup.
+        warmup_epochs: Epochs to ramp volume weight from 0 to w_vol.
+
+    Returns:
+        Tensor [w_rec, w_perf, current_w_vol] where current_w_vol ramps quadratically.
+    """
+    if warmup_epochs <= 0:
+        return th.tensor([w_rec, w_perf, w_vol], dtype=th.float)
+    t = min(epoch / warmup_epochs, 1.0)
+    return th.tensor([w_rec, w_perf, w_vol * t * t], dtype=th.float)
+
+
 if __name__ == "__main__":
     args = tyro.cli(Args)
 
@@ -282,7 +306,17 @@ if __name__ == "__main__":
     )
     print(f"Pruning epoch: {args.pruning_epoch}")
     print(f"Plummet threshold: {args.plummet_threshold}")
+    print(f"Volume warmup epochs: {args.volume_warmup_epochs}")
     print(f"{'=' * 60}\n")
+
+    # Weight schedule (ramps volume weight if warmup_epochs > 0, otherwise constant)
+    weights = partial(
+        volume_weight_schedule,
+        w_rec=args.w_reconstruction,
+        w_perf=args.w_performance,
+        w_vol=args.w_volume,
+        warmup_epochs=args.volume_warmup_epochs,
+    )
 
     # Initialize Performance-LVAE with dynamic pruning
     plvae = InterpretablePerfLeastVolumeAE_DP(
@@ -295,7 +329,7 @@ if __name__ == "__main__":
         ),
         latent_dim=args.latent_dim,
         perf_dim=perf_dim,
-        weights=[args.w_reconstruction, args.w_performance, args.w_volume],
+        weights=weights,
         pruning_epoch=args.pruning_epoch,
         plummet_threshold=args.plummet_threshold,
     ).to(device)
@@ -380,6 +414,7 @@ if __name__ == "__main__":
                     "total_loss": loss.item(),
                     "active_dims": plvae.dim,
                     "epoch": epoch,
+                    "w_volume": plvae.w[2].item(),
                 }
                 wandb.log(log_dict)
 
