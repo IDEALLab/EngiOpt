@@ -18,6 +18,7 @@ Notes for this version:
     - Check noqa's to remove later and implement the needed features
     - Need to reimplement features such as pruning and masking, including masking in the codebook and transformer stage, as well as extensive wandb metrics to validate
     - Implemented as of 20 January: spherical norm for codebook, commitment loss term beta 0.25 --> 0.01 for codebook, 1-Lipschitz decoder via new blocks and activation function (scaled tanh) + removal of non-Lipschitz blocks (i.e., self-attention)
+    - Add back in ASAP: codebook perplexity, usage fraction/amount for codes and dims, number of active (non-pruned) codes and dims, etc.
 """
 
 
@@ -47,10 +48,12 @@ from engiopt.lv_vqvae.utils import GPTConfig
 from engiopt.lv_vqvae.utils import GroupNorm
 from engiopt.lv_vqvae.utils import GroupSort
 from engiopt.lv_vqvae.utils import LinearCombo
+from engiopt.lv_vqvae.utils import loss_vol
 from engiopt.lv_vqvae.utils import NonLocalBlock
 from engiopt.lv_vqvae.utils import ResidualBlock
 from engiopt.lv_vqvae.utils import ScaledTanh
 from engiopt.lv_vqvae.utils import Swish
+from engiopt.lv_vqvae.utils import token_stats_from_indices
 from engiopt.lv_vqvae.utils import TrueSNResidualBlock
 from engiopt.lv_vqvae.utils import TrueSNUpsample
 from engiopt.lvae_core import polynomial_schedule
@@ -166,7 +169,7 @@ class Args:
     """DEPRECATED - kept for backward compatibility only"""
     lv_beta: float = 0.9
     """EMA momentum for latent statistics"""
-    lv_eta: float = 0.0
+    lv_eta: float = 1e-4
     """smoothing parameter for volume loss"""
     lv_cooldown_epochs: int = 0
     """epochs to wait between pruning events (default: 0 = no cooldown)"""
@@ -905,22 +908,32 @@ if __name__ == "__main__":
             name=run_name,
             dir="./logs/wandb",
         )
+
+        #  Base VQ-related metrics
         wandb.define_metric("cvqvae_step", summary="max")
         wandb.define_metric("cvqvae_loss", step_metric="cvqvae_step")
         wandb.define_metric("epoch_cvqvae", step_metric="cvqvae_step")
         wandb.define_metric("vqvae_step", summary="max")
         wandb.define_metric("vqvae_rec_loss", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_val_mae", step_metric="vqvae_step")
         wandb.define_metric("vqvae_q_loss", step_metric="vqvae_step")
         wandb.define_metric("vqvae_loss", step_metric="vqvae_step")
         wandb.define_metric("epoch_vqvae", step_metric="vqvae_step")
         wandb.define_metric("transformer_step", summary="max")
-
         wandb.define_metric("transformer_loss", step_metric="transformer_step")
         wandb.define_metric("epoch_transformer", step_metric="transformer_step")
         if args.early_stopping:
             wandb.define_metric("transformer_val_loss", step_metric="transformer_step")
         wandb.config["image_channels"] = image_channels
         wandb.config["latent_size"] = latent_size
+
+        #  LV-VQVAE-specific metrics
+        wandb.define_metric("vqvae_lv_loss", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_lv_weight", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_token_perplexity", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_token_perplexity_frac", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_token_usage_frac", step_metric="vqvae_step")
+        wandb.define_metric("transformer_logits_entropy", step_metric="transformer_step")
 
     vqvae = VQVAE(
         device=device,
@@ -1128,6 +1141,12 @@ if __name__ == "__main__":
                 designs, return_latents=True
             )
 
+            # LV loss + weight
+            lv_weight = lv_w_schedule(epoch)
+            lv_loss = th.tensor(0.0, device=device)
+            if epoch >= args.lv_start_epoch and lv_weight > 0.0:
+                lv_loss = loss_vol(quant_encoded, eta=float(args.lv_eta))
+
             rec_loss = th.abs(designs - decoded_images).mean()
             vq_loss = args.rec_loss_factor * rec_loss + q_loss  # + lv_w * lv_loss
 
@@ -1140,12 +1159,22 @@ if __name__ == "__main__":
             # ----------
             if args.track:
                 batches_done = epoch * len(dataloader_vqvae) + i
+                with th.no_grad():
+                    tstats = token_stats_from_indices(
+                        codebook_indices,
+                        vocab_size=args.num_codebook_vectors,
+                    )
                 log_vq = {
                     "vqvae_step": batches_done,
                     "epoch_vqvae": epoch,
                     "vqvae_loss": vq_loss.item(),
                     "vqvae_rec_loss": rec_loss.item(),
                     "vqvae_q_loss": q_loss.item(),
+                    "vqvae_lv_loss": float(lv_loss.item()),
+                    "vqvae_lv_weight": float(lv_weight),
+                    "vqvae_token_perplexity": tstats["token_perplexity"],
+                    "vqvae_token_perplexity_frac": tstats["token_perplexity_frac"],
+                    "vqvae_token_usage_frac": tstats["token_usage_frac"],
                 }
                 print(
                     f"[Epoch {epoch}/{args.n_epochs_vqvae}] [Batch {i}/{len(dataloader_vqvae)}] [VQ loss: {vq_loss.item()}]"
@@ -1244,6 +1273,11 @@ if __name__ == "__main__":
             opt_transformer.zero_grad()
             logits, targets = transformer(designs, conds)
             loss = f.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+            with th.no_grad():
+                probs = f.softmax(logits, dim=-1)
+                transformer_logits_entropy = float(
+                    (-(probs.clamp_min(1e-12) * probs.clamp_min(1e-12).log()).sum(dim=-1)).mean().item()
+                )
             loss.backward()
             opt_transformer.step()
 
@@ -1253,6 +1287,14 @@ if __name__ == "__main__":
             if args.track:
                 batches_done = epoch * len(dataloader_transformer) + i
                 wandb.log({"transformer_loss": loss.item(), "transformer_step": batches_done})
+                wandb.log({"epoch_transformer": epoch, "transformer_step": batches_done})
+                wandb.log(
+                    {
+                        "transformer_loss": loss.item(),
+                        "transformer_logits_entropy": transformer_logits_entropy,
+                        "transformer_step": batches_done,
+                    }
+                )
                 wandb.log({"epoch_transformer": epoch, "transformer_step": batches_done})
                 print(
                     f"[Epoch {epoch}/{args.n_epochs_transformer}] [Batch {i}/{len(dataloader_transformer)}] [Transformer loss: {loss.item()}]"

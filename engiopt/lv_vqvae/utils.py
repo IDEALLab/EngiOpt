@@ -24,6 +24,51 @@ from torch.nn import functional as f
 from torch.nn.utils.parametrizations import spectral_norm
 
 
+def _entropy_from_probs(p: th.Tensor) -> th.Tensor:
+    """Shannon entropy (nats) of a probability vector."""
+    p = p.clamp_min(1e-12)
+    return -(p * p.log()).sum()
+
+
+def token_stats_from_indices(indices: th.Tensor, *, vocab_size: int) -> dict[str, float]:
+    """Token usage stats from flat index tensor (no pruning mask assumed yet).
+
+    Returns:
+        token_perplexity: exp(H) (effective number of codes used)
+        token_perplexity_frac: token_perplexity / vocab_size (0..1)
+        token_usage_frac: unique_used / vocab_size (0..1)
+    """
+    idx = indices.view(-1).to(dtype=th.long)
+    counts = th.bincount(idx, minlength=vocab_size).float()
+    total = counts.sum().clamp_min(1.0)
+    probs = counts / total
+    entropy = _entropy_from_probs(probs)
+    ppl = float(entropy.exp().item())
+    unique = int((counts > 0).sum().item())
+    usage_frac = float(unique / max(1, vocab_size))
+    ppl_frac = float(ppl / max(1, vocab_size))
+    return {
+        "token_perplexity": ppl,
+        "token_perplexity_frac": ppl_frac,
+        "token_usage_frac": usage_frac,
+    }
+
+
+def loss_vol(z: th.Tensor, *, eta: float) -> th.Tensor:
+    """Volume loss = exp(mean(log(std_i + eta))) over latent dims.
+
+    If z is (B, C, H, W): std is over (B, H, W) per channel C.
+    If z is (B, C): std is over B per channel C.
+    """
+    if z.dim() == 4:  # noqa: PLR2004
+        s = z.float().std(dim=(0, 2, 3))
+    elif z.dim() == 2:  # noqa: PLR2004
+        s = z.float().std(dim=0)
+    else:
+        raise ValueError(f"loss_vol expects z dim 2 or 4, got shape {tuple(z.shape)}")
+    return th.exp(th.log(s + float(eta)).mean())
+
+
 class Codebook(nn.Module):
     """Improved version over vector quantizer, with the dynamic initialization for the unoptimized "dead" vectors.
 
