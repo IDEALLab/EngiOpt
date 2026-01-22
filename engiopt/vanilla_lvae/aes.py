@@ -237,8 +237,13 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         x_hat = self.decode(z)
         self._update_moving_mean(z)
 
-        # Volume loss over active dimensions only
-        vol_loss = self.loss_vol(z[:, ~self._p]) if (~self._p).any() else torch.tensor(0.0, device=z.device)
+        # Volume loss: sum over active dims, normalized by total latent dim
+        # This ensures volume decreases as dims are pruned
+        if (~self._p).any():
+            s = z[:, ~self._p].std(0)
+            vol_loss = torch.exp(torch.log(s + self.eta).sum() / len(self._p))
+        else:
+            vol_loss = torch.tensor(0.0, device=z.device)
 
         return torch.stack([self.loss_rec(x, x_hat), vol_loss])
 
@@ -388,8 +393,12 @@ class PerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         # Performance prediction using full latent + conditions
         p_hat = self.predictor(torch.cat([z, c], dim=-1))
 
-        # Volume loss over active dimensions only
-        vol_loss = self.loss_vol(z[:, ~self._p]) if (~self._p).any() else torch.tensor(0.0, device=z.device)
+        # Volume loss: sum over active dims, normalized by total latent dim
+        if (~self._p).any():
+            s = z[:, ~self._p].std(0)
+            vol_loss = torch.exp(torch.log(s + self.eta).sum() / len(self._p))
+        else:
+            vol_loss = torch.tensor(0.0, device=z.device)
 
         return torch.stack(
             [
@@ -473,8 +482,12 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
         pz = z[:, : self.perf_dim]
         p_hat = self.predictor(torch.cat([pz, c], dim=-1))
 
-        # Volume loss over active dimensions only
-        vol_loss = self.loss_vol(z[:, ~self._p]) if (~self._p).any() else torch.tensor(0.0, device=z.device)
+        # Volume loss: sum over active dims, normalized by total latent dim
+        if (~self._p).any():
+            s = z[:, ~self._p].std(0)
+            vol_loss = torch.exp(torch.log(s + self.eta).sum() / len(self._p))
+        else:
+            vol_loss = torch.tensor(0.0, device=z.device)
 
         return torch.stack(
             [
