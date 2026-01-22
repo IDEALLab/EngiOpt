@@ -75,6 +75,8 @@ class Args:
     # Volume weight warmup
     volume_warmup_epochs: int = 0
     """Epochs to polynomially ramp volume weight from 0 to w_volume. 0 disables warmup."""
+    volume_warmup_degree: float = 2.0
+    """Polynomial degree for volume weight warmup (1.0=linear, 2.0=quadratic)."""
 
     # Architecture
     resize_dimensions: tuple[int, int] = (100, 100)
@@ -182,7 +184,7 @@ class Decoder(nn.Module):
         return self.resize_out(x)  # (B,1,H_orig,W_orig)
 
 
-def volume_weight_schedule(epoch: int, w_rec: float, w_vol: float, warmup_epochs: int) -> th.Tensor:
+def volume_weight_schedule(epoch: int, w_rec: float, w_vol: float, warmup_epochs: int, degree: float) -> th.Tensor:
     """Compute weights with polynomial ramp on volume weight.
 
     Args:
@@ -190,14 +192,15 @@ def volume_weight_schedule(epoch: int, w_rec: float, w_vol: float, warmup_epochs
         w_rec: Reconstruction weight (constant).
         w_vol: Final volume weight after warmup.
         warmup_epochs: Epochs to ramp volume weight from 0 to w_vol.
+        degree: Polynomial degree (1.0=linear, 2.0=quadratic).
 
     Returns:
-        Tensor [w_rec, current_w_vol] where current_w_vol ramps quadratically.
+        Tensor [w_rec, current_w_vol] where current_w_vol ramps polynomially.
     """
     if warmup_epochs <= 0:
         return th.tensor([w_rec, w_vol], dtype=th.float)
     t = min(epoch / warmup_epochs, 1.0)
-    return th.tensor([w_rec, w_vol * t * t], dtype=th.float)
+    return th.tensor([w_rec, w_vol * (t**degree)], dtype=th.float)
 
 
 if __name__ == "__main__":
@@ -244,6 +247,7 @@ if __name__ == "__main__":
         w_rec=args.w_reconstruction,
         w_vol=args.w_volume,
         warmup_epochs=args.volume_warmup_epochs,
+        degree=args.volume_warmup_degree,
     )
 
     # Initialize vanilla LVAE with dynamic pruning

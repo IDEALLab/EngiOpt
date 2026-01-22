@@ -270,11 +270,11 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         d_log = log_srt[1:] - log_srt[:-1]
 
         # Find the steepest drop (most negative value)
+        # d_log[i] = log(srt[i+1]) - log(srt[i]), so argmin gives the index BEFORE the drop
         pidx_sorted = d_log.argmin()
 
-        # Use variance at the drop as reference
-        ref_idx = idx[pidx_sorted]
-        ref = z_std[ref_idx]
+        # Use variance BEFORE the drop as reference (the last "good" dimension)
+        ref = srt[pidx_sorted]
 
         # Prune dimensions with ratio below threshold relative to reference
         ratio = z_std / (ref + 1e-12)
