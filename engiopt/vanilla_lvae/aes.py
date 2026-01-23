@@ -190,6 +190,7 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         beta: float = 0.9,
         pruning_epoch: int = 500,
         plummet_threshold: float = 0.02,
+        pruned_std: float = 1e-4,
     ) -> None:
         if weights is None:
             weights = [1.0, 0.001]
@@ -201,6 +202,7 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         self._beta = beta
         self.pruning_epoch = pruning_epoch
         self.plummet_threshold = plummet_threshold
+        self.pruned_std = pruned_std
 
         # EMA statistics (initialized on first batch)
         self._zstd: torch.Tensor | None = None
@@ -237,13 +239,12 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         x_hat = self.decode(z)
         self._update_moving_mean(z)
 
-        # Volume loss: sum over active dims, normalized by total latent dim
-        # This ensures volume decreases as dims are pruned
+        # Volume loss: all dims contribute, pruned dims use pruned_std
+        # This ensures volume DECREASES when dims are pruned
+        s = torch.full((len(self._p),), self.pruned_std, device=z.device)
         if (~self._p).any():
-            s = z[:, ~self._p].std(0)
-            vol_loss = torch.exp(torch.log(s + self.eta).sum() / len(self._p))
-        else:
-            vol_loss = torch.tensor(0.0, device=z.device)
+            s[~self._p] = z[:, ~self._p].std(0)
+        vol_loss = torch.exp(torch.log(s).mean())
 
         return torch.stack([self.loss_rec(x, x_hat), vol_loss])
 
@@ -358,6 +359,7 @@ class PerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         beta: float = 0.9,
         pruning_epoch: int = 500,
         plummet_threshold: float = 0.02,
+        pruned_std: float = 1e-4,
     ) -> None:
         if weights is None:
             weights = [1.0, 1.0, 0.001]
@@ -371,6 +373,7 @@ class PerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
             beta=beta,
             pruning_epoch=pruning_epoch,
             plummet_threshold=plummet_threshold,
+            pruned_std=pruned_std,
         )
         self.predictor = predictor
 
@@ -393,12 +396,12 @@ class PerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         # Performance prediction using full latent + conditions
         p_hat = self.predictor(torch.cat([z, c], dim=-1))
 
-        # Volume loss: sum over active dims, normalized by total latent dim
+        # Volume loss: all dims contribute, pruned dims use pruned_std
+        # This ensures volume DECREASES when dims are pruned
+        s = torch.full((len(self._p),), self.pruned_std, device=z.device)
         if (~self._p).any():
-            s = z[:, ~self._p].std(0)
-            vol_loss = torch.exp(torch.log(s + self.eta).sum() / len(self._p))
-        else:
-            vol_loss = torch.tensor(0.0, device=z.device)
+            s[~self._p] = z[:, ~self._p].std(0)
+        vol_loss = torch.exp(torch.log(s).mean())
 
         return torch.stack(
             [
@@ -445,6 +448,7 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
         beta: float = 0.9,
         pruning_epoch: int = 500,
         plummet_threshold: float = 0.02,
+        pruned_std: float = 1e-4,
     ) -> None:
         if weights is None:
             weights = [1.0, 0.1, 0.001]
@@ -458,6 +462,7 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
             beta=beta,
             pruning_epoch=pruning_epoch,
             plummet_threshold=plummet_threshold,
+            pruned_std=pruned_std,
         )
         self.predictor = predictor
         self.perf_dim = perf_dim
@@ -482,12 +487,12 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
         pz = z[:, : self.perf_dim]
         p_hat = self.predictor(torch.cat([pz, c], dim=-1))
 
-        # Volume loss: sum over active dims, normalized by total latent dim
+        # Volume loss: all dims contribute, pruned dims use pruned_std
+        # This ensures volume DECREASES when dims are pruned
+        s = torch.full((len(self._p),), self.pruned_std, device=z.device)
         if (~self._p).any():
-            s = z[:, ~self._p].std(0)
-            vol_loss = torch.exp(torch.log(s + self.eta).sum() / len(self._p))
-        else:
-            vol_loss = torch.tensor(0.0, device=z.device)
+            s[~self._p] = z[:, ~self._p].std(0)
+        vol_loss = torch.exp(torch.log(s).mean())
 
         return torch.stack(
             [
