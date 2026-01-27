@@ -269,11 +269,14 @@ if __name__ == "__main__":
             name=run_name,
         )
 
-    # Seeding
+    # Seeding for reproducibility
     th.manual_seed(args.seed)
+    th.cuda.manual_seed_all(args.seed)
     rng = np.random.default_rng(args.seed)
     random.seed(args.seed)
     th.backends.cudnn.deterministic = True
+    th.backends.cudnn.benchmark = False
+    g = th.Generator().manual_seed(args.seed)  # For DataLoader shuffling
 
     os.makedirs("images", exist_ok=True)
 
@@ -373,6 +376,7 @@ if __name__ == "__main__":
         TensorDataset(x_train, c_train_scaled, p_train_scaled),
         batch_size=args.batch_size,
         shuffle=True,
+        generator=g,
     )
     val_loader = DataLoader(
         TensorDataset(x_val, c_val_scaled, p_val_scaled),
