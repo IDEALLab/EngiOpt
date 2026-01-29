@@ -686,6 +686,273 @@ class SoftplusALHandler(ConstraintHandler):
         }
 
 
+class PenaltyMethodHandler(ConstraintHandler):
+    """Simple penalty method - easier to tune than augmented Lagrangian.
+
+    Loss = volume + penalty_weight * [max(0, rec - ε_r)² + max(0, perf - ε_p)²]
+
+    Unlike augmented Lagrangian, this method:
+    - Has NO dual variables (λ) to update
+    - Uses ONLY quadratic penalties (no linear terms)
+    - Requires just ONE hyperparameter (penalty_weight)
+    - Grows penalty_weight over time to enforce constraints
+
+    This is much simpler and more robust than augmented Lagrangian while still
+    being principled. It's essentially weighted sum applied to constraint violations.
+
+    Args:
+        penalty_weight_init: Initial penalty weight (default: 100.0)
+        penalty_weight_final: Final penalty weight (default: 10000.0)
+        penalty_growth_rate: Multiplicative growth per epoch when constraints violated (default: 1.05)
+        warmup_epochs: Epochs to linearly ramp up penalty weight (default: 100)
+    """
+
+    def __init__(
+        self,
+        penalty_weight_init: float = 100.0,
+        penalty_weight_final: float = 10000.0,
+        penalty_growth_rate: float = 1.05,
+        warmup_epochs: int = 100,
+        device: torch.device | None = None,
+        volume_warmup_epochs: int = 0,
+    ):
+        if device is None:
+            device = torch.device("cpu")
+        super().__init__(device, volume_warmup_epochs)
+        self.penalty_weight_init = penalty_weight_init
+        self.penalty_weight_final = penalty_weight_final
+        self.penalty_growth_rate = penalty_growth_rate
+        self.warmup_epochs = warmup_epochs
+
+        # State: current penalty weight
+        self.penalty_weight = penalty_weight_init
+
+    def compute_loss(
+        self,
+        losses: ConstraintLosses,
+        thresholds: ConstraintThresholds,
+    ) -> torch.Tensor:
+        # Compute constraint violations
+        rec_violation = torch.clamp(losses.reconstruction - thresholds.reconstruction, min=0.0)
+        perf_violation = torch.clamp(losses.performance - thresholds.performance, min=0.0)
+
+        # Apply polynomial warmup schedule to volume loss
+        volume_weight = self._get_volume_weight()
+
+        # Simple penalty formulation: volume + penalty * violations²
+        return volume_weight * losses.volume + self.penalty_weight * (rec_violation**2 + perf_violation**2)
+
+    def step(self, losses: ConstraintLosses, thresholds: ConstraintThresholds) -> None:
+        """Increase penalty weight if constraints are violated."""
+        rec_violation = torch.clamp(losses.reconstruction - thresholds.reconstruction, min=0.0)
+        perf_violation = torch.clamp(losses.performance - thresholds.performance, min=0.0)
+
+        # If either constraint is violated, increase penalty weight
+        if rec_violation > 0 or perf_violation > 0:
+            self.penalty_weight = min(self.penalty_weight * self.penalty_growth_rate, self.penalty_weight_final)
+
+    def get_metrics(self) -> dict[str, float]:
+        return {
+            "constraint/penalty_weight": self.penalty_weight,
+            "constraint/volume_warmup_weight": self._get_volume_weight(),
+        }
+
+
+class AdaptiveConstraintHandler(ConstraintHandler):
+    """Adaptive penalty with constraint-gated volume loss (RECOMMENDED).
+
+    Prevents volume collapse by completely disabling volume loss until constraints
+    are close to satisfaction, then smoothly transitioning to full volume minimization.
+
+    Key features:
+    - Zero hyperparameter tuning: same defaults work across applications
+    - Collapse-proof: volume loss = 0 when constraints far from satisfied
+    - Adaptive penalties: auto-scale based on training dynamics
+    - Aggregate performance: supports multiple metrics
+
+    Loss formulation:
+        loss = volume_gate(violations) * volume + penalty_r * rec_viol² + penalty_p * perf_viol²
+
+    where volume_gate ∈ [0, 1] based on constraint proximity.
+
+    Args:
+        enable_volume_gating: Enable/disable volume gating (default: True for collapse prevention)
+        safety_margin: Relative violation threshold for volume gating (default: 0.1 = 10%)
+        penalty_init: Initial penalty weight (default: 1.0)
+        penalty_max: Maximum penalty weight (default: 1000.0)
+        penalty_growth: Growth rate when violated (default: 1.1)
+        penalty_decay: Decay rate when satisfied (default: 0.95)
+        transition_sharpness: Smoothness of volume gate (default: 2.0)
+        performance_aggregation: How to combine multiple metrics ("mean", "max", "weighted")
+        performance_weights: Weights for "weighted" aggregation
+        device: Torch device
+        volume_warmup_epochs: (Inherited) Additional warmup if desired (default: 0)
+
+    Example:
+        >>> handler = AdaptiveConstraintHandler(
+        ...     safety_margin=0.1,  # Volume gated until within 10% of threshold
+        ...     penalty_growth=1.1,  # 10% increase per epoch when violated
+        ... )
+        >>> # Training loop
+        >>> loss = handler.compute_loss(losses, thresholds)
+        >>> loss.backward()
+        >>> optimizer.step()
+        >>> handler.step(losses, thresholds)  # Update penalties
+    """
+
+    def __init__(
+        self,
+        *,
+        enable_volume_gating: bool = True,
+        safety_margin: float = 0.1,
+        penalty_init: float = 1.0,
+        penalty_max: float = 1000.0,
+        penalty_growth: float = 1.1,
+        penalty_decay: float = 0.95,
+        transition_sharpness: float = 2.0,
+        performance_aggregation: str = "mean",
+        performance_weights: list[float] | None = None,
+        device: torch.device | None = None,
+        volume_warmup_epochs: int = 0,
+    ):
+        if device is None:
+            device = torch.device("cpu")
+        super().__init__(device=device, volume_warmup_epochs=volume_warmup_epochs)
+
+        # Volume gating parameters
+        self.enable_volume_gating = enable_volume_gating
+        self.safety_margin = safety_margin
+        self.transition_sharpness = transition_sharpness
+
+        # Adaptive penalty parameters
+        self.penalty_init = penalty_init
+        self.penalty_max = penalty_max
+        self.penalty_growth = penalty_growth
+        self.penalty_decay = penalty_decay
+
+        # Separate penalties for reconstruction and performance
+        self.penalty_r = torch.tensor(penalty_init, dtype=torch.float32, device=self.device)
+        self.penalty_p = torch.tensor(penalty_init, dtype=torch.float32, device=self.device)
+
+        # Performance aggregation
+        self.performance_aggregation = performance_aggregation
+        self.performance_weights = performance_weights
+
+        # Tracking for diagnostics
+        self._last_volume_gate = 0.0
+        self._last_rec_violation = 0.0
+        self._last_perf_violation = 0.0
+
+    def _compute_volume_gate(self, losses: ConstraintLosses, thresholds: ConstraintThresholds) -> float:
+        """Compute volume loss gating based on constraint violations.
+
+        Returns volume weight in [0, 1]:
+        - 0.0: Constraints far from satisfied (volume loss completely disabled)
+        - (0, 1): Smooth transition when approaching feasibility
+        - 1.0: Constraints satisfied (full volume minimization)
+
+        If enable_volume_gating=False, always returns 1.0 (no gating).
+        """
+        # If volume gating disabled, always return 1.0 (no gating)
+        if not self.enable_volume_gating:
+            return 1.0
+
+        # Compute normalized violations (as fraction of threshold)
+        rec_violation = (losses.reconstruction - thresholds.reconstruction) / (
+            thresholds.reconstruction + 1e-8
+        )
+        perf_violation = (losses.performance - thresholds.performance) / (thresholds.performance + 1e-8)
+
+        # Use max violation for conservative gating
+        max_violation = torch.maximum(rec_violation, perf_violation).item()
+
+        # Store for diagnostics
+        self._last_rec_violation = rec_violation.item()
+        self._last_perf_violation = perf_violation.item()
+
+        # Hard gate if far from feasible
+        if max_violation > self.safety_margin:
+            self._last_volume_gate = 0.0
+            return 0.0
+
+        # Smooth transition using sigmoid when close to feasible
+        # Maps: violation ∈ [safety_margin, 0] → gate ∈ [0, 1]
+        if max_violation > 0:
+            # Normalize to [0, 1] range
+            normalized = max_violation / self.safety_margin
+            # Sigmoid: smooth S-curve from 0→1 as violation→0
+            gate = 1.0 / (1.0 + torch.exp(torch.tensor(self.transition_sharpness * (normalized - 0.5))))
+            self._last_volume_gate = gate.item()
+            return gate.item()
+
+        # Constraints satisfied: full volume minimization
+        self._last_volume_gate = 1.0
+        return 1.0
+
+    def compute_loss(self, losses: ConstraintLosses, thresholds: ConstraintThresholds) -> torch.Tensor:
+        """Compute total loss with gated volume and adaptive penalties.
+
+        Args:
+            losses: Current loss values
+            thresholds: Constraint thresholds
+
+        Returns:
+            Total loss combining gated volume and penalty terms
+        """
+        # Compute volume gate (0 if far from feasible, 1 if satisfied)
+        volume_gate = self._compute_volume_gate(losses, thresholds)
+
+        # Apply inherited volume warmup on top of gating
+        volume_weight = volume_gate * self._get_volume_weight()
+
+        # Compute penalty terms (quadratic for smooth gradients)
+        rec_violation = torch.clamp(losses.reconstruction - thresholds.reconstruction, min=0.0)
+        perf_violation = torch.clamp(losses.performance - thresholds.performance, min=0.0)
+
+        penalty_term = self.penalty_r * rec_violation**2 + self.penalty_p * perf_violation**2
+
+        # Total loss
+        return volume_weight * losses.volume + penalty_term
+
+    def step(self, losses: ConstraintLosses, thresholds: ConstraintThresholds) -> None:
+        """Update penalty weights based on constraint satisfaction.
+
+        Args:
+            losses: Current loss values (detached)
+            thresholds: Constraint thresholds
+        """
+        rec_violation = (losses.reconstruction - thresholds.reconstruction).item()
+        perf_violation = (losses.performance - thresholds.performance).item()
+
+        # Adapt reconstruction penalty
+        if rec_violation > 0:
+            self.penalty_r = torch.clamp(self.penalty_r * self.penalty_growth, max=self.penalty_max)
+        else:
+            self.penalty_r = torch.clamp(self.penalty_r * self.penalty_decay, min=self.penalty_init)
+
+        # Adapt performance penalty
+        if perf_violation > 0:
+            self.penalty_p = torch.clamp(self.penalty_p * self.penalty_growth, max=self.penalty_max)
+        else:
+            self.penalty_p = torch.clamp(self.penalty_p * self.penalty_decay, min=self.penalty_init)
+
+    def get_metrics(self) -> dict[str, float]:
+        """Return handler state for logging.
+
+        Returns:
+            Dictionary of metrics for WandB/logging
+        """
+        return {
+            "constraint/volume_gate": self._last_volume_gate,
+            "constraint/penalty_r": self.penalty_r.item(),
+            "constraint/penalty_p": self.penalty_p.item(),
+            "constraint/rec_violation": self._last_rec_violation,
+            "constraint/perf_violation": self._last_perf_violation,
+            "constraint/in_transition": 1.0 if 0 < self._last_volume_gate < 1 else 0.0,
+            "constraint/volume_warmup_weight": self._get_volume_weight(),
+        }
+
+
 # Factory function for easy instantiation
 def create_constraint_handler(
     method: str,
@@ -695,8 +962,8 @@ def create_constraint_handler(
     """Factory function to create constraint handler by name.
 
     Args:
-        method: Handler name (weighted_sum, augmented_lagrangian, log_barrier,
-                primal_dual, adaptive, softplus_al)
+        method: Handler name (weighted_sum, penalty_method, augmented_lagrangian,
+                log_barrier, primal_dual, adaptive, softplus_al)
         device: Device to store tensors on
         **kwargs: Method-specific arguments
 
@@ -708,11 +975,13 @@ def create_constraint_handler(
     """
     handlers = {
         "weighted_sum": WeightedSumHandler,
+        "penalty_method": PenaltyMethodHandler,
         "augmented_lagrangian": AugmentedLagrangianHandler,
         "log_barrier": LogBarrierHandler,
         "primal_dual": PrimalDualHandler,
         "adaptive": AdaptiveWeightHandler,
         "softplus_al": SoftplusALHandler,
+        "adaptive_constraint": AdaptiveConstraintHandler,
     }
 
     if method not in handlers:

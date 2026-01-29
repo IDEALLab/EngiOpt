@@ -13,9 +13,13 @@ Architecture:
 - TrueSNDecoder: Spectral normalized decoder (latent → 100x100)
 - LeastVolumeAE_DynamicPruning: Dynamically prunes low-variance dimensions
 
+Constraint-aware pruning:
+- Dimensions are only pruned when reconstruction constraint is satisfied
+- Volume loss calculated over entire latent space (not scaled by active dimensions)
+
 Supported constraint methods:
-- augmented_lagrangian (recommended)
-- log_barrier, primal_dual, adaptive, softplus_al, weighted_sum
+- penalty_method (recommended - simple, robust, auto-adapting)
+- weighted_sum, augmented_lagrangian, log_barrier, primal_dual, adaptive, softplus_al
 """
 
 from __future__ import annotations
@@ -84,12 +88,14 @@ class Args:
     """Dimensionality of the latent space (overestimate)."""
 
     # Constraint optimization method
-    constraint_method: str = "augmented_lagrangian"
-    """Constraint method: weighted_sum, augmented_lagrangian, log_barrier, primal_dual, adaptive, softplus_al"""
+    constraint_method: str = "penalty_method"
+    """Constraint method: adaptive_constraint (recommended), penalty_method, weighted_sum, augmented_lagrangian, log_barrier, primal_dual, adaptive, softplus_al"""
 
     # Constraint thresholds (used by all methods except weighted_sum)
     reconstruction_threshold: float = 0.001
     """Constraint threshold for reconstruction MSE. Volume is minimized subject to reconstruction_loss <= this value."""
+
+    # === Tier 1: Universal Constraint Parameters ===
 
     # Weighted sum parameters (used when constraint_method='weighted_sum')
     w_volume: float = 1.0
@@ -97,41 +103,102 @@ class Args:
     w_reconstruction: float = 1.0
     """Weight for reconstruction loss in weighted sum method."""
 
-    # Augmented Lagrangian parameters (used when constraint_method='augmented_lagrangian' or 'softplus_al')
+    # === Tier 2: Shared Penalty Parameters ===
+    # Used by: penalty_method, adaptive_constraint, augmented_lagrangian, log_barrier, softplus_al
+
+    penalty_init: float = 1.0
+    """Initial penalty coefficient (low to allow early violations). Used by penalty-based methods.
+
+    Method-specific mappings:
+    - penalty_method: penalty_weight_init
+    - adaptive_constraint: penalty_init
+    - augmented_lagrangian: mu_r_init
+    - log_barrier: t_init
+    - softplus_al: mu_r_init
+
+    Recommended defaults:
+    - adaptive_constraint: 1.0 (volume gating allows low start)
+    - penalty_method: 100.0 (no volume gating, needs stronger initial penalty)
+    - augmented_lagrangian: 100.0
+    - log_barrier: 1.0
+    """
+
+    penalty_max: float = 1000.0
+    """Maximum penalty coefficient (prevents numerical issues). Used by penalty-based methods.
+
+    Method-specific mappings:
+    - penalty_method: penalty_weight_final
+    - adaptive_constraint: penalty_max
+    - augmented_lagrangian: mu_r
+    - log_barrier: t_max
+    - softplus_al: mu_r
+
+    Recommended: 1000.0 (works across most applications)
+    """
+
+    penalty_growth: float = 1.1
+    """Multiplicative growth rate for penalty coefficient. Used by penalty-based methods.
+
+    Method-specific mappings:
+    - penalty_method: penalty_growth_rate
+    - adaptive_constraint: penalty_growth
+    - log_barrier: t_growth
+
+    Recommended: 1.05-1.1 (5-10% increase per epoch/step)
+    """
+
+    penalty_warmup_epochs: int = 0
+    """Epochs to linearly ramp penalty from penalty_init to penalty_max. Used by some methods.
+
+    Method-specific mappings:
+    - penalty_method: warmup_epochs
+    - augmented_lagrangian: warmup_epochs
+
+    Set to 0 to disable linear warmup (use reactive growth instead).
+    Recommended: 0 for adaptive_constraint (uses reactive growth), 100 for penalty_method/augmented_lagrangian
+    """
+
+    volume_warmup_epochs: int = 0
+    """Epochs to polynomially (2nd order) ramp volume loss weight from 0 to 1.
+    Used by ALL methods via base ConstraintHandler class.
+
+    This prevents early volume collapse by delaying volume loss introduction.
+    Recommended: 0 for adaptive_constraint (volume gating is better), 50-100 for penalty_method
+    """
+
+    # === Tier 3: Method-Specific Parameters ===
+
+    # Adaptive Constraint specific (used when constraint_method='adaptive_constraint')
+    enable_volume_gating: bool = True
+    """Enable volume gating to prevent collapse (recommended: True). Set to False for standard penalty method behavior."""
+    safety_margin: float = 0.1
+    """Relative violation threshold for volume gating (0.1 = 10% of threshold)."""
+    penalty_decay: float = 0.95
+    """Decay rate for adaptive penalty when constraints satisfied (0.95 = 5% decrease per epoch)."""
+    transition_sharpness: float = 2.0
+    """Smoothness of volume gate transition (higher = sharper)."""
+
+    # Augmented Lagrangian specific (used when constraint_method='augmented_lagrangian' or 'softplus_al')
     alpha_r: float = 1.0
     """Learning rate for reconstruction Lagrange multiplier (dual ascent)."""
-    mu_r_init: float = 100.0
-    """Initial penalty coefficient for reconstruction constraint."""
-    mu_r: float = 1000.0
-    """Final penalty coefficient for reconstruction constraint (augmented Lagrangian)."""
-    warmup_epochs: int = 100
-    """Number of epochs to linearly ramp up penalty coefficients (mu_r) from init to final values."""
-    volume_warmup_epochs: int = 50
-    """Number of epochs to ignore volume loss and only minimize reconstruction (prevents early collapse)."""
 
-    # Softplus AL parameters (used when constraint_method='softplus_al')
+    # Softplus AL specific (used when constraint_method='softplus_al')
     softplus_beta: float = 10.0
     """Smoothness parameter for softplus activation (larger = sharper, closer to ReLU)."""
 
-    # Log barrier parameters (used when constraint_method='log_barrier')
-    t_init: float = 1.0
-    """Initial barrier parameter (larger = stricter constraints)."""
-    t_growth: float = 1.05
-    """Multiplicative growth rate for barrier parameter per epoch."""
-    t_max: float = 1000.0
-    """Maximum barrier parameter."""
+    # Log Barrier specific (used when constraint_method='log_barrier')
     barrier_epsilon: float = 1e-6
     """Safety margin from constraint boundary."""
     fallback_penalty: float = 1e6
     """Penalty multiplier when constraints are violated (infeasible)."""
 
-    # Primal-dual parameters (used when constraint_method='primal_dual')
+    # Primal-Dual specific (used when constraint_method='primal_dual')
     lr_dual: float = 0.01
     """Learning rate for dual variable updates."""
     clip_lambda: float = 100.0
     """Maximum value for dual variables (Lagrange multipliers)."""
 
-    # Adaptive weight parameters (used when constraint_method='adaptive')
+    # Adaptive Weight specific (used when constraint_method='adaptive')
     adaptation_lr: float = 0.01
     """Learning rate for automatic weight adaptation."""
     update_frequency: int = 10
@@ -310,6 +377,9 @@ class ConstrainedLVAE(LeastVolumeAE_DynamicPruning):
     reconstruction constraints.
 
     Supports multiple constraint optimization methods via constraint_handler.
+
+    Implements constraint-aware pruning: dimensions are only pruned when reconstruction
+    constraint is satisfied.
     """
 
     def __init__(
@@ -330,6 +400,7 @@ class ConstrainedLVAE(LeastVolumeAE_DynamicPruning):
         self.constraint_handler = constraint_handler
         self.reconstruction_threshold = reconstruction_threshold
         self.performance_threshold = float("inf")  # Not used (no performance prediction)
+        self._constraints_satisfied = False
 
     def loss(self, batch, **kwargs):
         """Compute loss components and total loss using constraint handler.
@@ -349,8 +420,8 @@ class ConstrainedLVAE(LeastVolumeAE_DynamicPruning):
 
         # Compute individual loss components
         reconstruction_loss = self.loss_rec(x, x_hat)
-        # active_ratio = self.dim / len(self._p)  # Scale volume loss by active dimension ratio
-        volume_loss = self.loss_vol(z[:, ~self._p])
+        # Volume loss calculated over entire latent space (not scaled by active dimension ratio)
+        volume_loss = self.loss_vol(z[:, ~self._p]) if (~self._p).any() else th.tensor(0.0, device=z.device)
 
         # Store components for handler (performance=0 since no performance prediction)
         self._loss_components = ConstraintLosses(
@@ -386,6 +457,30 @@ class ConstrainedLVAE(LeastVolumeAE_DynamicPruning):
             performance=self._loss_components.performance.detach(),
         )
         self.constraint_handler.step(detached_losses, thresholds)
+
+    def _check_constraints_satisfied(self) -> bool:
+        """Check if reconstruction constraint is satisfied.
+
+        Returns:
+            True if reconstruction loss is below threshold, False otherwise.
+        """
+        if self._loss_components is None:
+            return False
+        return self._loss_components.reconstruction.item() <= self.reconstruction_threshold
+
+    def _prune_step(self, epoch, val_recon=None):
+        """Prune dimensions only if reconstruction constraint is satisfied.
+
+        Overrides parent method to add constraint checking before pruning.
+
+        Args:
+            epoch: Current epoch number
+            val_recon: Optional validation reconstruction loss
+        """
+        # Only prune if reconstruction constraint is satisfied
+        if not self._check_constraints_satisfied():
+            return  # Skip pruning if constraint not satisfied
+        super()._prune_step(epoch, val_recon=val_recon)
 
     def epoch_hook(self, epoch, *args, **kwargs):
         """Update current epoch for constraint handler."""
@@ -447,37 +542,80 @@ if __name__ == "__main__":
         raise ValueError(f"Unknown pruning_strategy: {args.pruning_strategy}")
 
     # Create constraint handler based on method
+    # Note: unified parameters (penalty_init, penalty_max, penalty_growth, penalty_warmup_epochs)
+    # are mapped to method-specific names here
     handler_kwargs = {"device": device, "volume_warmup_epochs": args.volume_warmup_epochs}
+
     if args.constraint_method == "weighted_sum":
         handler_kwargs.update(
             {
                 "w_volume": args.w_volume,
                 "w_reconstruction": args.w_reconstruction,
-                "w_performance": 0.0,  # Not used
+                "w_performance": 0.0,  # Not used (single constraint)
             }
         )
+
+    elif args.constraint_method == "penalty_method":
+        handler_kwargs.update(
+            {
+                "penalty_weight_init": args.penalty_init,  # Unified parameter
+                "penalty_weight_final": args.penalty_max,  # Unified parameter
+                "penalty_growth_rate": args.penalty_growth,  # Unified parameter
+                "warmup_epochs": args.penalty_warmup_epochs,  # Unified parameter
+            }
+        )
+
+    elif args.constraint_method == "adaptive_constraint":
+        handler_kwargs.update(
+            {
+                "enable_volume_gating": args.enable_volume_gating,
+                "safety_margin": args.safety_margin,
+                "penalty_init": args.penalty_init,  # Unified parameter
+                "penalty_max": args.penalty_max,  # Unified parameter
+                "penalty_growth": args.penalty_growth,  # Unified parameter
+                "penalty_decay": args.penalty_decay,
+                "transition_sharpness": args.transition_sharpness,
+            }
+        )
+
     elif args.constraint_method == "augmented_lagrangian":
         handler_kwargs.update(
             {
-                "mu_r_init": args.mu_r_init,
-                "mu_p_init": 0.0,  # Not used
-                "mu_r_final": args.mu_r,
-                "mu_p_final": 0.0,
+                "mu_r_init": args.penalty_init,  # Unified parameter
+                "mu_p_init": 0.0,  # Not used (single constraint)
+                "mu_r_final": args.penalty_max,  # Unified parameter
+                "mu_p_final": 0.0,  # Not used (single constraint)
                 "alpha_r": args.alpha_r,
-                "alpha_p": 0.0,  # Not used
-                "warmup_epochs": args.warmup_epochs,
+                "alpha_p": 0.0,  # Not used (single constraint)
+                "warmup_epochs": args.penalty_warmup_epochs,  # Unified parameter
             }
         )
+
+    elif args.constraint_method == "softplus_al":
+        handler_kwargs.update(
+            {
+                "beta": args.softplus_beta,
+                "mu_r_init": args.penalty_init,  # Unified parameter
+                "mu_p_init": 0.0,  # Not used (single constraint)
+                "mu_r_final": args.penalty_max,  # Unified parameter
+                "mu_p_final": 0.0,  # Not used (single constraint)
+                "alpha_r": args.alpha_r,
+                "alpha_p": 0.0,  # Not used (single constraint)
+                "warmup_epochs": args.penalty_warmup_epochs,  # Unified parameter
+            }
+        )
+
     elif args.constraint_method == "log_barrier":
         handler_kwargs.update(
             {
-                "t_init": args.t_init,
-                "t_growth": args.t_growth,
-                "t_max": args.t_max,
+                "t_init": args.penalty_init,  # Unified parameter
+                "t_growth": args.penalty_growth,  # Unified parameter
+                "t_max": args.penalty_max,  # Unified parameter
                 "epsilon": args.barrier_epsilon,
                 "fallback_penalty": args.fallback_penalty,
             }
         )
+
     elif args.constraint_method == "primal_dual":
         handler_kwargs.update(
             {
@@ -485,29 +623,18 @@ if __name__ == "__main__":
                 "clip_lambda": args.clip_lambda,
             }
         )
+
     elif args.constraint_method == "adaptive":
         handler_kwargs.update(
             {
                 "w_volume_init": args.w_volume,
                 "w_reconstruction_init": args.w_reconstruction,
-                "w_performance_init": 0.0,  # Not used
+                "w_performance_init": 0.0,  # Not used (single constraint)
                 "adaptation_lr": args.adaptation_lr,
                 "update_frequency": args.update_frequency,
             }
         )
-    elif args.constraint_method == "softplus_al":
-        handler_kwargs.update(
-            {
-                "beta": args.softplus_beta,
-                "mu_r_init": args.mu_r_init,
-                "mu_p_init": 0.0,
-                "mu_r_final": args.mu_r,
-                "mu_p_final": 0.0,
-                "alpha_r": args.alpha_r,
-                "alpha_p": 0.0,
-                "warmup_epochs": args.warmup_epochs,
-            }
-        )
+
     else:
         raise ValueError(f"Unknown constraint_method: {args.constraint_method}")
 
