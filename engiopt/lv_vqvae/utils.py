@@ -54,18 +54,17 @@ def token_stats_from_indices(indices: th.Tensor, *, vocab_size: int) -> dict[str
     }
 
 
-def loss_vol(z: th.Tensor, *, eta: float) -> th.Tensor:
+def loss_vol(z: th.Tensor, *, active_mask: th.Tensor, frozen_std: th.Tensor, eta: float) -> th.Tensor:
     """Volume loss = exp(mean(log(std_i + eta))) over latent dims.
 
-    If z is (B, C, H, W): std is over (B, H, W) per channel C.
-    If z is (B, C): std is over B per channel C.
+    Assumes z is (B, C, H, W): std is over (B, H, W) per channel C.
     """
-    if z.dim() == 4:  # noqa: PLR2004
-        s = z.float().std(dim=(0, 2, 3))
-    elif z.dim() == 2:  # noqa: PLR2004
-        s = z.float().std(dim=0)
-    else:
-        raise ValueError(f"loss_vol expects z dim 2 or 4, got shape {tuple(z.shape)}")
+    # Pruned dims use frozen std (captured at prune time),
+    # active dims use current std. This makes pruning volume-neutral.
+    s = frozen_std.clone()
+    if active_mask.any():
+        s[active_mask] = z[:, active_mask, :, :].std(dim=(0, 2, 3))
+
     return th.exp(th.log(s + float(eta)).mean())
 
 

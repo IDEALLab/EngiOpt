@@ -25,9 +25,11 @@ Notes for this version:
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field
 import os
 import random
 import time
+from typing import Any
 import warnings
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
@@ -153,7 +155,7 @@ class Args:
     """epoch to start applying LV loss (keep LV loss weight = 0 before this)"""
     lv_pruning_epoch: int = 20
     """epoch to start pruning latent dimensions (after LV has had time to shape the space)"""
-    lv_w_max: float = 1e-4
+    lv_w_max: float = 0.01
     """maximum weight for the LV loss after ramp-up"""
     lv_ramp_epochs: int = 10
     """number of epochs to linearly ramp LV loss weight from 0 to lv_w_max"""
@@ -165,19 +167,16 @@ class Args:
     """validation MAE reconstruction target used as the pruning guardrail"""
     lv_pruning_strategy: str = "plummet"
     """strategy name (plummet, pca_cdf, lognorm, probabilistic)"""
-    lv_ratio_threshold: float = 0.02
-    """DEPRECATED - kept for backward compatibility only"""
-    lv_beta: float = 0.9
-    """EMA momentum for latent statistics"""
+    lv_pruning_params: dict[str, Any] | None = field(default_factory=lambda: {"threshold": 0.02, "beta": 0.9})
+    """least volume pruning parameters, default for plummet strategy with threshold 0.02 and beta 0.9"""
     lv_eta: float = 1e-4
     """smoothing parameter for volume loss"""
     lv_cooldown_epochs: int = 0
     """epochs to wait between pruning events (default: 0 = no cooldown)"""
     lv_k_consecutive: int = 1
     """consecutive epochs below threshold required (default: 1 = immediate)"""
-    lv_recon_tol: float = np.inf
+    lv_recon_tol: float = float("inf")
     """relative tolerance to best validation recon (default: inf = no constraint)"""
-
 
     # Codebook pruning (|Z|)
     # cb_prune_start_epoch: int = 20  # noqa: ERA001
@@ -515,10 +514,13 @@ class VQVAE(nn.Module):
         designs: th.Tensor,
         *,
         return_latents: bool = False,
+        active_mask: th.Tensor | None = None,
+        frozen_mean: th.Tensor | None = None
     ):
         """Full VQVAE forward pass."""
         encoded = self.encoder(designs)
         quant_encoded = self.quant_conv(encoded)
+        quant_encoded = self.apply_pruning(quant_encoded, active_mask, frozen_mean)
         quant, indices, q_loss, _, _ = self.codebook(quant_encoded)
         post_quant = self.post_quant_conv(quant)
         decoded = self.decoder(post_quant)
@@ -529,68 +531,131 @@ class VQVAE(nn.Module):
     def encode(
         self,
         designs: th.Tensor,
+        active_mask: th.Tensor | None = None,
+        frozen_mean: th.Tensor | None = None
     ) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         """Encode image batch into quantized latent representation."""
         encoded = self.encoder(designs)
         quant_encoded = self.quant_conv(encoded)
+        quant_encoded = self.apply_pruning(quant_encoded, active_mask, frozen_mean)
         z_q, indices, loss, min_encodings, perplexity = self.codebook(quant_encoded)
         return z_q, indices, loss, min_encodings, perplexity
 
-    def decode(self, z: th.Tensor) -> th.Tensor:
+    def decode(
+        self,
+        z: th.Tensor,
+        active_mask: th.Tensor | None = None,
+        frozen_mean: th.Tensor | None = None
+    ) -> th.Tensor:
         """Decode quantized latent representation back to image space."""
+        z = self.apply_pruning(z, active_mask, frozen_mean)
         return self.decoder(self.post_quant_conv(z))
 
+    def apply_pruning(self, z, active_mask, frozen_mean):
+        if active_mask is None or frozen_mean is None:
+            return z
+        pruned = ~active_mask
+        if not pruned.any():
+            return z
+        z = z.clone()
+        z[:, pruned, :, :] = frozen_mean[pruned].view(1, -1, 1, 1)
+        return z
+
     @th.no_grad()
-    def _prune_step(self, epoch, val_recon=None):
+    def prune_step(  # noqa: PLR0913
+        self,
+        min_active_dims: int,
+        recon_tol: float,
+        k_consecutive: int,
+        max_prune_per_epoch: int,
+        cooldown_epochs: int,
+        zmean: th.Tensor,
+        zstd: th.Tensor,
+        frozen_mean: th.Tensor,
+        frozen_std: th.Tensor,
+        policy: PruningPolicy,
+        active_mask: th.Tensor,
+        below_counts: th.Tensor,
+        epoch: int,
+        next_prune_epoch: int,
+        best_val_recon: float,
+        val_recon: float | None = None
+    ) -> (th.Tensor, th.Tensor, th.Tensor, th.Tensor, int) | None:
         """Core pruning step.
 
         Applies safeguards + policy to decide whether to prune dims this epoch.
         """
-        # --- Safeguards ---
-        if self.dim <= self.cfg.min_active_dims:  # stop if we go below min dims
-            return
-        if epoch < self._next_prune_epoch:  # respect cooldown
-            return
+        dim = int(active_mask.sum().item())
+
+        #  --- Safeguards ---
+        if dim <= min_active_dims:  #  stop if we go below min dims
+            return active_mask, frozen_mean, frozen_std, below_counts, next_prune_epoch
+        if epoch < next_prune_epoch:  #  respect cooldown
+            return active_mask, frozen_mean, frozen_std, below_counts, next_prune_epoch
         if (
             val_recon is not None
-            and self._best_val_recon < float("inf")
-            and (val_recon - self._best_val_recon) / self._best_val_recon > self.cfg.recon_tol
+            and best_val_recon < float("inf")
+            and (val_recon - best_val_recon) / best_val_recon > recon_tol
         ):
-            # Do not prune if recon is already worse than best_val by > tol
-            return
+            #  Do not prune if recon is already worse than best_val by > tol
+            return active_mask, frozen_mean, frozen_std, below_counts, next_prune_epoch
 
-        # --- Candidate selection from policy ---
-        # Only consider active (unpruned) dimensions for pruning policy
-        z_std_active = self._zstd[~self._p]
-        cand_active = self.policy(z_std_active).to(self._below_counts.device)
+        #  --- Candidate selection from policy ---
+        #  Only consider active (unpruned) dimensions for pruning policy
+        z_std_active = zstd[active_mask]
+        cand_active = policy(z_std_active).to(zstd.device)
 
-        # Map back to full dimension space
-        cand = th.zeros_like(self._p, dtype=th.bool)
-        cand[~self._p] = cand_active
+        #  Map back to full dimension space
+        cand = th.zeros_like(active_mask, dtype=th.bool)
+        cand[active_mask] = cand_active
 
-        # --- Debounce with consecutive evidence ---
-        # Keep a counter of how many epochs each dim has been marked as candidate
-        # If a dim is not a candidate in the current epoch, reset its count to 0.
-        if self.cfg.K_consecutive <= 1:
+        #  --- Debounce with consecutive evidence ---
+        #  Keep a counter of how many epochs each dim has been marked as candidate
+        #  If a dim is not a candidate in the current epoch, reset its count to 0.
+        if k_consecutive <= 1:
             stable = cand
-            self._below_counts.zero_()
+            below_counts.zero_()
         else:
-            # Count how many consecutive epochs each dim is a candidate
-            self._below_counts = (self._below_counts + cand.long()) * cand.long()
-            stable = self._below_counts >= self.cfg.K_consecutive
+            #  Count how many consecutive epochs each dim is a candidate
+            below_counts = (below_counts + cand.long()) * cand.long()
+            stable = below_counts >= k_consecutive
 
-        # Filter to *active* dims only (don not re-prune pruned ones)
-        candidates = th.where(stable & (~self._p))[0]
+        #  Filter to *active* dims only (don not re-prune pruned ones)
+        candidates = th.where(stable & active_mask)[0]
         if len(candidates) == 0:
-            return
+            return active_mask, frozen_mean, frozen_std, below_counts, next_prune_epoch
 
-        # --- Cap how many dims we prune at once ---
-        prune_idx = candidates[: self.cfg.max_prune_per_epoch]
+        #  --- Cap how many dims we prune at once ---
+        prune_idx = candidates if max_prune_per_epoch is None else candidates[:max_prune_per_epoch]
+
+        # Freeze std BEFORE marking as pruned (capture current variance for volume loss)
+        frozen_std[prune_idx] = zstd[prune_idx].clone()
 
         # --- Commit pruning ---
-        self._p[prune_idx] = True  # mark as pruned
-        self._z[prune_idx] = self._zmean[prune_idx]  # freeze mean for reconstruction
-        self._next_prune_epoch = epoch + self.cfg.cooldown_epochs  # set next allowed prune epoch
+        active_mask[prune_idx] = False  # mark as pruned
+        frozen_mean[prune_idx] = zmean[prune_idx]
+        next_prune_epoch = epoch + cooldown_epochs  # set next allowed prune epoch
+
+        return active_mask, frozen_mean, frozen_std, below_counts, next_prune_epoch
+
+
+    @th.no_grad()
+    def update_moving_mean(
+        self,
+        z: th.Tensor,
+        zstd: th.Tensor | None,
+        zmean: th.Tensor | None,
+        beta: float
+    ) -> (th.Tensor, th.Tensor):
+        """Update exponential moving average of latent statistics."""
+        if zstd is None or zmean is None:
+            zstd = z.std(dim=(0,2,3))  # Compute per-channel (per-latent-dim) std
+            zmean = z.mean(dim=(0,2,3))  # Compute per-channel (per-latent-dim) mean
+        else:
+            zstd = th.lerp(zstd, z.std(dim=(0,2,3)), 1 - beta)
+            zmean = th.lerp(zmean, z.mean(dim=(0,2,3)), 1 - beta)
+
+        return zstd, zmean
 
 
 class VQVAETransformer(nn.Module):
@@ -1130,22 +1195,33 @@ if __name__ == "__main__":
     vqvae.train()
     codebook_freeze = 0
 
-    lv_policy = PruningPolicy(args.lv_pruning_strategy, {"threshold": args.lv_ratio_threshold, "beta": args.lv_beta})  # We assume a plummet strategy here with the associated baseline parameters.
+    lv_policy = PruningPolicy(args.lv_pruning_strategy, args.lv_pruning_params)  # We assume a plummet strategy here with the associated baseline parameters.
     lv_w_schedule = polynomial_schedule(args.lv_w_max, args.lv_ramp_epochs, 1, 0, args.lv_start_epoch)  # The value of 1 specifies a linear schedule while the value of 0 specifies the starting LV weight
+    zstd = None
+    zmean = None
+    next_prune_epoch = args.lv_pruning_epoch
+    best_val_mae = float("inf")
+    active_mask = th.ones(args.latent_dim, dtype=th.bool, device=device)
+    below_counts = th.zeros(args.latent_dim, dtype=th.long, device=device)
+    frozen_mean = th.zeros(args.latent_dim, dtype=th.float32, device=device)
+    frozen_std = th.ones(args.latent_dim, dtype=th.float32, device=device)
 
     for epoch in tqdm.trange(args.n_epochs_vqvae):
         for i, data in enumerate(dataloader_vqvae):
             # THIS IS PROBLEM DEPENDENT
             designs = data[0].to(dtype=th.float32, device=device)
-            decoded_images, codebook_indices, q_loss, quant_encoded = vqvae(
-                designs, return_latents=True
+            decoded_images, codebook_indices, q_loss, z = vqvae(
+                designs, return_latents=True, active_mask=active_mask, frozen_mean=frozen_mean
             )
+
+            # Update EMA values of z_std and z_mean for pruning at end of epoch
+            zstd, zmean = vqvae.update_moving_mean(z, zstd, zmean, args.lv_pruning_params["beta"])
 
             # LV loss + weight
             lv_weight = lv_w_schedule(epoch)
             lv_loss = th.tensor(0.0, device=device)
             if epoch >= args.lv_start_epoch and lv_weight > 0.0:
-                lv_loss = loss_vol(quant_encoded, eta=float(args.lv_eta))
+                lv_loss = loss_vol(z, active_mask, frozen_std, eta=float(args.lv_eta))
 
             rec_loss = th.abs(designs - decoded_images).mean()
             vq_loss = args.rec_loss_factor * rec_loss + q_loss  # + lv_w * lv_loss
@@ -1215,6 +1291,16 @@ if __name__ == "__main__":
                         "vqvae": vqvae.state_dict(),
                         "optimizer_vqvae": opt_vq.state_dict(),
                         "loss": vq_loss.item(),
+                        "lv_state": {
+                            "active_mask": active_mask.detach().cpu(),
+                            "frozen_mean": frozen_mean.detach().cpu(),
+                            "frozen_std": frozen_std.detach().cpu(),
+                            "zmean_ema": None if zmean is None else zmean.detach().cpu(),
+                            "zstd_ema": None if zstd is None else zstd.detach().cpu(),
+                            "below_counts": below_counts.detach().cpu(),
+                            "next_prune_epoch": int(next_prune_epoch),
+                            "best_val_mae": float(best_val_mae),
+                        },
                     }
 
                     th.save(ckpt_vq, "lv_vqvae.pth")
@@ -1228,9 +1314,10 @@ if __name__ == "__main__":
         with th.no_grad():
             for val_data in dataloader_val:
                 val_designs = val_data[0].to(dtype=th.float32, device=device)
-                val_recon, _, _ = vqvae(val_designs)
+                val_recon, _, _ = vqvae(val_designs, active_mask=active_mask, frozen_mean=frozen_mean)
                 maes.append(th.abs(val_designs - val_recon).mean().item())
         val_mae = sum(maes) / max(1, len(maes))
+        best_val_mae = min(best_val_mae, val_mae)
 
         if args.track:
             batches_done = epoch * len(dataloader_vqvae) + i
@@ -1241,6 +1328,26 @@ if __name__ == "__main__":
                     "vqvae_val_mae": val_mae,
                 }
             )
+
+        # End-of-epoch: pruning step
+        active_mask, frozen_mean, frozen_std, below_counts, next_prune_epoch = vqvae.prune_step(
+            args.lv_min_active_dims,
+            args.lv_recon_tol,
+            args.lv_k_consecutive,
+            args.lv_max_prune_per_epoch,
+            args.lv_cooldown_epochs,
+            zmean,
+            zstd,
+            frozen_mean,
+            frozen_std,
+            lv_policy,
+            active_mask,
+            below_counts,
+            epoch,
+            next_prune_epoch,
+            best_val_mae,
+            val_mae
+        )
 
         vqvae.train()
 
