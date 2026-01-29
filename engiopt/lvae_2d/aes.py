@@ -268,7 +268,7 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
             Boolean mask where True indicates dimensions to prune.
         """
         # Sort variances in descending order
-        srt, idx = torch.sort(z_std, descending=True)
+        srt, _idx = torch.sort(z_std, descending=True)
 
         # Compute log-space drops
         log_srt = (srt + 1e-12).log()
