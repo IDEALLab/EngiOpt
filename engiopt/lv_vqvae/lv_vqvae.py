@@ -589,8 +589,10 @@ class VQVAE(nn.Module):
 
         #  --- Safeguards ---
         if dim <= min_active_dims:  #  stop if we go below min dims
+            print(f"Exited pruning due to dim {dim} and min_active_dims {min_active_dims}")
             return active_mask, frozen_mean, frozen_std, below_counts, next_prune_epoch
         if epoch < next_prune_epoch:  #  respect cooldown
+            print(f"Exited pruning due to epoch {epoch} and next_prune_epoch {next_prune_epoch}")
             return active_mask, frozen_mean, frozen_std, below_counts, next_prune_epoch
         if (
             val_recon is not None
@@ -598,12 +600,16 @@ class VQVAE(nn.Module):
             and (val_recon - best_val_recon) / best_val_recon > recon_tol
         ):
             #  Do not prune if recon is already worse than best_val by > tol
+            print(f"Exited due to reconstruction criteria: val_recon = {val_recon}, best_val_recon = {best_val_recon}, (val_recon - best_val_recon) / best_val_recon = {(val_recon - best_val_recon) / best_val_recon}, and recon_tol = {recon_tol}")
             return active_mask, frozen_mean, frozen_std, below_counts, next_prune_epoch
 
         #  --- Candidate selection from policy ---
         #  Only consider active (unpruned) dimensions for pruning policy
         z_std_active = zstd[active_mask]
         cand_active = policy(z_std_active).to(zstd.device)
+
+        assert cand_active.dtype == th.bool, cand_active.dtype
+        assert cand_active.shape == z_std_active.shape, (cand_active.shape, z_std_active.shape)
 
         #  Map back to full dimension space
         cand = th.zeros_like(active_mask, dtype=th.bool)
@@ -620,9 +626,18 @@ class VQVAE(nn.Module):
             below_counts = (below_counts + cand.long()) * cand.long()
             stable = below_counts >= k_consecutive
 
+        print(
+            "epoch", epoch,
+            "dim", int(active_mask.sum()),
+            "zstd[min/med/max]", float(zstd.min()), float(zstd.median()), float(zstd.max()),
+            "z_std_active[min/med/max]", float(z_std_active.min()), float(z_std_active.median()), float(z_std_active.max()),
+            "cand_active_sum", int(cand_active.sum().item()),
+        )
+
         #  Filter to *active* dims only (don not re-prune pruned ones)
         candidates = th.where(stable & active_mask)[0]
         if len(candidates) == 0:
+            print("Exited due to zero candidates found.")
             return active_mask, frozen_mean, frozen_std, below_counts, next_prune_epoch
 
         #  --- Cap how many dims we prune at once ---
@@ -635,6 +650,14 @@ class VQVAE(nn.Module):
         active_mask[prune_idx] = False  # mark as pruned
         frozen_mean[prune_idx] = zmean[prune_idx]
         next_prune_epoch = epoch + cooldown_epochs  # set next allowed prune epoch
+
+        print(
+            "epoch", epoch,
+            "dim", int(active_mask.sum()),
+            "zstd[min/med/max]", float(zstd.min()), float(zstd.median()), float(zstd.max()),
+            "cand_active", int(cand_active.sum()),
+            "stable", int((stable & active_mask).sum()),
+        )
 
         return active_mask, frozen_mean, frozen_std, below_counts, next_prune_epoch
 
@@ -999,6 +1022,8 @@ if __name__ == "__main__":
         wandb.define_metric("vqvae_token_perplexity_frac", step_metric="vqvae_step")
         wandb.define_metric("vqvae_token_usage_frac", step_metric="vqvae_step")
         wandb.define_metric("transformer_logits_entropy", step_metric="transformer_step")
+        wandb.define_metric("lv_active_dims", step_metric="vqvae_step")
+        wandb.define_metric("next_prune_epoch", step_metric="vqvae_step")
 
     vqvae = VQVAE(
         device=device,
@@ -1162,9 +1187,9 @@ if __name__ == "__main__":
                             "epoch_cvqvae": epoch,
                         }
                     )
-                    print(
-                        f"[Epoch {epoch}/{args.n_epochs_cvqvae}] [Batch {i}/{len(dataloader_cvqvae)}] [CVQ loss: {cvq_loss.item()}]"
-                    )
+                    # print(
+                    #     f"[Epoch {epoch}/{args.n_epochs_cvqvae}] [Batch {i}/{len(dataloader_cvqvae)}] [CVQ loss: {cvq_loss.item()}]"
+                    # )
 
                     # --------------
                     #  Save model
@@ -1196,7 +1221,13 @@ if __name__ == "__main__":
     codebook_freeze = 0
 
     lv_policy = PruningPolicy(args.lv_pruning_strategy, args.lv_pruning_params)  # We assume a plummet strategy here with the associated baseline parameters.
-    lv_w_schedule = polynomial_schedule(args.lv_w_max, args.lv_ramp_epochs, 1, 0, args.lv_start_epoch)  # The value of 1 specifies a linear schedule while the value of 0 specifies the starting LV weight
+    lv_w_schedule = polynomial_schedule(
+        args.lv_w_max,
+        args.lv_start_epoch + args.lv_ramp_epochs,
+        p=1,
+        w_init=0.0,
+        M=args.lv_start_epoch,
+    )  # The value of 1 specifies a linear schedule while the value of 0 specifies the starting LV weight
     zstd = None
     zmean = None
     next_prune_epoch = args.lv_pruning_epoch
@@ -1221,10 +1252,15 @@ if __name__ == "__main__":
             lv_weight = lv_w_schedule(epoch)
             lv_loss = th.tensor(0.0, device=device)
             if epoch >= args.lv_start_epoch and lv_weight > 0.0:
-                lv_loss = loss_vol(z, active_mask, frozen_std, eta=float(args.lv_eta))
+                lv_loss = loss_vol(
+                    z,
+                    active_mask=active_mask,
+                    frozen_std=frozen_std,
+                    eta=float(args.lv_eta),
+                )
 
             rec_loss = th.abs(designs - decoded_images).mean()
-            vq_loss = args.rec_loss_factor * rec_loss + q_loss  # + lv_w * lv_loss
+            vq_loss = args.rec_loss_factor * rec_loss + q_loss + lv_weight * lv_loss
 
             opt_vq.zero_grad()
             vq_loss.backward()
@@ -1251,10 +1287,12 @@ if __name__ == "__main__":
                     "vqvae_token_perplexity": tstats["token_perplexity"],
                     "vqvae_token_perplexity_frac": tstats["token_perplexity_frac"],
                     "vqvae_token_usage_frac": tstats["token_usage_frac"],
+                    "lv_active_dims": int(active_mask.sum().item()),
+                    "next_prune_epoch": next_prune_epoch
                 }
-                print(
-                    f"[Epoch {epoch}/{args.n_epochs_vqvae}] [Batch {i}/{len(dataloader_vqvae)}] [VQ loss: {vq_loss.item()}]"
-                )
+                # print(
+                #     f"[Epoch {epoch}/{args.n_epochs_vqvae}] [Batch {i}/{len(dataloader_vqvae)}] [VQ loss: {vq_loss.item()}]"
+                # )
 
                 # This saves a grid image of 25 generated designs every sample_interval
                 if batches_done % args.sample_interval_vqvae == 0:
