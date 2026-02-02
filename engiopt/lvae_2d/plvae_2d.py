@@ -457,7 +457,7 @@ if __name__ == "__main__":
 
                         # Get performance predictions on training data
                         pz_train = z[:, :perf_dim]
-                        p_pred_scaled = plvae.predictor(th.cat([pz_train, c_train.to(device)], dim=-1))
+                        p_pred_scaled = plvae.predictor(th.cat([pz_train, c_train_scaled.to(device)], dim=-1))
 
                         # Inverse transform to get true-scale values for plotting
                         p_actual = p_scaler.inverse_transform(p_train_scaled.cpu().numpy()).flatten()
