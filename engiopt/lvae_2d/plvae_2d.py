@@ -57,7 +57,7 @@ class Args:
     """Interval for sampling designs during training."""
 
     # Training parameters
-    n_epochs: int = 2000
+    n_epochs: int = 5000
     """Number of training epochs."""
     batch_size: int = 128
     """Batch size for training."""
@@ -73,7 +73,7 @@ class Args:
     """Weight for reconstruction loss."""
     w_performance: float = 0.1
     """Weight for performance loss."""
-    w_volume: float = 0.001
+    w_volume: float = 0.01
     """Weight for volume loss."""
 
     # Pruning parameters
@@ -83,7 +83,7 @@ class Args:
     """Threshold for plummet pruning strategy."""
 
     # Volume weight warmup
-    volume_warmup_epochs: int = 0
+    volume_warmup_epochs: int = 100
     """Epochs to polynomially ramp volume weight from 0 to w_volume. 0 disables warmup."""
     volume_warmup_degree: float = 2.0
     """Polynomial degree for volume weight warmup (1.0=linear, 2.0=quadratic)."""
@@ -93,7 +93,7 @@ class Args:
     """Dimensions to resize input images to before encoding/decoding."""
     predictor_hidden_dims: tuple[int, ...] = (256, 128)
     """Hidden dimensions for the MLP predictor."""
-    conditional_predictor: bool = True
+    conditional_predictor: bool = False
     """Whether to include conditions in performance prediction (True) or use only latent codes (False)."""
 
 

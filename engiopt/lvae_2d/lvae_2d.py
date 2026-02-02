@@ -51,7 +51,7 @@ class Args:
     """Interval for sampling designs during training."""
 
     # Training parameters
-    n_epochs: int = 2000
+    n_epochs: int = 5000
     """Number of training epochs."""
     batch_size: int = 128
     """Batch size for training."""
@@ -63,7 +63,7 @@ class Args:
     """Dimensionality of the latent space (overestimate)."""
     w_reconstruction: float = 1.0
     """Weight for reconstruction loss."""
-    w_volume: float = 0.001
+    w_volume: float = 0.01
     """Weight for volume loss."""
 
     # Pruning parameters
@@ -73,7 +73,7 @@ class Args:
     """Threshold for plummet pruning strategy."""
 
     # Volume weight warmup
-    volume_warmup_epochs: int = 0
+    volume_warmup_epochs: int = 100
     """Epochs to polynomially ramp volume weight from 0 to w_volume. 0 disables warmup."""
     volume_warmup_degree: float = 2.0
     """Polynomial degree for volume weight warmup (1.0=linear, 2.0=quadratic)."""
