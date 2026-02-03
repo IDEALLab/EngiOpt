@@ -1,18 +1,19 @@
-"""Vanilla LVAE autoencoder implementations with plummet-based dynamic pruning.
+"""Vanilla LVAE autoencoder implementations with dynamic pruning.
 
 This module provides simplified autoencoder classes for EngiOpt's LVAE experiments:
 - LeastVolumeAE: Volume-regularized autoencoder (no pruning)
-- LeastVolumeAE_DynamicPruning: Volume AE with plummet-based dimension pruning
+- LeastVolumeAE_DynamicPruning: Volume AE with dimension pruning (plummet or lognorm)
 - PerfLeastVolumeAE_DP: Adds performance prediction to dynamic pruning AE
 - InterpretablePerfLeastVolumeAE_DP: Performance prediction using first latent dims
 
-This vanilla version uses only plummet pruning and no safeguards for simplicity.
+This vanilla version supports plummet and lognorm pruning strategies without safeguards.
 """
 
 from __future__ import annotations
 
-from typing import Callable, TYPE_CHECKING
+from typing import Callable, Literal, TYPE_CHECKING
 
+from scipy.stats import norm
 import torch
 from torch import nn
 import torch.nn.functional as f
@@ -159,10 +160,14 @@ class LeastVolumeAE(nn.Module):
 
 
 class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
-    """Least-volume autoencoder with plummet-based dynamic dimension pruning.
+    """Least-volume autoencoder with dynamic dimension pruning.
 
     Extends LeastVolumeAE by dynamically pruning low-variance latent dimensions
-    during training using the plummet strategy (detects sharp drops in sorted variances).
+    during training using either plummet or lognorm pruning strategies.
+
+    Strategies:
+        - plummet: Detects sharp drops in sorted variances
+        - lognorm: Fits log-normal distribution and prunes below percentile
 
     Args:
         encoder: Encoder network.
@@ -173,7 +178,9 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         eta: Smoothing parameter for volume loss. Default: 0.
         beta: EMA momentum for latent statistics. Default: 0.9.
         pruning_epoch: Epoch to start pruning. Default: 500.
-        plummet_threshold: Ratio threshold for plummet pruning. Default: 0.02.
+        pruning_threshold: Threshold for pruning (ratio for plummet, percentile for lognorm). Default: 0.02.
+        pruning_strategy: Strategy to use ("plummet" or "lognorm"). Default: "plummet".
+        alpha: (lognorm only) Blending factor between reference and current distribution. Default: 0.
     """
 
     _p: torch.Tensor  # Boolean mask for pruned dimensions
@@ -190,7 +197,9 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         eta: float = 0,
         beta: float = 0.9,
         pruning_epoch: int = 500,
-        plummet_threshold: float = 0.02,
+        pruning_threshold: float = 0.02,
+        pruning_strategy: Literal["plummet", "lognorm"] = "plummet",
+        alpha: float = 0,
     ) -> None:
         if weights is None:
             weights = [1.0, 0.001]
@@ -202,11 +211,17 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
 
         self._beta = beta
         self.pruning_epoch = pruning_epoch
-        self.plummet_threshold = plummet_threshold
+        self.pruning_threshold = pruning_threshold
+        self.pruning_strategy = pruning_strategy
+        self.alpha = alpha
 
         # EMA statistics (initialized on first batch)
         self._zstd: torch.Tensor | None = None
         self._zmean: torch.Tensor | None = None
+
+        # Reference distribution for lognorm (set at pruning_epoch)
+        self._ref_mu: float | None = None
+        self._ref_sigma: float | None = None
 
     def to(self, device: torch.device | str) -> LeastVolumeAE_DynamicPruning:
         """Move model to device."""
@@ -285,7 +300,46 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
 
         # Prune dimensions with ratio below threshold relative to reference
         ratio = z_std / (ref + 1e-12)
-        return ratio < self.plummet_threshold
+        return ratio < self.pruning_threshold
+
+    @torch.no_grad()
+    def _lognorm_prune(self, z_std: torch.Tensor) -> torch.Tensor:
+        """Log-normal distribution-based pruning.
+
+        Fits a log-normal distribution to the standard deviations and prunes
+        dimensions below a percentile threshold.
+
+        Args:
+            z_std: Standard deviation per latent dimension.
+
+        Returns:
+            Boolean mask where True indicates dimensions to prune.
+        """
+        log_std = torch.log(z_std.clamp_min(1e-12))
+        mu_current = log_std.mean().item()
+        sigma_current = log_std.std().clamp_min(1e-6).item()
+
+        if self._ref_mu is None or self._ref_sigma is None:
+            # If no reference set yet, use current distribution
+            mu_blend = mu_current
+            sigma_blend = sigma_current
+        else:
+            # Blend between snapshot and current distribution
+            mu_blend = (1 - self.alpha) * self._ref_mu + self.alpha * mu_current
+            sigma_blend = (1 - self.alpha) * self._ref_sigma + self.alpha * sigma_current
+
+        # Calculate cutoff value using inverse CDF of normal distribution
+        # pruning_threshold is used as percentile (e.g., 0.01 = bottom 1%)
+        cutoff_val = mu_blend + sigma_blend * float(norm.ppf(self.pruning_threshold))
+        cutoff = torch.exp(torch.tensor(cutoff_val, device=z_std.device, dtype=z_std.dtype))
+        return z_std < cutoff
+
+    @torch.no_grad()
+    def _set_lognorm_reference(self, z_std: torch.Tensor) -> None:
+        """Set reference distribution for lognorm pruning at pruning_epoch."""
+        log_std = torch.log(z_std.clamp_min(1e-12))
+        self._ref_mu = log_std.mean().item()
+        self._ref_sigma = log_std.std().item()
 
     @torch.no_grad()
     def _prune_step(self, _epoch: int) -> None:
@@ -298,7 +352,11 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         if len(z_std_active) == 0:
             return
 
-        cand_active = self._plummet_prune(z_std_active)
+        # Select pruning strategy
+        if self.pruning_strategy == "lognorm":
+            cand_active = self._lognorm_prune(z_std_active)
+        else:  # default to plummet
+            cand_active = self._plummet_prune(z_std_active)
 
         # Map back to full dimension space
         cand = torch.zeros_like(self._p, dtype=torch.bool)
@@ -323,6 +381,10 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         **kwargs: object,
     ) -> None:
         """Called at end of epoch - triggers pruning if past pruning_epoch."""
+        # Set lognorm reference at pruning_epoch
+        if epoch == self.pruning_epoch and self.pruning_strategy == "lognorm" and self._zstd is not None:
+            self._set_lognorm_reference(self._zstd)
+
         if epoch >= self.pruning_epoch:
             self._prune_step(epoch)
 
@@ -348,7 +410,9 @@ class PerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         eta: Smoothing parameter for volume loss. Default: 0.
         beta: EMA momentum for latent statistics. Default: 0.9.
         pruning_epoch: Epoch to start pruning. Default: 500.
-        plummet_threshold: Ratio threshold for plummet pruning. Default: 0.02.
+        pruning_threshold: Threshold for pruning. Default: 0.02.
+        pruning_strategy: Strategy to use ("plummet" or "lognorm"). Default: "plummet".
+        alpha: (lognorm only) Blending factor. Default: 0.
     """
 
     def __init__(  # noqa: PLR0913
@@ -362,7 +426,9 @@ class PerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         eta: float = 0,
         beta: float = 0.9,
         pruning_epoch: int = 500,
-        plummet_threshold: float = 0.02,
+        pruning_threshold: float = 0.02,
+        pruning_strategy: Literal["plummet", "lognorm"] = "plummet",
+        alpha: float = 0,
     ) -> None:
         if weights is None:
             weights = [1.0, 1.0, 0.001]
@@ -375,7 +441,9 @@ class PerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
             eta=eta,
             beta=beta,
             pruning_epoch=pruning_epoch,
-            plummet_threshold=plummet_threshold,
+            pruning_threshold=pruning_threshold,
+            pruning_strategy=pruning_strategy,
+            alpha=alpha,
         )
         self.predictor = predictor
 
@@ -434,7 +502,9 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
         eta: Smoothing parameter for volume loss. Default: 0.
         beta: EMA momentum for latent statistics. Default: 0.9.
         pruning_epoch: Epoch to start pruning. Default: 500.
-        plummet_threshold: Ratio threshold for plummet pruning. Default: 0.02.
+        pruning_threshold: Threshold for pruning. Default: 0.02.
+        pruning_strategy: Strategy to use ("plummet" or "lognorm"). Default: "plummet".
+        alpha: (lognorm only) Blending factor. Default: 0.
     """
 
     def __init__(  # noqa: PLR0913
@@ -449,7 +519,9 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
         eta: float = 0,
         beta: float = 0.9,
         pruning_epoch: int = 500,
-        plummet_threshold: float = 0.02,
+        pruning_threshold: float = 0.02,
+        pruning_strategy: Literal["plummet", "lognorm"] = "plummet",
+        alpha: float = 0,
     ) -> None:
         if weights is None:
             weights = [1.0, 0.1, 0.001]
@@ -462,7 +534,9 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
             eta=eta,
             beta=beta,
             pruning_epoch=pruning_epoch,
-            plummet_threshold=plummet_threshold,
+            pruning_threshold=pruning_threshold,
+            pruning_strategy=pruning_strategy,
+            alpha=alpha,
         )
         self.predictor = predictor
         self.perf_dim = perf_dim

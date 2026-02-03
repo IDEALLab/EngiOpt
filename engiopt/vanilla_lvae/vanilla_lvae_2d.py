@@ -69,8 +69,12 @@ class Args:
     # Pruning parameters
     pruning_epoch: int = 500
     """Epoch to start pruning dimensions."""
-    plummet_threshold: float = 0.02
-    """Threshold for plummet pruning strategy."""
+    pruning_threshold: float = 0.02
+    """Threshold for pruning (ratio for plummet, percentile for lognorm)."""
+    pruning_strategy: str = "plummet"
+    """Pruning strategy to use: 'plummet' or 'lognorm'."""
+    alpha: float = 0.0
+    """(lognorm only) Blending factor between reference and current distribution."""
 
     # Volume weight warmup
     volume_warmup_epochs: int = 0
@@ -261,7 +265,9 @@ if __name__ == "__main__":
         latent_dim=args.latent_dim,
         weights=weights,
         pruning_epoch=args.pruning_epoch,
-        plummet_threshold=args.plummet_threshold,
+        pruning_threshold=args.pruning_threshold,
+        pruning_strategy=args.pruning_strategy,
+        alpha=args.alpha,
     ).to(device)
 
     print(f"\n{'=' * 60}")
@@ -269,7 +275,10 @@ if __name__ == "__main__":
     print(f"Problem: {args.problem_id}")
     print(f"Latent dim: {args.latent_dim}")
     print(f"Pruning epoch: {args.pruning_epoch}")
-    print(f"Plummet threshold: {args.plummet_threshold}")
+    print(f"Pruning strategy: {args.pruning_strategy}")
+    print(f"Pruning threshold: {args.pruning_threshold}")
+    if args.pruning_strategy == "lognorm":
+        print(f"Alpha (lognorm): {args.alpha}")
     print(f"Volume warmup epochs: {args.volume_warmup_epochs}")
     print(f"{'=' * 60}\n")
 
