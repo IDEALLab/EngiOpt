@@ -1,7 +1,9 @@
-"""Constrained LVAE for 2D designs with threshold-gated volume loss.
+"""Constrained LVAE for 2D designs with selectable constraint modes.
 
-This variant only applies volume loss when reconstruction is below a threshold,
-preventing volume compression from hurting reconstruction quality.
+Provides three strategies for balancing reconstruction and volume compression:
+- one_sided: Mutually exclusive (rec OR vol, never both)
+- gated: Additive with gating (rec always, vol only when below threshold)
+- gradient_balanced: Auto-scaled vol to match rec gradient magnitude
 
 For more information on LVAE, see: https://arxiv.org/abs/2404.17773
 """
@@ -66,15 +68,13 @@ class Args:
 
     # Constraint parameters (uses Normalized MSE = MSE / Var(data) for problem-independence)
     nmse_threshold: float = 0.01
-    """Target NMSE threshold (fraction of unexplained variance). 0.01 = 99% variance explained."""
-    safety_margin: float = 0.2
-    """Fraction below threshold for full volume push (0.2 = 20%)."""
-    gate_ema_beta: float = 0.95
-    """EMA smoothing factor for NMSE tracking."""
-    comfort_multiplier: float = 1.0
-    """Volume weight multiplier when in comfort zone. Set >1 to push harder."""
-    w_volume: float = 1.0
-    """Base volume loss weight (gate modulates this)."""
+    """NMSE ceiling. Training aims to stay at or below this threshold."""
+    constraint_mode: str = "one_sided"
+    """Constraint mode: 'one_sided' (rec or vol), 'gated' (rec + vol), 'gradient_balanced' (auto-scaled)."""
+    w_vol: float = 1.0
+    """Volume loss weight (gated mode only)."""
+    ema_beta: float = 0.9
+    """EMA smoothing for loss tracking (gradient_balanced mode)."""
 
     # Pruning parameters
     pruning_epoch: int = 500
@@ -233,17 +233,16 @@ if __name__ == "__main__":
     enc = Encoder(args.latent_dim, design_shape, args.resize_dimensions)
     dec = Decoder(args.latent_dim, design_shape)
 
-    # Initialize constrained LVAE with threshold gating
+    # Initialize constrained LVAE with selectable constraint mode
     lvae = ConstrainedLeastVolumeAE_DP(
         encoder=enc,
         decoder=dec,
         optimizer=Adam(list(enc.parameters()) + list(dec.parameters()), lr=args.lr),
         latent_dim=args.latent_dim,
         nmse_threshold=args.nmse_threshold,
-        safety_margin=args.safety_margin,
-        gate_ema_beta=args.gate_ema_beta,
-        comfort_multiplier=args.comfort_multiplier,
-        weights=[1.0, args.w_volume],
+        constraint_mode=args.constraint_mode,
+        w_vol=args.w_vol,
+        ema_beta=args.ema_beta,
         pruning_epoch=args.pruning_epoch,
         pruning_threshold=args.pruning_threshold,
         pruning_strategy=args.pruning_strategy,
@@ -262,13 +261,16 @@ if __name__ == "__main__":
     lvae.set_data_variance(x_train)
 
     print(f"\n{'=' * 60}")
-    print("Constrained LVAE Training (NMSE-Gated Volume)")
+    print("Constrained LVAE Training")
     print(f"Problem: {args.problem_id}")
     print(f"Latent dim: {args.latent_dim}")
-    print(f"NMSE threshold: {args.nmse_threshold} (R² target: {1 - args.nmse_threshold:.2%})")
+    print(f"NMSE threshold: {args.nmse_threshold} (R² = {1 - args.nmse_threshold:.2%})")
+    print(f"Constraint mode: {args.constraint_mode}")
+    if args.constraint_mode == "gated":
+        print(f"  w_vol: {args.w_vol}")
+    elif args.constraint_mode == "gradient_balanced":
+        print(f"  ema_beta: {args.ema_beta}")
     print(f"Data variance: {lvae.data_var:.6f}")
-    print(f"Safety margin: {args.safety_margin}")
-    print(f"Comfort multiplier: {args.comfort_multiplier}")
     print(f"Pruning epoch: {args.pruning_epoch}")
     print(f"Pruning strategy: {args.pruning_strategy}")
     print(f"Pruning threshold: {args.pruning_threshold}")
@@ -288,19 +290,17 @@ if __name__ == "__main__":
             x_batch = batch[0].to(device)
             lvae.optim.zero_grad()
 
-            # Compute loss components (rec, gated_vol)
-            losses = lvae.loss(x_batch)
-
-            # Weighted sum for backprop
-            loss = (losses * lvae.w).sum()
+            # Compute loss (scalar, mode-dependent)
+            loss = lvae.loss(x_batch)
             loss.backward()
             lvae.optim.step()
 
             bar.set_postfix(
                 {
-                    "rec": f"{losses[0].item():.4f}",
-                    "vol": f"{losses[1].item():.4f}",
-                    "gate": f"{lvae.gate:.2f}",
+                    "rec": f"{lvae.rec_loss:.4f}",
+                    "vol": f"{lvae.vol_loss:.4f}",
+                    "nmse": f"{lvae.nmse:.4f}",
+                    "active": int(lvae.vol_active),
                     "dim": lvae.dim,
                 }
             )
@@ -310,20 +310,23 @@ if __name__ == "__main__":
                 batches_done = epoch * len(bar) + i
 
                 log_dict = {
-                    "rec_loss": losses[0].item(),
-                    "vol_loss": losses[1].item(),
+                    "rec_loss": lvae.rec_loss,
+                    "vol_loss": lvae.vol_loss,
                     "total_loss": loss.item(),
-                    "volume_gate": lvae.gate,
-                    "nmse_ema": lvae.nmse_ema,
+                    "nmse": lvae.nmse,
+                    "nmse_threshold": args.nmse_threshold,
+                    "vol_active": int(lvae.vol_active),
+                    "balance_factor": lvae.balance_factor,
                     "active_dims": lvae.dim,
                     "epoch": epoch,
+                    "constraint_mode": args.constraint_mode,
                 }
                 wandb.log(log_dict)
 
                 print(
                     f"[Epoch {epoch}/{args.n_epochs}] [Batch {i}/{len(bar)}] "
-                    f"[rec: {losses[0].item():.4f}] [nmse: {lvae.nmse_ema:.4f}] "
-                    f"[gate: {lvae.gate:.2f}] [dims: {lvae.dim}]"
+                    f"[rec: {lvae.rec_loss:.4f}] [vol: {lvae.vol_loss:.4f}] [nmse: {lvae.nmse:.4f}] "
+                    f"[active: {int(lvae.vol_active)}] [dims: {lvae.dim}]"
                 )
 
                 # Sample and visualize at regular intervals
@@ -407,26 +410,29 @@ if __name__ == "__main__":
         # ---- Validation ----
         with th.no_grad():
             lvae.eval()
-            val_rec = val_vol = 0.0
+            val_rec = val_vol = val_nmse = 0.0
             n = 0
             for batch_v in val_loader:
                 x_v = batch_v[0].to(device)
-                vlosses = lvae.loss(x_v)
+                _ = lvae.loss(x_v)  # Computes and stores metrics
                 bsz = x_v.size(0)
-                val_rec += vlosses[0].item() * bsz
-                val_vol += vlosses[1].item() * bsz
+                val_rec += lvae.rec_loss * bsz
+                val_vol += lvae.vol_loss * bsz
+                val_nmse += lvae.nmse * bsz
                 n += bsz
             val_rec /= n
             val_vol /= n
+            val_nmse /= n
 
         # Trigger pruning check at end of epoch
-        lvae.epoch_report(epoch=epoch, callbacks=[], batch=None, loss=losses, pbar=None)
+        lvae.epoch_report(epoch=epoch, callbacks=[], batch=None, loss=loss, pbar=None)
 
         if args.track:
             val_log_dict = {
                 "epoch": epoch,
-                "val_rec": val_rec,
+                "val_rec_loss": val_rec,
                 "val_vol_loss": val_vol,
+                "val_nmse": val_nmse,
             }
             wandb.log(val_log_dict, commit=True)
 
