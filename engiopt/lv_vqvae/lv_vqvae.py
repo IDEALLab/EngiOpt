@@ -14,11 +14,16 @@ For Stage 2, we take the indices of the codebook vectors and flatten them into a
 The transformer is then trained to autoregressively predict each token in the sequence, after which it is reshaped back to the original 2D latent space and passed through the Stage 1 decoder to generate an image.
 To make Stage 2 conditional, we train a separate VQVAE on the conditions only (CVQVAE) and replace the start-of-sequence tokens of the transformer with the CVQVAE latent tokens.
 
-Notes for this version:
+Notes for 20 January:
     - Check noqa's to remove later and implement the needed features
     - Need to reimplement features such as pruning and masking, including masking in the codebook and transformer stage, as well as extensive wandb metrics to validate
     - Implemented as of 20 January: spherical norm for codebook, commitment loss term beta 0.25 --> 0.01 for codebook, 1-Lipschitz decoder via new blocks and activation function (scaled tanh) + removal of non-Lipschitz blocks (i.e., self-attention)
     - Add back in ASAP: codebook perplexity, usage fraction/amount for codes and dims, number of active (non-pruned) codes and dims, etc.
+
+Notes for 31 January:
+    - Implemented actual LVAE version of dimension-wise pruning, added metrics back in, and tested. For plummet pruning the 0.02 threshold was far too low; setting to 0.25 worked better (256 --> 58 dims).
+    - Need to test other pruning methods
+    - Need to add back in code pruning and run ablation studies on order (before, after, at the same time as dim pruning) also with learning rate and other hyperparams
 """
 
 
@@ -51,6 +56,7 @@ from engiopt.lv_vqvae.utils import GroupNorm
 from engiopt.lv_vqvae.utils import GroupSort
 from engiopt.lv_vqvae.utils import LinearCombo
 from engiopt.lv_vqvae.utils import loss_vol
+from engiopt.lv_vqvae.utils import make_sorted_std_plot
 from engiopt.lv_vqvae.utils import NonLocalBlock
 from engiopt.lv_vqvae.utils import ResidualBlock
 from engiopt.lv_vqvae.utils import ScaledTanh
@@ -121,8 +127,6 @@ class Args:
     """size of the batches for Stage 1"""
     lr_vqvae: float = 4e-4
     """learning rate for Stage 1"""
-    beta: float = 0.25
-    """beta hyperparameter for the codebook commitment loss"""
     b1: float = 0.5
     """decay of first order momentum of gradient"""
     b2: float = 0.9
@@ -147,27 +151,25 @@ class Args:
     """tuple of resolutions at which to apply attention in the decoder"""
     decoder_num_res_blocks: int = 3
     """number of residual blocks per decoder layer"""
-    sample_interval_vqvae: int = 100
-    """interval between Stage 1 image samples"""
+    sample_interval_vqvae: int | None = None
+    """interval between Stage 1 image samples; integer default 100; if None then calculated as once at the end of each epoch"""
 
     # LV + dynamic pruning (n_z). NOTE: All LV params share the same names with the LVAE code, except the prefix "lv_" has been added to them.
     lv_start_epoch: int = 10
     """epoch to start applying LV loss (keep LV loss weight = 0 before this)"""
     lv_pruning_epoch: int = 20
     """epoch to start pruning latent dimensions (after LV has had time to shape the space)"""
-    lv_w_max: float = 0.01
-    """maximum weight for the LV loss after ramp-up"""
+    lv_w_max: float = 0.001
+    """maximum weight for the LV loss after ramp-up (default 0.001)"""
     lv_ramp_epochs: int = 10
     """number of epochs to linearly ramp LV loss weight from 0 to lv_w_max"""
-    lv_min_active_dims: int = 16
+    lv_min_active_dims: int = 1
     """minimum number of latent dimensions allowed to remain active (pruning will not go below this)"""
     lv_max_prune_per_epoch: int | None = None
     """maximum number of latent dimensions to prune per epoch; None for no limit"""
-    lv_val_mae_target: float = 0.03
-    """validation MAE reconstruction target used as the pruning guardrail"""
-    lv_pruning_strategy: str = "plummet"
+    lv_pruning_strategy: str = "lognorm"  # "plummet" default
     """strategy name (plummet, pca_cdf, lognorm, probabilistic)"""
-    lv_pruning_params: dict[str, Any] | None = field(default_factory=lambda: {"threshold": 0.02, "beta": 0.9})
+    lv_pruning_params: dict[str, Any] | None = field(default_factory=lambda: {"threshold": 0.02, "beta": 0.9, "alpha": 0.5})  # threshold: 0.02 default for plummet; 0.25 more aggressive
     """least volume pruning parameters, default for plummet strategy with threshold 0.02 and beta 0.9"""
     lv_eta: float = 1e-4
     """smoothing parameter for volume loss"""
@@ -608,9 +610,6 @@ class VQVAE(nn.Module):
         z_std_active = zstd[active_mask]
         cand_active = policy(z_std_active).to(zstd.device)
 
-        assert cand_active.dtype == th.bool, cand_active.dtype
-        assert cand_active.shape == z_std_active.shape, (cand_active.shape, z_std_active.shape)
-
         #  Map back to full dimension space
         cand = th.zeros_like(active_mask, dtype=th.bool)
         cand[active_mask] = cand_active
@@ -931,6 +930,10 @@ if __name__ == "__main__":
         batch_size=args.batch_size_vqvae,
         shuffle=True,
     )
+    # If None, log once per epoch (in steps)
+    if args.sample_interval_vqvae is None:
+        args.sample_interval_vqvae = len(dataloader_vqvae)
+
     dataloader_transformer = th.utils.data.DataLoader(
         th_training_ds,
         batch_size=args.batch_size_transformer,
@@ -995,6 +998,7 @@ if __name__ == "__main__":
             save_code=True,
             name=run_name,
             dir="./logs/wandb",
+            resume="never"
         )
 
         #  Base VQ-related metrics
@@ -1295,7 +1299,7 @@ if __name__ == "__main__":
                 # )
 
                 # This saves a grid image of 25 generated designs every sample_interval
-                if batches_done % args.sample_interval_vqvae == 0:
+                if (batches_done + 1) % args.sample_interval_vqvae == 0:
                     # Extract 25 designs
                     designs = resize_to(
                         data=sample_designs_vqvae(n_designs=n_logged_designs), h=design_shape[0], w=design_shape[1]
@@ -1316,6 +1320,11 @@ if __name__ == "__main__":
                     plt.tight_layout()
                     log_vq["designs_vqvae"] = wandb.Image(fig)
                     plt.close(fig)
+
+                    if zstd is not None:
+                        fig_std = make_sorted_std_plot(zstd=zstd)
+                        log_vq["latent_std_sorted"] = wandb.Image(fig_std)
+                        plt.close(fig_std)
 
                 wandb.log(log_vq)
 

@@ -18,6 +18,8 @@ import math
 import warnings
 
 from einops import rearrange
+from matplotlib import pyplot as plt
+import numpy as np
 import torch as th
 from torch import nn
 from torch.nn import functional as f
@@ -66,6 +68,47 @@ def loss_vol(z: th.Tensor, *, active_mask: th.Tensor, frozen_std: th.Tensor, eta
         s[active_mask] = z[:, active_mask, :, :].std(dim=(0, 2, 3))
 
     return th.exp(th.log(s + float(eta)).mean())
+
+
+def make_sorted_std_plot(
+    *,
+    zstd: th.Tensor,
+    title: str = "Sorted EMA STD. per Dimension",
+):
+    """Creates a figure of sorted dimension stds, including zeroed out (pruned) ones.
+
+    zstd: shape [latent_dim] (EMA or batch std)
+    active_mask: shape [latent_dim] bool
+    Produces a matplotlib figure showing sorted stds for all dims,
+    with active vs pruned indicated.
+    """
+    zstd_cpu = zstd.detach().float().cpu().numpy()
+
+    order = np.argsort(zstd_cpu)[::-1]  # DESCENDING
+    sorted_std = zstd_cpu[order]
+
+    x = np.arange(len(sorted_std))
+
+    fig, ax = plt.subplots(1, 1, figsize=(10, 4), dpi=300)
+
+    # Log scale can't display zeros/negatives; clamp for plotting only
+    eps = 1e-12
+    sorted_std_plot = np.clip(sorted_std, eps, None)
+
+    # Bar plot for all dims
+    ax.bar(x, sorted_std_plot)
+
+    ax.set_title(title)
+    ax.set_xlabel("dimension index (sorted by std, desc)")
+    ax.set_ylabel("std")
+    ax.grid(visible=True, linewidth=0.3, alpha=0.5)
+
+    # log y-axis with fixed limits 1e-1 to 1e1
+    ax.set_yscale("log")
+    ax.set_ylim(1e-2, 1e1)
+
+    plt.tight_layout()
+    return fig
 
 
 class Codebook(nn.Module):
