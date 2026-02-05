@@ -682,12 +682,13 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
 
     @torch.no_grad()
     def _prune_step(self, epoch: int) -> None:
-        """Execute pruning step only when volume is active."""
-        # Only prune when volume loss is active
-        if not self._vol_active:
-            return
+        """Execute pruning step unconditionally after pruning_epoch.
 
-        # Call parent pruning logic
+        Pruning is decoupled from _vol_active since the volume loss already
+        only engages when the constraint is satisfied. Double-gating would
+        introduce a race condition where pruning depends on the last batch's
+        constraint state.
+        """
         super()._prune_step(epoch)
 
 
@@ -786,8 +787,226 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
         )
 
 
+class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
+    """Constrained performance-predicting LVAE with one-sided constraint handling.
+
+    Extends the one-sided constraint method to handle two constraints:
+    1. Reconstruction constraint: NMSE_rec <= threshold_rec
+    2. Performance constraint: NMSE_perf <= threshold_perf
+
+    Uses **reconstruction-first priority**: reconstruction must be satisfied before
+    performance, and both must be satisfied before volume optimization begins.
+
+    One-sided logic:
+        - If rec NMSE > threshold_rec: optimize reconstruction only
+        - Elif perf NMSE > threshold_perf: optimize performance only
+        - Else: optimize volume only (both constraints satisfied)
+
+    Uses **Normalized MSE (NMSE)** for problem-independent thresholding:
+    - NMSE = MSE / Var(data)
+    - Equivalent to R² target: R² = 1 - NMSE
+
+    Args:
+        encoder: Encoder network.
+        decoder: Decoder network.
+        predictor: Performance prediction network (input: [z[:perf_dim], conditions]).
+        optimizer: Optimizer instance.
+        latent_dim: Total number of latent dimensions.
+        perf_dim: Number of latent dimensions dedicated to performance prediction.
+        nmse_threshold_rec: NMSE ceiling for reconstruction. Default: 0.01 (R² = 0.99).
+        nmse_threshold_perf: NMSE ceiling for performance. Default: 0.05 (R² = 0.95).
+        eta: Smoothing parameter for volume loss. Default: 0.
+        beta: EMA momentum for latent statistics. Default: 0.9.
+        pruning_epoch: Epoch to start pruning. Default: 500.
+        pruning_threshold: Threshold for pruning. Default: 0.02.
+        pruning_strategy: Strategy to use ("plummet" or "lognorm"). Default: "plummet".
+        alpha: (lognorm only) Blending factor. Default: 0.
+    """
+
+    _data_var: torch.Tensor  # Buffer for design data variance
+    _perf_var: torch.Tensor  # Buffer for performance data variance
+
+    def __init__(  # noqa: PLR0913
+        self,
+        encoder: nn.Module,
+        decoder: nn.Module,
+        predictor: nn.Module,
+        optimizer: Optimizer,
+        latent_dim: int,
+        perf_dim: int,
+        nmse_threshold_rec: float = 0.01,
+        nmse_threshold_perf: float = 0.05,
+        eta: float = 0,
+        beta: float = 0.9,
+        pruning_epoch: int = 500,
+        pruning_threshold: float = 0.02,
+        pruning_strategy: Literal["plummet", "lognorm"] = "plummet",
+        alpha: float = 0,
+    ) -> None:
+        # Parent uses weights for its loss computation, but we override loss()
+        super().__init__(
+            encoder=encoder,
+            decoder=decoder,
+            optimizer=optimizer,
+            latent_dim=latent_dim,
+            weights=[1.0, 1.0],  # Not used - we override loss()
+            eta=eta,
+            beta=beta,
+            pruning_epoch=pruning_epoch,
+            pruning_threshold=pruning_threshold,
+            pruning_strategy=pruning_strategy,
+            alpha=alpha,
+        )
+        self.predictor = predictor
+        self.perf_dim = perf_dim
+        self.nmse_threshold_rec = nmse_threshold_rec
+        self.nmse_threshold_perf = nmse_threshold_perf
+
+        # Data variances for NMSE computation (must be set via set_* methods)
+        self.register_buffer("_data_var", torch.tensor(1.0))
+        self.register_buffer("_perf_var", torch.tensor(1.0))
+        self._data_var_set = False
+        self._perf_var_set = False
+
+        # Current state for logging
+        self._current_nmse_rec: float = 0.0
+        self._current_nmse_perf: float = 0.0
+        self._current_rec_loss: float = 0.0
+        self._current_perf_loss: float = 0.0
+        self._current_vol_loss: float = 0.0
+        self._vol_active: bool = False
+
+    @property
+    def nmse_rec(self) -> float:
+        """Current batch reconstruction NMSE."""
+        return self._current_nmse_rec
+
+    @property
+    def nmse_perf(self) -> float:
+        """Current batch performance NMSE."""
+        return self._current_nmse_perf
+
+    @property
+    def vol_active(self) -> bool:
+        """Whether volume loss is currently active."""
+        return self._vol_active
+
+    @property
+    def rec_loss(self) -> float:
+        """Current batch reconstruction loss."""
+        return self._current_rec_loss
+
+    @property
+    def perf_loss(self) -> float:
+        """Current batch performance loss."""
+        return self._current_perf_loss
+
+    @property
+    def vol_loss(self) -> float:
+        """Current batch volume loss."""
+        return self._current_vol_loss
+
+    @property
+    def data_var(self) -> float:
+        """Design data variance used for reconstruction NMSE."""
+        return self._data_var.item()
+
+    @property
+    def perf_var(self) -> float:
+        """Performance data variance used for performance NMSE."""
+        return self._perf_var.item()
+
+    def set_data_variance(self, x: torch.Tensor) -> None:
+        """Set the design data variance for reconstruction NMSE computation.
+
+        Should be called once before training with the full training dataset.
+
+        Args:
+            x: Training design tensor of shape (N, ...).
+        """
+        var = x.var().item()
+        if var < 1e-10:
+            var = 1.0  # Fallback for constant data
+        self._data_var = torch.tensor(var, device=self._data_var.device)
+        self._data_var_set = True
+
+    def set_perf_variance(self, p: torch.Tensor) -> None:
+        """Set the performance data variance for performance NMSE computation.
+
+        Should be called once before training with scaled performance values.
+
+        Args:
+            p: Scaled performance tensor of shape (N, 1) or (N,).
+        """
+        var = p.var().item()
+        if var < 1e-10:
+            var = 1.0  # Fallback for constant data
+        self._perf_var = torch.tensor(var, device=self._perf_var.device)
+        self._perf_var_set = True
+
+    def loss(self, batch: tuple[torch.Tensor, torch.Tensor, torch.Tensor]) -> torch.Tensor:
+        """Compute loss with reconstruction-first priority one-sided switching.
+
+        Args:
+            batch: Tuple of (designs, conditions, performance_targets).
+
+        Returns:
+            Scalar loss tensor for backpropagation.
+        """
+        x, c, p = batch
+        z = self.encode(x)
+        x_hat = self.decode(z)
+
+        # Update moving statistics for pruning
+        self._update_moving_mean(z)
+
+        # Performance prediction (first perf_dim dims + conditions)
+        pz = z[:, : self.perf_dim]
+        p_hat = self.predictor(torch.cat([pz, c], dim=-1))
+
+        # Compute individual losses
+        rec_loss = self.loss_rec(x, x_hat)
+        perf_loss = self.loss_rec(p, p_hat)
+
+        # Volume loss (geometric mean of stds, frozen for pruned dims)
+        s = self._frozen_std.clone()
+        if (~self._p).any():
+            s[~self._p] = z[:, ~self._p].std(0)
+        vol_loss = torch.exp(torch.log(s).mean())
+
+        # Compute NMSEs
+        nmse_rec = rec_loss / self._data_var
+        nmse_perf = perf_loss / self._perf_var
+
+        # Store for logging
+        self._current_nmse_rec = nmse_rec.item()
+        self._current_nmse_perf = nmse_perf.item()
+        self._current_rec_loss = rec_loss.item()
+        self._current_perf_loss = perf_loss.item()
+        self._current_vol_loss = vol_loss.item()
+
+        # One-sided constraint logic (reconstruction-first priority)
+        if nmse_rec > self.nmse_threshold_rec:
+            # Reconstruction violated - fix geometry first
+            self._vol_active = False
+            return rec_loss
+        if nmse_perf > self.nmse_threshold_perf:
+            # Reconstruction OK, performance violated - fix performance
+            self._vol_active = False
+            return perf_loss
+        # BOTH constraints satisfied - optimize volume
+        self._vol_active = True
+        return vol_loss
+
+    @torch.no_grad()
+    def _prune_step(self, epoch: int) -> None:
+        """Execute pruning unconditionally after pruning_epoch."""
+        super()._prune_step(epoch)
+
+
 __all__ = [
     "ConstrainedLeastVolumeAE_DP",
+    "ConstrainedPerfLeastVolumeAE_DP",
     "InterpretablePerfLeastVolumeAE_DP",
     "LeastVolumeAE",
     "LeastVolumeAE_DynamicPruning",
