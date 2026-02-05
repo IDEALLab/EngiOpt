@@ -16,15 +16,15 @@ from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import matplotlib.pyplot as plt
 import numpy as np
 import torch as th
-from torch import nn
 from torch.optim import Adam
 from torch.utils.data import DataLoader
 from torch.utils.data import TensorDataset
-from torchvision import transforms
 import tqdm
 import tyro
 
 from engiopt.vanilla_lvae.aes import LeastVolumeAE_DynamicPruning
+from engiopt.vanilla_lvae.components import Encoder2D
+from engiopt.vanilla_lvae.components import TrueSNDecoder2D
 import wandb
 
 
@@ -85,107 +85,8 @@ class Args:
     # Architecture
     resize_dimensions: tuple[int, int] = (100, 100)
     """Dimensions to resize input images to before encoding/decoding."""
-
-
-class Encoder(nn.Module):
-    """Convolutional encoder for 2D designs.
-
-    Architecture: Input -> Conv layers -> Latent vector
-    • Input   [100x100]
-    • Conv1   [50x50]   (k=4, s=2, p=1)
-    • Conv2   [25x25]   (k=4, s=2, p=1)
-    • Conv3   [13x13]   (k=3, s=2, p=1)
-    • Conv4   [7x7]     (k=3, s=2, p=1)
-    • Conv5   [1x1]     (k=7, s=1, p=0)
-    """
-
-    def __init__(
-        self,
-        latent_dim: int,
-        design_shape: tuple[int, int],
-        resize_dimensions: tuple[int, int] = (100, 100),
-    ) -> None:
-        super().__init__()
-        self.resize_in = transforms.Resize(resize_dimensions)
-        self.design_shape = design_shape
-
-        self.features = nn.Sequential(
-            nn.Conv2d(1, 64, kernel_size=4, stride=2, padding=1, bias=False),  # 100->50
-            nn.BatchNorm2d(64),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(64, 128, kernel_size=4, stride=2, padding=1, bias=False),  # 50->25
-            nn.BatchNorm2d(128),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(128, 256, kernel_size=3, stride=2, padding=1, bias=False),  # 25->13
-            nn.BatchNorm2d(256),
-            nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(256, 512, kernel_size=3, stride=2, padding=1, bias=False),  # 13->7
-            nn.BatchNorm2d(512),
-            nn.LeakyReLU(0.2, inplace=True),
-        )
-
-        # Final 7x7 conv produces (B, latent_dim, 1, 1) -> flatten to (B, latent_dim)
-        self.to_latent = nn.Conv2d(512, latent_dim, kernel_size=7, stride=1, padding=0, bias=True)
-
-    def forward(self, x: th.Tensor) -> th.Tensor:
-        """Forward pass through encoder."""
-        x = self.resize_in(x)  # (B,1,100,100)
-        h = self.features(x)  # (B,512,7,7)
-        return self.to_latent(h).flatten(1)  # (B,latent_dim)
-
-
-class Decoder(nn.Module):
-    """Convolutional decoder for 2D designs.
-
-    Architecture: Latent vector -> Deconv layers -> Output
-    • Latent   [latent_dim]
-    • Linear   [512*7*7]
-    • Reshape  [512x7x7]
-    • Deconv1  [256x13x13]  (k=3, s=2, p=1)
-    • Deconv2  [128x25x25]  (k=3, s=2, p=1)
-    • Deconv3  [64x50x50]   (k=4, s=2, p=1)
-    • Deconv4  [1x100x100]  (k=4, s=2, p=1)
-    """
-
-    def __init__(
-        self,
-        latent_dim: int,
-        design_shape: tuple[int, int],
-    ) -> None:
-        super().__init__()
-        self.design_shape = design_shape
-        self.resize_out = transforms.Resize(self.design_shape)
-
-        # Linear projection to spatial features
-        self.proj = nn.Sequential(
-            nn.Linear(latent_dim, 512 * 7 * 7),
-            nn.ReLU(inplace=True),
-        )
-
-        # Deconvolutional layers
-        self.deconv = nn.Sequential(
-            # 7->13
-            nn.ConvTranspose2d(512, 256, kernel_size=3, stride=2, padding=1, output_padding=0, bias=False),
-            nn.BatchNorm2d(256),
-            nn.ReLU(inplace=True),
-            # 13->25
-            nn.ConvTranspose2d(256, 128, kernel_size=3, stride=2, padding=1, output_padding=0, bias=False),
-            nn.BatchNorm2d(128),
-            nn.ReLU(inplace=True),
-            # 25->50
-            nn.ConvTranspose2d(128, 64, kernel_size=4, stride=2, padding=1, output_padding=0, bias=False),
-            nn.BatchNorm2d(64),
-            nn.ReLU(inplace=True),
-            # 50->100
-            nn.ConvTranspose2d(64, 1, kernel_size=4, stride=2, padding=1, output_padding=0, bias=False),
-            nn.Sigmoid(),
-        )
-
-    def forward(self, z: th.Tensor) -> th.Tensor:
-        """Forward pass through decoder."""
-        x = self.proj(z).view(z.size(0), 512, 7, 7)  # (B,512,7,7)
-        x = self.deconv(x)  # (B,1,100,100)
-        return self.resize_out(x)  # (B,1,H_orig,W_orig)
+    lipschitz_scale: float = 1.0
+    """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
 
 
 def volume_weight_schedule(epoch: int, w_rec: float, w_vol: float, warmup_epochs: int, degree: float) -> th.Tensor:
@@ -245,8 +146,8 @@ if __name__ == "__main__":
         device = th.device("cpu")
 
     # Build encoder and decoder
-    enc = Encoder(args.latent_dim, design_shape, args.resize_dimensions)
-    dec = Decoder(args.latent_dim, design_shape)
+    enc = Encoder2D(args.latent_dim, design_shape, args.resize_dimensions)
+    dec = TrueSNDecoder2D(args.latent_dim, design_shape, lipschitz_scale=args.lipschitz_scale)
 
     # Weight schedule (ramps volume weight if warmup_epochs > 0, otherwise constant)
     weights = partial(
@@ -274,6 +175,7 @@ if __name__ == "__main__":
     print("Vanilla LVAE Training")
     print(f"Problem: {args.problem_id}")
     print(f"Latent dim: {args.latent_dim}")
+    print(f"Decoder: TrueSNDecoder2D (lipschitz_scale={args.lipschitz_scale})")
     print(f"Pruning epoch: {args.pruning_epoch}")
     print(f"Pruning strategy: {args.pruning_strategy}")
     print(f"Pruning threshold: {args.pruning_threshold}")
