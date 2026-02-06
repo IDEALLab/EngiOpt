@@ -59,7 +59,7 @@ class Args:
     """Interval for sampling designs during training."""
 
     # Training parameters
-    n_epochs: int = 2000
+    n_epochs: int = 10000
     """Number of training epochs."""
     batch_size: int = 128
     """Batch size for training."""
@@ -67,13 +67,13 @@ class Args:
     """Learning rate for the optimizer."""
 
     # LVAE-specific
-    latent_dim: int = 250
+    latent_dim: int = 100
     """Dimensionality of the latent space (overestimate)."""
     perf_dim: int = -1
     """Number of latent dimensions dedicated to performance prediction. If -1 (default), uses all latent_dim dimensions."""
 
     # Constraint parameters (uses Normalized MSE = MSE / Var(data) for problem-independence)
-    nmse_threshold_rec: float = 0.01
+    nmse_threshold_rec: float = 0.05
     """NMSE threshold for reconstruction. Training aims to stay at or below this. Default: 0.01 (R² = 99%)."""
     nmse_threshold_perf: float = 0.05
     """NMSE threshold for performance prediction. Default: 0.05 (R² = 95%)."""
@@ -81,7 +81,7 @@ class Args:
     # Pruning parameters
     pruning_epoch: int = 500
     """Epoch to start pruning dimensions."""
-    pruning_threshold: float = 0.02
+    pruning_threshold: float = 0.05
     """Threshold for pruning (ratio for plummet, percentile for lognorm)."""
     pruning_strategy: str = "plummet"
     """Pruning strategy to use: 'plummet' or 'lognorm'."""
@@ -93,7 +93,7 @@ class Args:
     """Dimensions to resize input images to before encoding/decoding."""
     predictor_hidden_dims: tuple[int, ...] = (256, 128)
     """Hidden dimensions for the MLP predictor."""
-    conditional_predictor: bool = True
+    conditional_predictor: bool = False
     """Whether to include conditions in performance prediction (True) or use only latent codes (False)."""
     lipschitz_scale: float = 1.0
     """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
@@ -325,7 +325,7 @@ if __name__ == "__main__":
 
                         # Get performance predictions on training data
                         pz_train = z[:, :perf_dim]
-                        p_pred_scaled = plvae.predictor(th.cat([pz_train, c_train.to(device)], dim=-1))
+                        p_pred_scaled = plvae.predictor(th.cat([pz_train, c_train_scaled.to(device)], dim=-1))
 
                         # Inverse transform to get true-scale values for plotting
                         p_actual = p_scaler.inverse_transform(p_train_scaled.cpu().numpy()).flatten()
@@ -398,8 +398,18 @@ if __name__ == "__main__":
 
                     # Plot 5: Constraint satisfaction over time (new plot)
                     fig, ax = plt.subplots(figsize=(10, 4))
-                    ax.axhline(y=args.nmse_threshold_rec, color="blue", linestyle="--", label=f"rec threshold ({args.nmse_threshold_rec})")
-                    ax.axhline(y=args.nmse_threshold_perf, color="orange", linestyle="--", label=f"perf threshold ({args.nmse_threshold_perf})")
+                    ax.axhline(
+                        y=args.nmse_threshold_rec,
+                        color="blue",
+                        linestyle="--",
+                        label=f"rec threshold ({args.nmse_threshold_rec})",
+                    )
+                    ax.axhline(
+                        y=args.nmse_threshold_perf,
+                        color="orange",
+                        linestyle="--",
+                        label=f"perf threshold ({args.nmse_threshold_perf})",
+                    )
                     ax.scatter([0], [plvae.nmse_rec], color="blue", s=100, marker="o", label=f"current rec NMSE")
                     ax.scatter([1], [plvae.nmse_perf], color="orange", s=100, marker="o", label=f"current perf NMSE")
                     ax.set_xticks([0, 1])

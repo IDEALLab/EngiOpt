@@ -55,7 +55,7 @@ class Args:
     """Interval for sampling designs during training."""
 
     # Training parameters
-    n_epochs: int = 2000
+    n_epochs: int = 10000
     """Number of training epochs."""
     batch_size: int = 128
     """Batch size for training."""
@@ -63,11 +63,11 @@ class Args:
     """Learning rate for the optimizer."""
 
     # LVAE-specific
-    latent_dim: int = 250
+    latent_dim: int = 100
     """Dimensionality of the latent space (overestimate)."""
 
     # Constraint parameters (uses Normalized MSE = MSE / Var(data) for problem-independence)
-    nmse_threshold: float = 0.01
+    nmse_threshold: float = 0.05
     """NMSE ceiling. Training aims to stay at or below this threshold."""
     constraint_mode: str = "one_sided"
     """Constraint mode: 'one_sided' (rec or vol), 'gated' (rec + vol), 'gradient_balanced' (auto-scaled)."""
@@ -79,7 +79,7 @@ class Args:
     # Pruning parameters
     pruning_epoch: int = 500
     """Epoch to start pruning dimensions."""
-    pruning_threshold: float = 0.02
+    pruning_threshold: float = 0.05
     """Threshold for pruning (ratio for plummet, percentile for lognorm)."""
     pruning_strategy: str = "plummet"
     """Pruning strategy to use: 'plummet' or 'lognorm'."""
