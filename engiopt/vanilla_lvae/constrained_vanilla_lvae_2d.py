@@ -89,7 +89,7 @@ class Args:
     # Architecture
     resize_dimensions: tuple[int, int] = (100, 100)
     """Dimensions to resize input images to before encoding/decoding."""
-    lipschitz_scale: float = 1.0
+    decoder_lipschitz_scale: float = 1.0
     """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
 
 
@@ -132,7 +132,7 @@ if __name__ == "__main__":
 
     # Build encoder and decoder
     enc = Encoder2D(args.latent_dim, design_shape, args.resize_dimensions)
-    dec = TrueSNDecoder2D(args.latent_dim, design_shape, lipschitz_scale=args.lipschitz_scale)
+    dec = TrueSNDecoder2D(args.latent_dim, design_shape, lipschitz_scale=args.decoder_lipschitz_scale)
 
     # Initialize constrained LVAE with selectable constraint mode
     lvae = ConstrainedLeastVolumeAE_DP(
@@ -165,7 +165,7 @@ if __name__ == "__main__":
     print("Constrained LVAE Training")
     print(f"Problem: {args.problem_id}")
     print(f"Latent dim: {args.latent_dim}")
-    print(f"Decoder: TrueSNDecoder2D (lipschitz_scale={args.lipschitz_scale})")
+    print(f"Decoder: TrueSNDecoder2D (lipschitz_scale={args.decoder_lipschitz_scale})")
     print(f"NMSE threshold: {args.nmse_threshold} (R² = {1 - args.nmse_threshold:.2%})")
     print(f"Constraint mode: {args.constraint_mode}")
     if args.constraint_mode == "gated":

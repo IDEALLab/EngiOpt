@@ -95,7 +95,7 @@ class Args:
     """Hidden dimensions for the MLP predictor."""
     conditional_predictor: bool = False
     """Whether to include conditions in performance prediction (True) or use only latent codes (False)."""
-    lipschitz_scale: float = 1.0
+    decoder_lipschitz_scale: float = 1.0
     """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
     predictor_lipschitz_scale: float = 1.0
     """Lipschitz bound for spectrally normalized MLP predictor. Controls output scaling."""
@@ -142,7 +142,7 @@ if __name__ == "__main__":
 
     # Build encoder and decoder
     enc = Encoder2D(args.latent_dim, design_shape, args.resize_dimensions)
-    dec = TrueSNDecoder2D(args.latent_dim, design_shape, lipschitz_scale=args.lipschitz_scale)
+    dec = TrueSNDecoder2D(args.latent_dim, design_shape, lipschitz_scale=args.decoder_lipschitz_scale)
 
     # Determine perf_dim: if -1 (default), use all latent dimensions
     perf_dim = args.latent_dim if args.perf_dim == -1 else args.perf_dim
@@ -161,7 +161,7 @@ if __name__ == "__main__":
     print("Constrained Performance-LVAE Training (One-Sided)")
     print(f"Problem: {args.problem_id}")
     print(f"Latent dim: {args.latent_dim}")
-    print(f"Decoder: TrueSNDecoder2D (lipschitz_scale={args.lipschitz_scale})")
+    print(f"Decoder: TrueSNDecoder2D (lipschitz_scale={args.decoder_lipschitz_scale})")
     print(f"Perf dim: {perf_dim} (first {perf_dim} dims predict performance)")
     print(f"Predictor mode: {'Conditional' if args.conditional_predictor else 'Unconditional'}")
     print(f"Predictor: SNMLPPredictor (lipschitz_scale={args.predictor_lipschitz_scale})")

@@ -85,7 +85,7 @@ class Args:
     # Architecture
     resize_dimensions: tuple[int, int] = (100, 100)
     """Dimensions to resize input images to before encoding/decoding."""
-    lipschitz_scale: float = 1.0
+    decoder_lipschitz_scale: float = 1.0
     """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
 
 
@@ -147,7 +147,7 @@ if __name__ == "__main__":
 
     # Build encoder and decoder
     enc = Encoder2D(args.latent_dim, design_shape, args.resize_dimensions)
-    dec = TrueSNDecoder2D(args.latent_dim, design_shape, lipschitz_scale=args.lipschitz_scale)
+    dec = TrueSNDecoder2D(args.latent_dim, design_shape, lipschitz_scale=args.decoder_lipschitz_scale)
 
     # Weight schedule (ramps volume weight if warmup_epochs > 0, otherwise constant)
     weights = partial(
@@ -175,7 +175,7 @@ if __name__ == "__main__":
     print("Vanilla LVAE Training")
     print(f"Problem: {args.problem_id}")
     print(f"Latent dim: {args.latent_dim}")
-    print(f"Decoder: TrueSNDecoder2D (lipschitz_scale={args.lipschitz_scale})")
+    print(f"Decoder: TrueSNDecoder2D (lipschitz_scale={args.decoder_lipschitz_scale})")
     print(f"Pruning epoch: {args.pruning_epoch}")
     print(f"Pruning strategy: {args.pruning_strategy}")
     print(f"Pruning threshold: {args.pruning_threshold}")
