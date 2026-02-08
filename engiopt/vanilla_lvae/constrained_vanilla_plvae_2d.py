@@ -488,7 +488,10 @@ if __name__ == "__main__":
             if args.track:
                 artifact = wandb.Artifact(f"{args.problem_id}_{args.algo}", type="model")
                 artifact.add_file("constrained_vanilla_plvae.pth")
-                wandb.log_artifact(artifact, aliases=[f"seed_{args.seed}"])
+                wandb.log_artifact(
+                    artifact,
+                    aliases=[f"seed_{args.seed}_rec{args.nmse_threshold_rec}_perf{args.nmse_threshold_perf}"],
+                )
 
     if args.track:
         wandb.finish()
