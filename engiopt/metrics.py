@@ -1,7 +1,7 @@
 """This module provides metrics for evaluating generative model designs.
 
-Maximum Mean Discrepancy (MMD), Determinantal Point Process (DPP) diversity, and
-optimality gap calculations.
+Maximum Mean Discrepancy (MMD), Determinantal Point Process (DPP) diversity,
+and optimality gap calculations.
 """
 
 from __future__ import annotations
@@ -29,13 +29,35 @@ else:
     multiprocessing.set_start_method("spawn", force=True)
 
 
-def mmd(x: np.ndarray, y: np.ndarray, sigma: float = 1.0) -> float:
+def apply_importance_weights(x: np.ndarray, ref: np.ndarray) -> np.ndarray:
+    """Weight each dimension by sqrt(variance) computed from a reference set.
+
+    This makes distance calculations sensitive to dimensions that vary more,
+    whether those dimensions are pixels, latent codes, or any other features.
+
+    Args:
+        x: Array of shape (n, d) to be weighted.
+        ref: Reference array of shape (m, d) used to compute per-dimension variance.
+
+    Returns:
+        Weighted copy of x with shape (n, d).
+    """
+    var = np.var(ref, axis=0)
+    weights = np.sqrt(var + 1e-12)
+    return x * weights
+
+
+def mmd(x: np.ndarray, y: np.ndarray, sigma: float | None = 1.0, importance_weighted: bool = False) -> float:
     """Compute the Maximum Mean Discrepancy (MMD) between two sets of samples.
 
     Args:
-        x (np.ndarray): Array of shape (n, l, w) for generative model designs.
-        y (np.ndarray): Array of shape (m, l, w) for dataset designs.
-        sigma (float): Bandwidth parameter for the Gaussian kernel.
+        x: Array of shape (n, ...) for generated designs (or latent codes).
+        y: Array of shape (m, ...) for dataset/reference designs (or latent codes).
+        sigma: Bandwidth parameter for the Gaussian kernel. If None, uses median heuristic
+            on the reference data y only (so sigma is consistent across different generators).
+        importance_weighted: If True, weight each dimension by sqrt(variance) of y
+            before computing distances. Useful for latent spaces where some
+            dimensions are more informative than others.
 
     Returns:
         float: The MMD value.
@@ -43,24 +65,40 @@ def mmd(x: np.ndarray, y: np.ndarray, sigma: float = 1.0) -> float:
     x_flat = x.reshape(x.shape[0], -1)
     y_flat = y.reshape(y.shape[0], -1)
 
+    if importance_weighted:
+        x_flat = apply_importance_weights(x_flat, y_flat)
+        y_flat = apply_importance_weights(y_flat, y_flat)
+
+    if sigma is None:
+        sigma = compute_median_sigma(y_flat)
+
     k_xx = np.exp(-cdist(x_flat, x_flat, "sqeuclidean") / (2 * sigma**2))
     k_yy = np.exp(-cdist(y_flat, y_flat, "sqeuclidean") / (2 * sigma**2))
     k_xy = np.exp(-cdist(x_flat, y_flat, "sqeuclidean") / (2 * sigma**2))
 
-    return k_xx.mean() + k_yy.mean() - 2 * k_xy.mean()
+    return float(k_xx.mean() + k_yy.mean() - 2 * k_xy.mean())
 
 
-def dpp_diversity(x: np.ndarray, sigma: float = 1.0) -> float:
+def dpp_diversity(x: np.ndarray, sigma: float | None = 1.0, importance_weighted: bool = False) -> float:
     """Compute the Determinantal Point Process (DPP) diversity for a set of samples.
 
     Args:
-        x (np.ndarray): Array of shape (n, l, w) for generative model designs.
-        sigma (float): Bandwidth parameter for the Gaussian kernel.
+        x: Array of shape (n, ...) for generated designs (or latent codes).
+        sigma: Bandwidth parameter for the Gaussian kernel. If None, uses median heuristic.
+        importance_weighted: If True, weight each dimension by sqrt(variance) of x
+            before computing distances.
 
     Returns:
         float: The DPP diversity value.
     """
     x_flat = x.reshape(x.shape[0], -1)
+
+    if importance_weighted:
+        x_flat = apply_importance_weights(x_flat, x_flat)
+
+    if sigma is None:
+        sigma = compute_median_sigma(x_flat)
+
     pairwise_sq_dists = cdist(x_flat, x_flat, "sqeuclidean")
     similarity_matrix = np.exp(-pairwise_sq_dists / (2 * sigma**2))
 
@@ -68,9 +106,35 @@ def dpp_diversity(x: np.ndarray, sigma: float = 1.0) -> float:
     reg_matrix = similarity_matrix + 1e-6 * np.eye(x.shape[0])
 
     try:
-        return np.linalg.det(reg_matrix)
+        return float(np.linalg.det(reg_matrix))
     except np.linalg.LinAlgError:
         return 0.0  # fallback in case of numerical issues
+
+
+def compute_median_sigma(x: np.ndarray, y: np.ndarray | None = None) -> float:
+    """Compute sigma using median heuristic on pairwise distances.
+
+    Args:
+        x: First set of samples of shape (n, d).
+        y: Second set of samples (optional, uses x if None).
+
+    Returns:
+        Computed sigma value.
+    """
+    n_sample = min(500, len(x))
+    rng = np.random.default_rng(42)
+    idx_x = rng.choice(len(x), n_sample, replace=len(x) < n_sample)
+
+    if y is not None:
+        idx_y = rng.choice(len(y), n_sample, replace=len(y) < n_sample)
+        dists = cdist(x[idx_x], y[idx_y], "sqeuclidean")
+    else:
+        dists = cdist(x[idx_x], x[idx_x], "sqeuclidean")
+        # Use upper triangle (exclude diagonal)
+        dists = dists[np.triu_indices_from(dists, k=1)]
+
+    sigma = np.sqrt(np.median(dists) / 2) if len(dists) > 0 else 1.0
+    return max(sigma, 1e-6)
 
 
 def optimality_gap(opt_history: list[OptiStep], baseline: float) -> list[float]:
@@ -157,7 +221,7 @@ def metrics(
     gen_designs: npt.NDArray,
     dataset_designs: npt.NDArray,
     sampled_conditions: Dataset | None = None,
-    sigma: float = 1.0,
+    sigma: float | None = None,
 ) -> dict[str, Any]:
     """Compute various metrics for evaluating generative model designs.
 
@@ -166,7 +230,8 @@ def metrics(
         gen_designs (np.ndarray): Array of shape (n_samples, l, w) for generative model designs (potentially flattened for dict spaces).
         dataset_designs (np.ndarray): Array of shape (n_samples, l, w) for dataset designs (these are not flattened).
         sampled_conditions (Dataset): Dataset of sampled conditions for optimization. If None, no conditions are used.
-        sigma (float): Bandwidth parameter for the Gaussian kernel (in mmd and dpp calculation).
+        sigma: Bandwidth parameter for the Gaussian kernel (in mmd and dpp calculation).
+            If None, uses median heuristic on the reference (dataset) designs.
 
     Returns:
         dict[str, Any]: A dictionary containing the computed metrics:
@@ -175,6 +240,7 @@ def metrics(
             - "fog": Average Final Optimality Gap (float).
             - "mmd": Maximum Mean Discrepancy (float).
             - "dpp": Determinantal Point Process diversity (float).
+            - "mmd_sigma": The actual sigma used for MMD/DPP (float).
     """
     n_samples = len(gen_designs)
 
@@ -221,6 +287,11 @@ def metrics(
         else:
             flattened_ds_designs.append(design)
     flattened_ds_designs_array: npt.NDArray = np.array(flattened_ds_designs)
+
+    # Resolve sigma: if None, compute median heuristic from reference (dataset) designs
+    if sigma is None:
+        sigma = compute_median_sigma(flattened_ds_designs_array)
+
     mmd_value: float = mmd(gen_designs, flattened_ds_designs_array, sigma=sigma)
 
     # Compute the Determinantal Point Process (DPP) diversity for generated designs
@@ -234,5 +305,6 @@ def metrics(
         "fog": average_fog,
         "mmd": mmd_value,
         "dpp": dpp_value,
+        "mmd_sigma": sigma,
         "viol": average_viol,
     }
