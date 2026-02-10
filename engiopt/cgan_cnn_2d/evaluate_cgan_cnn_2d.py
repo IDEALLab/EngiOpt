@@ -100,7 +100,7 @@ if __name__ == "__main__":
     ckpt_path = os.path.join(artifact_dir, "generator.pth")
     ckpt = th.load(ckpt_path, map_location=th.device(device))
     model = Generator(
-        latent_dim=run.config["latent_dim"], n_conds=len(problem.conditions), design_shape=problem.design_space.shape
+        latent_dim=run.config["latent_dim"], n_conds=len(problem.conditions_keys), design_shape=problem.design_space.shape
     )
     model.load_state_dict(ckpt["generator"])
     model.eval()  # Set to evaluation mode

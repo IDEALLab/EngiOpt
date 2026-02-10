@@ -98,7 +98,7 @@ if __name__ == "__main__":
 
     model = Generator(
         latent_dim=run.config["latent_dim"],
-        n_conds=len(problem.conditions),
+        n_conds=len(problem.conditions_keys),
         design_shape=design_shape,
         design_normalizer=design_normalizer,
         conds_normalizer=conds_normalizer,

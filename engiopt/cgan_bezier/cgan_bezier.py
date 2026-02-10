@@ -481,7 +481,7 @@ if __name__ == "__main__":
     discriminator = Discriminator(
         latent_dim=args.latent_dim,
         design_scalars=len(design_scalar_keys),
-        num_conds=len(problem.conditions),
+        num_conds=len(problem.conditions_keys),
         design_shape=problem.design_space["coords"].shape,
         conds_normalizer=conds_normalizer,
         design_scalars_normalizer=design_scalars_normalizer,
@@ -490,7 +490,7 @@ if __name__ == "__main__":
     generator = Generator(
         latent_dim=args.latent_dim,
         noise_dim=args.noise_dim,
-        num_conds=len(problem.conditions),
+        num_conds=len(problem.conditions_keys),
         n_control_points=bezier_control_pts,
         n_data_points=n_data_points,
         conds_normalizer=conds_normalizer,

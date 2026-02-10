@@ -63,7 +63,7 @@ if __name__ == "__main__":
 
     # Reshape to match the expected input shape for the model
     conditions_tensor = conditions_tensor.unsqueeze(-1).unsqueeze(-1)
-    conditions_tensor = conditions_tensor.view(args.n_samples, len(problem.conditions), 1, 1, 1)
+    conditions_tensor = conditions_tensor.view(args.n_samples, len(problem.conditions_keys), 1, 1, 1)
 
     ### Set Up Generator ###
 
@@ -91,7 +91,7 @@ if __name__ == "__main__":
     for key in ckpt:
         print("Checkpoint key:", key)
     model = Generator3D(
-        latent_dim=run.config["latent_dim"], n_conds=len(problem.conditions), design_shape=problem.design_space.shape
+        latent_dim=run.config["latent_dim"], n_conds=len(problem.conditions_keys), design_shape=problem.design_space.shape
     )
     model.load_state_dict(ckpt["generator"])
     model.eval()  # Set to evaluation mode
