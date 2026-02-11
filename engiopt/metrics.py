@@ -121,6 +121,10 @@ def compute_median_sigma(x: np.ndarray, y: np.ndarray | None = None) -> float:
     Returns:
         Computed sigma value.
     """
+    x = x.reshape(x.shape[0], -1)
+    if y is not None:
+        y = y.reshape(y.shape[0], -1)
+
     n_sample = min(500, len(x))
     rng = np.random.default_rng(42)
     idx_x = rng.choice(len(x), n_sample, replace=len(x) < n_sample)

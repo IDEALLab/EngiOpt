@@ -348,6 +348,8 @@ if __name__ == "__main__":
                 "encoder": lvae.encoder.state_dict(),
                 "decoder": lvae.decoder.state_dict(),
                 "optimizer": lvae.optim.state_dict(),
+                "pruning_mask": lvae._p.cpu(),
+                "pruning_frozen_z": lvae._z.cpu(),
                 "args": vars(args),
             }
             th.save(ckpt_lvae, "constrained_vanilla_lvae.pth")

@@ -482,6 +482,8 @@ if __name__ == "__main__":
                 "decoder": plvae.decoder.state_dict(),
                 "predictor": plvae.predictor.state_dict(),
                 "optimizer": plvae.optim.state_dict(),
+                "pruning_mask": plvae._p.cpu(),
+                "pruning_frozen_z": plvae._z.cpu(),
                 "args": vars(args),
             }
             th.save(ckpt_plvae, "constrained_vanilla_plvae.pth")
