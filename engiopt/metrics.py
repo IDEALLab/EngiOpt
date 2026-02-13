@@ -79,17 +79,25 @@ def mmd(x: np.ndarray, y: np.ndarray, sigma: float | None = 1.0, importance_weig
     return float(k_xx.mean() + k_yy.mean() - 2 * k_xy.mean())
 
 
-def dpp_diversity(x: np.ndarray, sigma: float | None = 1.0, importance_weighted: bool = False) -> float:
+def dpp_diversity(x: np.ndarray, sigma: float | None = None, importance_weighted: bool = False) -> float:
     """Compute the Determinantal Point Process (DPP) diversity for a set of samples.
+
+    Uses the log-determinant for numerical stability (raw determinant underflows
+    for even moderate n when kernel entries are close to 1).
+
+    Note: sigma defaults to None (median heuristic on x itself), NOT the reference
+    data sigma. DPP measures within-set diversity, so the bandwidth should be
+    calibrated to the pairwise distances of the samples being evaluated.
 
     Args:
         x: Array of shape (n, ...) for generated designs (or latent codes).
-        sigma: Bandwidth parameter for the Gaussian kernel. If None, uses median heuristic.
+        sigma: Bandwidth parameter for the Gaussian kernel. If None, uses median
+            heuristic on x (recommended for DPP).
         importance_weighted: If True, weight each dimension by sqrt(variance) of x
             before computing distances.
 
     Returns:
-        float: The DPP diversity value.
+        float: The log-determinant of the DPP kernel matrix (higher = more diverse).
     """
     x_flat = x.reshape(x.shape[0], -1)
 
@@ -106,9 +114,12 @@ def dpp_diversity(x: np.ndarray, sigma: float | None = 1.0, importance_weighted:
     reg_matrix = similarity_matrix + 1e-6 * np.eye(x.shape[0])
 
     try:
-        return float(np.linalg.det(reg_matrix))
+        sign, logdet = np.linalg.slogdet(reg_matrix)
+        if sign <= 0:
+            return float("-inf")
+        return float(logdet)
     except np.linalg.LinAlgError:
-        return 0.0  # fallback in case of numerical issues
+        return float("-inf")
 
 
 def compute_median_sigma(x: np.ndarray, y: np.ndarray | None = None) -> float:
@@ -299,7 +310,7 @@ def metrics(
     mmd_value: float = mmd(gen_designs, flattened_ds_designs_array, sigma=sigma)
 
     # Compute the Determinantal Point Process (DPP) diversity for generated designs
-    # We compute the DPP on the flattened designs
+    # Use the same reference sigma as MMD so DPP is comparable across models
     dpp_value: float = dpp_diversity(gen_designs, sigma=sigma)
 
     # Return all computed metrics as a dictionary
