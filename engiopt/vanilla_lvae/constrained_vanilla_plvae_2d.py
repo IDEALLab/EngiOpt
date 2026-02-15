@@ -1,17 +1,18 @@
-"""Performance-LVAE for 2D designs with plummet-based dynamic pruning. Adapted from https://github.com/IDEALLab/Least_Volume_ICLR2024.
+"""Constrained Performance-LVAE for 2D designs with one-sided constraint handling.
 
-Configuration:
-- perf_dim: Number of latent dimensions dedicated to performance (default: all latent_dim dimensions)
-  - Use perf_dim < latent_dim for interpretable mode
-  - Use perf_dim = latent_dim (default) for regular mode
+Extends the one-sided constraint method to handle two constraints:
+1. Reconstruction constraint: NMSE_rec <= threshold_rec
+2. Performance constraint: NMSE_perf <= threshold_perf
 
-For more information, see: https://arxiv.org/abs/2404.17773
+Uses reconstruction-first priority: reconstruction must be satisfied before
+performance, and both must be satisfied before volume optimization begins.
+
+For more information on LVAE, see: https://arxiv.org/abs/2404.17773
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import partial
 from itertools import product
 import os
 import random
@@ -28,7 +29,7 @@ from torch.utils.data import TensorDataset
 import tqdm
 import tyro
 
-from engiopt.vanilla_lvae.aes import InterpretablePerfLeastVolumeAE_DP
+from engiopt.vanilla_lvae.aes import ConstrainedPerfLeastVolumeAE_DP
 from engiopt.vanilla_lvae.components import Encoder2D
 from engiopt.vanilla_lvae.components import SNMLPPredictor
 from engiopt.vanilla_lvae.components import TrueSNDecoder2D
@@ -37,7 +38,7 @@ import wandb
 
 @dataclass
 class Args:
-    """Command-line arguments for vanilla Performance-LVAE training."""
+    """Command-line arguments for constrained Performance-LVAE training."""
 
     # Problem and tracking
     problem_id: str = "beams2d"
@@ -70,12 +71,12 @@ class Args:
     """Dimensionality of the latent space (overestimate)."""
     perf_dim: int = -1
     """Number of latent dimensions dedicated to performance prediction. If -1 (default), uses all latent_dim dimensions."""
-    w_reconstruction: float = 1.0
-    """Weight for reconstruction loss."""
-    w_performance: float = 0.1
-    """Weight for performance loss."""
-    w_volume: float = 0.01
-    """Weight for volume loss."""
+
+    # Constraint parameters (uses Normalized MSE = MSE / Var(data) for problem-independence)
+    nmse_threshold_rec: float = 0.05
+    """NMSE threshold for reconstruction. Training aims to stay at or below this. Default: 0.01 (R² = 99%)."""
+    nmse_threshold_perf: float = 0.05
+    """NMSE threshold for performance prediction. Default: 0.05 (R² = 95%)."""
 
     # Pruning parameters
     pruning_epoch: int = 500
@@ -86,12 +87,6 @@ class Args:
     """Pruning strategy to use: 'plummet' or 'lognorm'."""
     alpha: float = 0.0
     """(lognorm only) Blending factor between reference and current distribution."""
-
-    # Volume weight warmup
-    volume_warmup_epochs: int = 0
-    """Epochs to polynomially ramp volume weight from 0 to w_volume. 0 disables warmup."""
-    volume_warmup_degree: float = 2.0
-    """Polynomial degree for volume weight warmup (1.0=linear, 2.0=quadratic)."""
 
     # Architecture
     resize_dimensions: tuple[int, int] = (100, 100)
@@ -104,28 +99,6 @@ class Args:
     """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
     predictor_lipschitz_scale: float = 1.0
     """Lipschitz bound for spectrally normalized MLP predictor. Controls output scaling."""
-
-
-def volume_weight_schedule(  # noqa: PLR0913
-    epoch: int, w_rec: float, w_perf: float, w_vol: float, warmup_epochs: int, degree: float
-) -> th.Tensor:
-    """Compute weights with polynomial ramp on volume weight.
-
-    Args:
-        epoch: Current epoch.
-        w_rec: Reconstruction weight (constant).
-        w_perf: Performance weight (constant).
-        w_vol: Final volume weight after warmup.
-        warmup_epochs: Epochs to ramp volume weight from 0 to w_vol.
-        degree: Polynomial degree (1.0=linear, 2.0=quadratic).
-
-    Returns:
-        Tensor [w_rec, w_perf, current_w_vol] where current_w_vol ramps polynomially.
-    """
-    if warmup_epochs <= 0:
-        return th.tensor([w_rec, w_perf, w_vol], dtype=th.float)
-    t = min(epoch / warmup_epochs, 1.0)
-    return th.tensor([w_rec, w_perf, w_vol * (t**degree)], dtype=th.float)
 
 
 if __name__ == "__main__":
@@ -185,7 +158,7 @@ if __name__ == "__main__":
     )
 
     print(f"\n{'=' * 60}")
-    print("Performance-LVAE Training")
+    print("Constrained Performance-LVAE Training (One-Sided)")
     print(f"Problem: {args.problem_id}")
     print(f"Latent dim: {args.latent_dim}")
     print(f"Decoder: TrueSNDecoder2D (lipschitz_scale={args.decoder_lipschitz_scale})")
@@ -195,26 +168,17 @@ if __name__ == "__main__":
     print(
         f"Predictor input: {predictor_input_dim} (perf_dim={perf_dim}, n_conds={n_conds if args.conditional_predictor else 0})"
     )
+    print(f"NMSE threshold (rec): {args.nmse_threshold_rec} (R² = {1 - args.nmse_threshold_rec:.2%})")
+    print(f"NMSE threshold (perf): {args.nmse_threshold_perf} (R² = {1 - args.nmse_threshold_perf:.2%})")
     print(f"Pruning epoch: {args.pruning_epoch}")
     print(f"Pruning strategy: {args.pruning_strategy}")
     print(f"Pruning threshold: {args.pruning_threshold}")
     if args.pruning_strategy == "lognorm":
         print(f"Alpha (lognorm): {args.alpha}")
-    print(f"Volume warmup epochs: {args.volume_warmup_epochs}")
     print(f"{'=' * 60}\n")
 
-    # Weight schedule (ramps volume weight if warmup_epochs > 0, otherwise constant)
-    weights = partial(
-        volume_weight_schedule,
-        w_rec=args.w_reconstruction,
-        w_perf=args.w_performance,
-        w_vol=args.w_volume,
-        warmup_epochs=args.volume_warmup_epochs,
-        degree=args.volume_warmup_degree,
-    )
-
-    # Initialize Performance-LVAE with dynamic pruning
-    plvae = InterpretablePerfLeastVolumeAE_DP(
+    # Initialize Constrained Performance-LVAE with dynamic pruning
+    plvae = ConstrainedPerfLeastVolumeAE_DP(
         encoder=enc,
         decoder=dec,
         predictor=predictor,
@@ -224,7 +188,8 @@ if __name__ == "__main__":
         ),
         latent_dim=args.latent_dim,
         perf_dim=perf_dim,
-        weights=weights,
+        nmse_threshold_rec=args.nmse_threshold_rec,
+        nmse_threshold_perf=args.nmse_threshold_perf,
         pruning_epoch=args.pruning_epoch,
         pruning_threshold=args.pruning_threshold,
         pruning_strategy=args.pruning_strategy,
@@ -260,6 +225,13 @@ if __name__ == "__main__":
         c_train_scaled = th.zeros(len(x_train), 0)
         c_val_scaled = th.zeros(len(x_val), 0)
 
+    # Set data variances for NMSE computation (problem-independent thresholds)
+    plvae.set_data_variance(x_train)
+    plvae.set_perf_variance(p_train_scaled)
+
+    print(f"Data variance (designs): {plvae.data_var:.6f}")
+    print(f"Perf variance (scaled): {plvae.perf_var:.6f}")
+
     loader = DataLoader(
         TensorDataset(x_train, c_train_scaled, p_train_scaled),
         batch_size=args.batch_size,
@@ -284,19 +256,19 @@ if __name__ == "__main__":
 
             plvae.optim.zero_grad()
 
-            # Compute loss components (rec, perf, vol)
-            losses = plvae.loss((x_batch, c_batch, p_batch))
-
-            # Weighted sum for backprop
-            loss = (losses * plvae.w).sum()
+            # Compute loss (scalar, constraint-dependent)
+            loss = plvae.loss((x_batch, c_batch, p_batch))
             loss.backward()
             plvae.optim.step()
 
             bar.set_postfix(
                 {
-                    "rec": f"{losses[0].item():.4f}",
-                    "perf": f"{losses[1].item():.4f}",
-                    "vol": f"{losses[2].item():.4f}",
+                    "rec": f"{plvae.rec_loss:.4f}",
+                    "perf": f"{plvae.perf_loss:.4f}",
+                    "vol": f"{plvae.vol_loss:.4f}",
+                    "nmse_r": f"{plvae.nmse_rec:.4f}",
+                    "nmse_p": f"{plvae.nmse_perf:.4f}",
+                    "vol_on": int(plvae.vol_active),
                     "dim": plvae.dim,
                 }
             )
@@ -306,20 +278,28 @@ if __name__ == "__main__":
                 batches_done = epoch * len(bar) + i
 
                 log_dict = {
-                    "rec_loss": losses[0].item(),
-                    "perf_loss": losses[1].item(),
-                    "vol_loss": losses[2].item(),
+                    "rec_loss": plvae.rec_loss,
+                    "perf_loss": plvae.perf_loss,
+                    "vol_loss": plvae.vol_loss,
                     "total_loss": loss.item(),
+                    "nmse_rec": plvae.nmse_rec,
+                    "nmse_perf": plvae.nmse_perf,
+                    "nmse_threshold_rec": args.nmse_threshold_rec,
+                    "nmse_threshold_perf": args.nmse_threshold_perf,
+                    "vol_active": int(plvae.vol_active),
+                    "rec_violated": int(plvae.nmse_rec > args.nmse_threshold_rec),
+                    "perf_violated": int(plvae.nmse_perf > args.nmse_threshold_perf),
                     "active_dims": plvae.dim,
                     "epoch": epoch,
-                    "w_volume": plvae.w[2].item(),
                 }
                 wandb.log(log_dict)
 
                 print(
                     f"[Epoch {epoch}/{args.n_epochs}] [Batch {i}/{len(bar)}] "
-                    f"[rec loss: {losses[0].item():.4f}] [perf loss: {losses[1].item():.4f}] "
-                    f"[vol loss: {losses[2].item():.4f}] [active dims: {plvae.dim}]"
+                    f"[rec: {plvae.rec_loss:.4f}] [perf: {plvae.perf_loss:.4f}] "
+                    f"[vol: {plvae.vol_loss:.4f}] [nmse_rec: {plvae.nmse_rec:.4f}] "
+                    f"[nmse_perf: {plvae.nmse_perf:.4f}] [vol_active: {int(plvae.vol_active)}] "
+                    f"[dims: {plvae.dim}]"
                 )
 
                 # Sample and visualize at regular intervals
@@ -345,7 +325,7 @@ if __name__ == "__main__":
 
                         # Get performance predictions on training data
                         pz_train = z[:, :perf_dim]
-                        p_pred_scaled = plvae.predictor(th.cat([pz_train, c_train.to(device)], dim=-1))
+                        p_pred_scaled = plvae.predictor(th.cat([pz_train, c_train_scaled.to(device)], dim=-1))
 
                         # Inverse transform to get true-scale values for plotting
                         p_actual = p_scaler.inverse_transform(p_train_scaled.cpu().numpy()).flatten()
@@ -416,6 +396,32 @@ if __name__ == "__main__":
                     plt.savefig(f"images/perf_pred_vs_actual_{batches_done}.png")
                     plt.close()
 
+                    # Plot 5: Constraint satisfaction over time (new plot)
+                    fig, ax = plt.subplots(figsize=(10, 4))
+                    ax.axhline(
+                        y=args.nmse_threshold_rec,
+                        color="blue",
+                        linestyle="--",
+                        label=f"rec threshold ({args.nmse_threshold_rec})",
+                    )
+                    ax.axhline(
+                        y=args.nmse_threshold_perf,
+                        color="orange",
+                        linestyle="--",
+                        label=f"perf threshold ({args.nmse_threshold_perf})",
+                    )
+                    ax.scatter([0], [plvae.nmse_rec], color="blue", s=100, marker="o", label=f"current rec NMSE")
+                    ax.scatter([1], [plvae.nmse_perf], color="orange", s=100, marker="o", label=f"current perf NMSE")
+                    ax.set_xticks([0, 1])
+                    ax.set_xticklabels(["Reconstruction", "Performance"])
+                    ax.set_ylabel("NMSE")
+                    ax.set_title(f"Constraint Status - Volume Active: {plvae.vol_active}")
+                    ax.legend(loc="upper right")
+                    ax.set_ylim(0, max(0.1, plvae.nmse_rec * 1.5, plvae.nmse_perf * 1.5))
+                    plt.tight_layout()
+                    plt.savefig(f"images/constraint_status_{batches_done}.png")
+                    plt.close()
+
                     # Log plots to wandb
                     wandb.log(
                         {
@@ -423,6 +429,7 @@ if __name__ == "__main__":
                             "interp_plot": wandb.Image(f"images/interp_{batches_done}.png"),
                             "norm_plot": wandb.Image(f"images/norm_{batches_done}.png"),
                             "perf_pred_vs_actual": wandb.Image(f"images/perf_pred_vs_actual_{batches_done}.png"),
+                            "constraint_status": wandb.Image(f"images/constraint_status_{batches_done}.png"),
                         }
                     )
 
@@ -430,23 +437,28 @@ if __name__ == "__main__":
         with th.no_grad():
             plvae.eval()
             val_rec = val_perf = val_vol = 0.0
+            val_nmse_rec = val_nmse_perf = 0.0
             n = 0
             for batch_v in val_loader:
                 x_v = batch_v[0].to(device)
                 c_v = batch_v[1].to(device)
                 p_v = batch_v[2].to(device)
-                vlosses = plvae.loss((x_v, c_v, p_v))
+                _ = plvae.loss((x_v, c_v, p_v))  # Computes and stores metrics
                 bsz = x_v.size(0)
-                val_rec += vlosses[0].item() * bsz
-                val_perf += vlosses[1].item() * bsz
-                val_vol += vlosses[2].item() * bsz
+                val_rec += plvae.rec_loss * bsz
+                val_perf += plvae.perf_loss * bsz
+                val_vol += plvae.vol_loss * bsz
+                val_nmse_rec += plvae.nmse_rec * bsz
+                val_nmse_perf += plvae.nmse_perf * bsz
                 n += bsz
             val_rec /= n
             val_perf /= n
             val_vol /= n
+            val_nmse_rec /= n
+            val_nmse_perf /= n
 
         # Trigger pruning check at end of epoch
-        plvae.epoch_report(epoch=epoch, callbacks=[], batch=None, loss=losses, pbar=None)
+        plvae.epoch_report(epoch=epoch, callbacks=[], batch=None, loss=loss, pbar=None)
 
         if args.track:
             val_log_dict = {
@@ -454,6 +466,8 @@ if __name__ == "__main__":
                 "val_rec": val_rec,
                 "val_perf": val_perf,
                 "val_vol_loss": val_vol,
+                "val_nmse_rec": val_nmse_rec,
+                "val_nmse_perf": val_nmse_perf,
             }
             wandb.log(val_log_dict, commit=True)
 
@@ -468,13 +482,18 @@ if __name__ == "__main__":
                 "decoder": plvae.decoder.state_dict(),
                 "predictor": plvae.predictor.state_dict(),
                 "optimizer": plvae.optim.state_dict(),
+                "pruning_mask": plvae._p.cpu(),
+                "pruning_frozen_z": plvae._z.cpu(),
                 "args": vars(args),
             }
-            th.save(ckpt_plvae, "vanilla_plvae.pth")
+            th.save(ckpt_plvae, "constrained_vanilla_plvae.pth")
             if args.track:
                 artifact = wandb.Artifact(f"{args.problem_id}_{args.algo}", type="model")
-                artifact.add_file("vanilla_plvae.pth")
-                wandb.log_artifact(artifact, aliases=[f"seed_{args.seed}"])
+                artifact.add_file("constrained_vanilla_plvae.pth")
+                wandb.log_artifact(
+                    artifact,
+                    aliases=[f"seed_{args.seed}_rec{args.nmse_threshold_rec}_perf{args.nmse_threshold_perf}"],
+                )
 
     if args.track:
         wandb.finish()

@@ -91,7 +91,7 @@ if __name__ == "__main__":
     for key in ckpt:
         print("Checkpoint key:", key)
     model = Generator3D(
-        latent_dim=run.config["latent_dim"], n_conds=len(problem.conditions), design_shape=problem.design_space.shape
+        latent_dim=run.config["latent_dim"], n_conds=len(problem.conditions_keys), design_shape=problem.design_space.shape
     )
     model.load_state_dict(ckpt["generator"])
     model.eval()  # Set to evaluation mode

@@ -1,12 +1,16 @@
-"""LVAE for 2D designs with plummet-based dynamic pruning. Adapted from https://github.com/IDEALLab/Least_Volume_ICLR2024..
+"""Constrained LVAE for 2D designs with selectable constraint modes.
 
-For more information, see: https://arxiv.org/abs/2404.17773
+Provides three strategies for balancing reconstruction and volume compression:
+- one_sided: Mutually exclusive (rec OR vol, never both)
+- gated: Additive with gating (rec always, vol only when below threshold)
+- gradient_balanced: Auto-scaled vol to match rec gradient magnitude
+
+For more information on LVAE, see: https://arxiv.org/abs/2404.17773
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from functools import partial
 from itertools import product
 import os
 import random
@@ -22,7 +26,7 @@ from torch.utils.data import TensorDataset
 import tqdm
 import tyro
 
-from engiopt.vanilla_lvae.aes import LeastVolumeAE_DynamicPruning
+from engiopt.vanilla_lvae.aes import ConstrainedLeastVolumeAE_DP
 from engiopt.vanilla_lvae.components import Encoder2D
 from engiopt.vanilla_lvae.components import TrueSNDecoder2D
 import wandb
@@ -30,7 +34,7 @@ import wandb
 
 @dataclass
 class Args:
-    """Command-line arguments for vanilla LVAE training."""
+    """Command-line arguments for constrained LVAE training."""
 
     # Problem and tracking
     problem_id: str = "beams2d"
@@ -61,10 +65,16 @@ class Args:
     # LVAE-specific
     latent_dim: int = 100
     """Dimensionality of the latent space (overestimate)."""
-    w_reconstruction: float = 1.0
-    """Weight for reconstruction loss."""
-    w_volume: float = 0.01
-    """Weight for volume loss."""
+
+    # Constraint parameters (uses Normalized MSE = MSE / Var(data) for problem-independence)
+    nmse_threshold: float = 0.05
+    """NMSE ceiling. Training aims to stay at or below this threshold."""
+    constraint_mode: str = "one_sided"
+    """Constraint mode: 'one_sided' (rec or vol), 'gated' (rec + vol), 'gradient_balanced' (auto-scaled)."""
+    w_vol: float = 1.0
+    """Volume loss weight (gated mode only)."""
+    ema_beta: float = 0.9
+    """EMA smoothing for loss tracking (gradient_balanced mode)."""
 
     # Pruning parameters
     pruning_epoch: int = 500
@@ -76,36 +86,11 @@ class Args:
     alpha: float = 0.0
     """(lognorm only) Blending factor between reference and current distribution."""
 
-    # Volume weight warmup
-    volume_warmup_epochs: int = 0
-    """Epochs to polynomially ramp volume weight from 0 to w_volume. 0 disables warmup."""
-    volume_warmup_degree: float = 2.0
-    """Polynomial degree for volume weight warmup (1.0=linear, 2.0=quadratic)."""
-
     # Architecture
     resize_dimensions: tuple[int, int] = (100, 100)
     """Dimensions to resize input images to before encoding/decoding."""
     decoder_lipschitz_scale: float = 1.0
     """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
-
-
-def volume_weight_schedule(epoch: int, w_rec: float, w_vol: float, warmup_epochs: int, degree: float) -> th.Tensor:
-    """Compute weights with polynomial ramp on volume weight.
-
-    Args:
-        epoch: Current epoch.
-        w_rec: Reconstruction weight (constant).
-        w_vol: Final volume weight after warmup.
-        warmup_epochs: Epochs to ramp volume weight from 0 to w_vol.
-        degree: Polynomial degree (1.0=linear, 2.0=quadratic).
-
-    Returns:
-        Tensor [w_rec, current_w_vol] where current_w_vol ramps polynomially.
-    """
-    if warmup_epochs <= 0:
-        return th.tensor([w_rec, w_vol], dtype=th.float)
-    t = min(epoch / warmup_epochs, 1.0)
-    return th.tensor([w_rec, w_vol * (t**degree)], dtype=th.float)
 
 
 if __name__ == "__main__":
@@ -149,40 +134,21 @@ if __name__ == "__main__":
     enc = Encoder2D(args.latent_dim, design_shape, args.resize_dimensions)
     dec = TrueSNDecoder2D(args.latent_dim, design_shape, lipschitz_scale=args.decoder_lipschitz_scale)
 
-    # Weight schedule (ramps volume weight if warmup_epochs > 0, otherwise constant)
-    weights = partial(
-        volume_weight_schedule,
-        w_rec=args.w_reconstruction,
-        w_vol=args.w_volume,
-        warmup_epochs=args.volume_warmup_epochs,
-        degree=args.volume_warmup_degree,
-    )
-
-    # Initialize vanilla LVAE with dynamic pruning
-    lvae = LeastVolumeAE_DynamicPruning(
+    # Initialize constrained LVAE with selectable constraint mode
+    lvae = ConstrainedLeastVolumeAE_DP(
         encoder=enc,
         decoder=dec,
         optimizer=Adam(list(enc.parameters()) + list(dec.parameters()), lr=args.lr),
         latent_dim=args.latent_dim,
-        weights=weights,
+        nmse_threshold=args.nmse_threshold,
+        constraint_mode=args.constraint_mode,
+        w_vol=args.w_vol,
+        ema_beta=args.ema_beta,
         pruning_epoch=args.pruning_epoch,
         pruning_threshold=args.pruning_threshold,
         pruning_strategy=args.pruning_strategy,
         alpha=args.alpha,
     ).to(device)
-
-    print(f"\n{'=' * 60}")
-    print("Vanilla LVAE Training")
-    print(f"Problem: {args.problem_id}")
-    print(f"Latent dim: {args.latent_dim}")
-    print(f"Decoder: TrueSNDecoder2D (lipschitz_scale={args.decoder_lipschitz_scale})")
-    print(f"Pruning epoch: {args.pruning_epoch}")
-    print(f"Pruning strategy: {args.pruning_strategy}")
-    print(f"Pruning threshold: {args.pruning_threshold}")
-    if args.pruning_strategy == "lognorm":
-        print(f"Alpha (lognorm): {args.alpha}")
-    print(f"Volume warmup epochs: {args.volume_warmup_epochs}")
-    print(f"{'=' * 60}\n")
 
     # ---- DataLoader ----
     hf = problem.dataset.with_format("torch")
@@ -191,6 +157,28 @@ if __name__ == "__main__":
 
     x_train = train_ds["optimal_design"][:].unsqueeze(1)
     x_val = val_ds["optimal_design"][:].unsqueeze(1)
+
+    # Set data variance for NMSE computation (problem-independent threshold)
+    lvae.set_data_variance(x_train)
+
+    print(f"\n{'=' * 60}")
+    print("Constrained LVAE Training")
+    print(f"Problem: {args.problem_id}")
+    print(f"Latent dim: {args.latent_dim}")
+    print(f"Decoder: TrueSNDecoder2D (lipschitz_scale={args.decoder_lipschitz_scale})")
+    print(f"NMSE threshold: {args.nmse_threshold} (R² = {1 - args.nmse_threshold:.2%})")
+    print(f"Constraint mode: {args.constraint_mode}")
+    if args.constraint_mode == "gated":
+        print(f"  w_vol: {args.w_vol}")
+    elif args.constraint_mode == "gradient_balanced":
+        print(f"  ema_beta: {args.ema_beta}")
+    print(f"Data variance: {lvae.data_var:.6f}")
+    print(f"Pruning epoch: {args.pruning_epoch}")
+    print(f"Pruning strategy: {args.pruning_strategy}")
+    print(f"Pruning threshold: {args.pruning_threshold}")
+    if args.pruning_strategy == "lognorm":
+        print(f"Alpha (lognorm): {args.alpha}")
+    print(f"{'=' * 60}\n")
 
     loader = DataLoader(TensorDataset(x_train), batch_size=args.batch_size, shuffle=True, generator=g)
     val_loader = DataLoader(TensorDataset(x_val), batch_size=args.batch_size, shuffle=False)
@@ -204,18 +192,17 @@ if __name__ == "__main__":
             x_batch = batch[0].to(device)
             lvae.optim.zero_grad()
 
-            # Compute loss components (rec, vol)
-            losses = lvae.loss(x_batch)
-
-            # Weighted sum for backprop
-            loss = (losses * lvae.w).sum()
+            # Compute loss (scalar, mode-dependent)
+            loss = lvae.loss(x_batch)
             loss.backward()
             lvae.optim.step()
 
             bar.set_postfix(
                 {
-                    "rec": f"{losses[0].item():.4f}",
-                    "vol": f"{losses[1].item():.4f}",
+                    "rec": f"{lvae.rec_loss:.4f}",
+                    "vol": f"{lvae.vol_loss:.4f}",
+                    "nmse": f"{lvae.nmse:.4f}",
+                    "active": int(lvae.vol_active),
                     "dim": lvae.dim,
                 }
             )
@@ -225,19 +212,23 @@ if __name__ == "__main__":
                 batches_done = epoch * len(bar) + i
 
                 log_dict = {
-                    "rec_loss": losses[0].item(),
-                    "vol_loss": losses[1].item(),
+                    "rec_loss": lvae.rec_loss,
+                    "vol_loss": lvae.vol_loss,
                     "total_loss": loss.item(),
+                    "nmse": lvae.nmse,
+                    "nmse_threshold": args.nmse_threshold,
+                    "vol_active": int(lvae.vol_active),
+                    "balance_factor": lvae.balance_factor,
                     "active_dims": lvae.dim,
                     "epoch": epoch,
-                    "w_volume": lvae.w[1].item(),
+                    "constraint_mode": args.constraint_mode,
                 }
                 wandb.log(log_dict)
 
                 print(
                     f"[Epoch {epoch}/{args.n_epochs}] [Batch {i}/{len(bar)}] "
-                    f"[rec loss: {losses[0].item():.4f}] [vol loss: {losses[1].item():.4f}] "
-                    f"[active dims: {lvae.dim}]"
+                    f"[rec: {lvae.rec_loss:.4f}] [vol: {lvae.vol_loss:.4f}] [nmse: {lvae.nmse:.4f}] "
+                    f"[active: {int(lvae.vol_active)}] [dims: {lvae.dim}]"
                 )
 
                 # Sample and visualize at regular intervals
@@ -321,26 +312,29 @@ if __name__ == "__main__":
         # ---- Validation ----
         with th.no_grad():
             lvae.eval()
-            val_rec = val_vol = 0.0
+            val_rec = val_vol = val_nmse = 0.0
             n = 0
             for batch_v in val_loader:
                 x_v = batch_v[0].to(device)
-                vlosses = lvae.loss(x_v)
+                _ = lvae.loss(x_v)  # Computes and stores metrics
                 bsz = x_v.size(0)
-                val_rec += vlosses[0].item() * bsz
-                val_vol += vlosses[1].item() * bsz
+                val_rec += lvae.rec_loss * bsz
+                val_vol += lvae.vol_loss * bsz
+                val_nmse += lvae.nmse * bsz
                 n += bsz
             val_rec /= n
             val_vol /= n
+            val_nmse /= n
 
         # Trigger pruning check at end of epoch
-        lvae.epoch_report(epoch=epoch, callbacks=[], batch=None, loss=losses, pbar=None)
+        lvae.epoch_report(epoch=epoch, callbacks=[], batch=None, loss=loss, pbar=None)
 
         if args.track:
             val_log_dict = {
                 "epoch": epoch,
-                "val_rec": val_rec,
+                "val_rec_loss": val_rec,
                 "val_vol_loss": val_vol,
+                "val_nmse": val_nmse,
             }
             wandb.log(val_log_dict, commit=True)
 
@@ -354,12 +348,14 @@ if __name__ == "__main__":
                 "encoder": lvae.encoder.state_dict(),
                 "decoder": lvae.decoder.state_dict(),
                 "optimizer": lvae.optim.state_dict(),
+                "pruning_mask": lvae._p.cpu(),
+                "pruning_frozen_z": lvae._z.cpu(),
                 "args": vars(args),
             }
-            th.save(ckpt_lvae, "vanilla_lvae.pth")
+            th.save(ckpt_lvae, "constrained_vanilla_lvae.pth")
             if args.track:
                 artifact = wandb.Artifact(f"{args.problem_id}_{args.algo}", type="model")
-                artifact.add_file("vanilla_lvae.pth")
+                artifact.add_file("constrained_vanilla_lvae.pth")
                 wandb.log_artifact(artifact, aliases=[f"seed_{args.seed}"])
 
     if args.track:
