@@ -24,6 +24,13 @@ Notes for 31 January:
     - Implemented actual LVAE version of dimension-wise pruning, added metrics back in, and tested. For plummet pruning the 0.02 threshold was far too low; setting to 0.25 worked better (256 --> 58 dims).
     - Need to test other pruning methods
     - Need to add back in code pruning and run ablation studies on order (before, after, at the same time as dim pruning) also with learning rate and other hyperparams
+
+Notes for 5 February:
+    - Tested other pruning methods: lognorm with threshold 0.1 is aggressive (alpha = 0.5) but generally works. Can be too aggressive for photonics so probably need to balance with recon. metric
+    - pca_cdf uniformly cuts down to 1 dim if allowed so also would need a recon counter-force here
+    - Models need a while to "warm up" before populating the codebook even before any LV applied, likely due to weakened 1-Lipschitz decoder.
+        - TODO: explore how to mitigate this and encourage model to learn faster in the initial stages
+        - TODO: find a better metric to represent loss of quality in reconstruction (current metrics seem not to capture it)
 """
 
 
@@ -125,7 +132,7 @@ class Args:
     """number of epochs of training"""
     batch_size_vqvae: int = 16
     """size of the batches for Stage 1"""
-    lr_vqvae: float = 4e-4
+    lr_vqvae: float = 2e-4
     """learning rate for Stage 1"""
     b1: float = 0.5
     """decay of first order momentum of gradient"""
@@ -155,13 +162,13 @@ class Args:
     """interval between Stage 1 image samples; integer default 100; if None then calculated as once at the end of each epoch"""
 
     # LV + dynamic pruning (n_z). NOTE: All LV params share the same names with the LVAE code, except the prefix "lv_" has been added to them.
-    lv_start_epoch: int = 10
+    lv_start_epoch: int = 50
     """epoch to start applying LV loss (keep LV loss weight = 0 before this)"""
-    lv_pruning_epoch: int = 20
+    lv_pruning_epoch: int = 100
     """epoch to start pruning latent dimensions (after LV has had time to shape the space)"""
     lv_w_max: float = 0.001
     """maximum weight for the LV loss after ramp-up (default 0.001)"""
-    lv_ramp_epochs: int = 10
+    lv_ramp_epochs: int = 50
     """number of epochs to linearly ramp LV loss weight from 0 to lv_w_max"""
     lv_min_active_dims: int = 1
     """minimum number of latent dimensions allowed to remain active (pruning will not go below this)"""
@@ -169,7 +176,7 @@ class Args:
     """maximum number of latent dimensions to prune per epoch; None for no limit"""
     lv_pruning_strategy: str = "lognorm"  # "plummet" default
     """strategy name (plummet, pca_cdf, lognorm, probabilistic)"""
-    lv_pruning_params: dict[str, Any] | None = field(default_factory=lambda: {"threshold": 0.02, "beta": 0.9, "alpha": 0.5})  # threshold: 0.02 default for plummet; 0.25 more aggressive
+    lv_pruning_params: dict[str, Any] | None = field(default_factory=lambda: {"threshold": 0.1, "beta": 0.9, "alpha": 0.5})  # threshold: 0.02 default for plummet; 0.25 more aggressive
     """least volume pruning parameters, default for plummet strategy with threshold 0.02 and beta 0.9"""
     lv_eta: float = 1e-4
     """smoothing parameter for volume loss"""
