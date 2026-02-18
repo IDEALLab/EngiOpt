@@ -31,6 +31,8 @@ Notes for 5 February:
     - Models need a while to "warm up" before populating the codebook even before any LV applied, likely due to weakened 1-Lipschitz decoder.
         - TODO: explore how to mitigate this and encourage model to learn faster in the initial stages
         - TODO: find a better metric to represent loss of quality in reconstruction (current metrics seem not to capture it)
+
+- TODO: create a custom json or similar file to hold the non-default args for each model tested (rather than hard-coding into submit_grid.sh)
 """
 
 
@@ -67,6 +69,7 @@ from engiopt.lv_vqvae.utils import make_sorted_std_plot
 from engiopt.lv_vqvae.utils import NonLocalBlock
 from engiopt.lv_vqvae.utils import ResidualBlock
 from engiopt.lv_vqvae.utils import ScaledTanh
+from engiopt.lv_vqvae.utils import set_data_variance
 from engiopt.lv_vqvae.utils import Swish
 from engiopt.lv_vqvae.utils import token_stats_from_indices
 from engiopt.lv_vqvae.utils import TrueSNResidualBlock
@@ -174,9 +177,9 @@ class Args:
     """minimum number of latent dimensions allowed to remain active (pruning will not go below this)"""
     lv_max_prune_per_epoch: int | None = None
     """maximum number of latent dimensions to prune per epoch; None for no limit"""
-    lv_pruning_strategy: str = "lognorm"  # "plummet" default
+    lv_pruning_strategy: str = "plummet"  # "plummet" default
     """strategy name (plummet, pca_cdf, lognorm, probabilistic)"""
-    lv_pruning_params: dict[str, Any] | None = field(default_factory=lambda: {"threshold": 0.1, "beta": 0.9, "alpha": 0.5})  # threshold: 0.02 default for plummet; 0.25 more aggressive
+    lv_pruning_params: dict[str, Any] | None = field(default_factory=lambda: {"threshold": 0.05, "beta": 0.9, "alpha": 0.5})  # threshold: 0.02 default for plummet; 0.25 more aggressive
     """least volume pruning parameters, default for plummet strategy with threshold 0.02 and beta 0.9"""
     lv_eta: float = 1e-4
     """smoothing parameter for volume loss"""
@@ -186,6 +189,13 @@ class Args:
     """consecutive epochs below threshold required (default: 1 = immediate)"""
     lv_recon_tol: float = float("inf")
     """relative tolerance to best validation recon (default: inf = no constraint)"""
+    # LV constraint parameters (uses Normalized MSE = MSE / Var(data) for problem-independence)
+    lv_nmse_threshold: float = 0.05
+    """NMSE ceiling. Training aims to stay at or below this threshold."""
+    lv_constraint_mode: str = "gradient_balanced" #  "one_sided"
+    """Constraint mode: 'one_sided' (rec or vol), 'gated' (rec + vol), 'gradient_balanced' (auto-scaled)."""
+    lv_ema_beta: float = 0.9
+    """EMA smoothing for loss tracking (gradient_balanced mode)."""
 
     # Codebook pruning (|Z|)
     # cb_prune_start_epoch: int = 20  # noqa: ERA001
@@ -922,6 +932,9 @@ if __name__ == "__main__":
     args.cond_dim = n_conds
     condition_tensors = [training_ds[key][:] for key in conditions]
 
+    # Calculate train data variance
+    data_var = set_data_variance(training_ds["optimal_upsampled"][:].unsqueeze(1))
+
     # Move to device only here
     th_training_ds = th.utils.data.TensorDataset(
         th.as_tensor(training_ds["optimal_upsampled"][:]).to(device),
@@ -1241,6 +1254,10 @@ if __name__ == "__main__":
     )  # The value of 1 specifies a linear schedule while the value of 0 specifies the starting LV weight
     zstd = None
     zmean = None
+    vol_active = False
+    balance_factor = 1.0
+    rec_ema: float = 0.0
+    vol_ema: float = 0.0
     next_prune_epoch = args.lv_pruning_epoch
     best_val_mae = float("inf")
     active_mask = th.ones(args.latent_dim, dtype=th.bool, device=device)
@@ -1271,7 +1288,42 @@ if __name__ == "__main__":
                 )
 
             rec_loss = th.abs(designs - decoded_images).mean()
-            vq_loss = args.rec_loss_factor * rec_loss + q_loss + lv_weight * lv_loss
+            nmse = rec_loss / data_var
+
+            # Update EMAs for gradient balancing (always update for logging)
+            rec_ema = args.lv_ema_beta * rec_ema + (1 - args.lv_ema_beta) * rec_loss.item()
+            vol_ema = args.lv_ema_beta * vol_ema + (1 - args.lv_ema_beta) * lv_loss.item()
+            balance_factor = rec_ema / (vol_ema + 1e-8)
+
+            # Apply constraint mode
+            if args.lv_constraint_mode == "one_sided":
+                # Mutually exclusive: only one loss active at a time
+                if nmse > args.lv_nmse_threshold:
+                    vol_active = False
+                    combined_loss = args.rec_loss_factor * rec_loss
+                vol_active = True
+                combined_loss = lv_weight * lv_loss
+
+            elif args.lv_constraint_mode == "gated":
+                # Additive: rec always, vol only when below threshold
+                if nmse > args.lv_nmse_threshold:
+                    vol_active = False
+                    combined_loss = args.rec_loss_factor * rec_loss
+                vol_active = True
+                combined_loss = args.rec_loss_factor * rec_loss + lv_weight * lv_loss
+
+            elif args.lv_constraint_mode == "gradient_balanced":
+                # Additive with auto-scaling based on loss magnitudes
+                if nmse > args.lv_nmse_threshold:
+                    vol_active = False
+                    combined_loss = args.rec_loss_factor * rec_loss
+                vol_active = True
+                combined_loss = args.rec_loss_factor * rec_loss + balance_factor * lv_weight * lv_loss
+
+            else:
+                raise ValueError(f"Unknown constraint_mode: {args.lv_constraint_mode}")
+
+            vq_loss = combined_loss + q_loss
 
             opt_vq.zero_grad()
             vq_loss.backward()
