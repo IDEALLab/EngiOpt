@@ -32,6 +32,21 @@ def _entropy_from_probs(p: th.Tensor) -> th.Tensor:
     return -(p * p.log()).sum()
 
 
+def set_data_variance(x: th.Tensor) -> None:
+    """Set the data variance from training data for NMSE computation.
+
+    Should be called once before training with the full training dataset
+    or a representative sample.
+
+    Args:
+        x: Training data tensor of shape (N, ...).
+    """
+    var = x.var().item()
+    if var < 1e-10:  # noqa: PLR2004
+        var = 1.0  # Fallback for constant data
+    return th.tensor(var, device=x.device)  # also not included from orig. implementation: self._data_var_set = True
+
+
 def token_stats_from_indices(indices: th.Tensor, *, vocab_size: int) -> dict[str, float]:
     """Token usage stats from flat index tensor (no pruning mask assumed yet).
 
