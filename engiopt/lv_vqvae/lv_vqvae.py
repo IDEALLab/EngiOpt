@@ -165,13 +165,13 @@ class Args:
     """interval between Stage 1 image samples; integer default 100; if None then calculated as once at the end of each epoch"""
 
     # LV + dynamic pruning (n_z). NOTE: All LV params share the same names with the LVAE code, except the prefix "lv_" has been added to them.
-    lv_start_epoch: int = 50
+    lv_start_epoch: int = 0  # NOTE: Reduced lv_start_epoch and lv_ramp_epochs to 0 so as to remove the warm-up phase. In the future, if we deem the warm-up entirely unnecessary, we can remove these params.
     """epoch to start applying LV loss (keep LV loss weight = 0 before this)"""
-    lv_pruning_epoch: int = 100
+    lv_pruning_epoch: int = 50
     """epoch to start pruning latent dimensions (after LV has had time to shape the space)"""
-    lv_w_max: float = 0.001
+    lv_w_max: float = 1.0  # NOTE: Also increased lv_w_max from 0.001 to 1 w/ gradient balancing method
     """maximum weight for the LV loss after ramp-up (default 0.001)"""
-    lv_ramp_epochs: int = 50
+    lv_ramp_epochs: int = 0
     """number of epochs to linearly ramp LV loss weight from 0 to lv_w_max"""
     lv_min_active_dims: int = 1
     """minimum number of latent dimensions allowed to remain active (pruning will not go below this)"""
@@ -179,7 +179,7 @@ class Args:
     """maximum number of latent dimensions to prune per epoch; None for no limit"""
     lv_pruning_strategy: str = "plummet"  # "plummet" default
     """strategy name (plummet, pca_cdf, lognorm, probabilistic)"""
-    lv_pruning_params: dict[str, Any] | None = field(default_factory=lambda: {"threshold": 0.05, "beta": 0.9, "alpha": 0.5})  # threshold: 0.02 default for plummet; 0.25 more aggressive
+    lv_pruning_params: dict[str, Any] | None = field(default_factory=lambda: {"threshold": 0.1, "beta": 0.9, "alpha": 0.5})  # threshold: 0.02 default for plummet; 0.25 more aggressive
     """least volume pruning parameters, default for plummet strategy with threshold 0.02 and beta 0.9"""
     lv_eta: float = 1e-4
     """smoothing parameter for volume loss"""
@@ -1047,6 +1047,8 @@ if __name__ == "__main__":
         wandb.define_metric("vqvae_token_usage_frac", step_metric="vqvae_step")
         wandb.define_metric("transformer_logits_entropy", step_metric="transformer_step")
         wandb.define_metric("lv_active_dims", step_metric="vqvae_step")
+        wandb.define_metric("lv_nmse", step_metric="vqvae_step")
+        wandb.define_metric("lv_vol_active", step_metric="vqvae_step")
         wandb.define_metric("next_prune_epoch", step_metric="vqvae_step")
 
     vqvae = VQVAE(
@@ -1301,24 +1303,27 @@ if __name__ == "__main__":
                 if nmse > args.lv_nmse_threshold:
                     vol_active = False
                     combined_loss = args.rec_loss_factor * rec_loss
-                vol_active = True
-                combined_loss = lv_weight * lv_loss
+                else:
+                    vol_active = True
+                    combined_loss = lv_weight * lv_loss
 
             elif args.lv_constraint_mode == "gated":
                 # Additive: rec always, vol only when below threshold
                 if nmse > args.lv_nmse_threshold:
                     vol_active = False
                     combined_loss = args.rec_loss_factor * rec_loss
-                vol_active = True
-                combined_loss = args.rec_loss_factor * rec_loss + lv_weight * lv_loss
+                else:
+                    vol_active = True
+                    combined_loss = args.rec_loss_factor * rec_loss + lv_weight * lv_loss
 
             elif args.lv_constraint_mode == "gradient_balanced":
                 # Additive with auto-scaling based on loss magnitudes
                 if nmse > args.lv_nmse_threshold:
                     vol_active = False
                     combined_loss = args.rec_loss_factor * rec_loss
-                vol_active = True
-                combined_loss = args.rec_loss_factor * rec_loss + balance_factor * lv_weight * lv_loss
+                else:
+                    vol_active = True
+                    combined_loss = args.rec_loss_factor * rec_loss + balance_factor * lv_weight * lv_loss
 
             else:
                 raise ValueError(f"Unknown constraint_mode: {args.lv_constraint_mode}")
@@ -1351,6 +1356,8 @@ if __name__ == "__main__":
                     "vqvae_token_perplexity_frac": tstats["token_perplexity_frac"],
                     "vqvae_token_usage_frac": tstats["token_usage_frac"],
                     "lv_active_dims": int(active_mask.sum().item()),
+                    "lv_vol_active": int(vol_active),
+                    "lv_nmse": nmse.item(),
                     "next_prune_epoch": next_prune_epoch
                 }
                 # print(
