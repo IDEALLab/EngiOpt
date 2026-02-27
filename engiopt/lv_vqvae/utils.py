@@ -120,7 +120,7 @@ def make_sorted_std_plot(
 
     # log y-axis with fixed limits 1e-1 to 1e1
     ax.set_yscale("log")
-    ax.set_ylim(1e-2, 1e1)
+    ax.set_ylim(1e-4, 1e2)
 
     plt.tight_layout()
     return fig

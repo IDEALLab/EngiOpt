@@ -38,6 +38,7 @@ Notes for 5 February:
 
 from __future__ import annotations
 
+import copy
 from dataclasses import dataclass
 from dataclasses import field
 import os
@@ -179,7 +180,7 @@ class Args:
     """maximum number of latent dimensions to prune per epoch; None for no limit"""
     lv_pruning_strategy: str = "plummet"  # "plummet" default
     """strategy name (plummet, pca_cdf, lognorm, probabilistic)"""
-    lv_pruning_params: dict[str, Any] | None = field(default_factory=lambda: {"threshold": 0.1, "beta": 0.9, "alpha": 0.5})  # threshold: 0.02 default for plummet; 0.25 more aggressive
+    lv_pruning_params: dict[str, Any] | None = field(default_factory=lambda: {"threshold": 0.05, "beta": 0.9, "alpha": 0.5})  # threshold: 0.02 default for plummet; 0.25 more aggressive
     """least volume pruning parameters, default for plummet strategy with threshold 0.02 and beta 0.9"""
     lv_eta: float = 1e-4
     """smoothing parameter for volume loss"""
@@ -190,8 +191,8 @@ class Args:
     lv_recon_tol: float = float("inf")
     """relative tolerance to best validation recon (default: inf = no constraint)"""
     # LV constraint parameters (uses Normalized MSE = MSE / Var(data) for problem-independence)
-    lv_nmse_threshold: float = 0.05
-    """NMSE ceiling. Training aims to stay at or below this threshold."""
+    lv_nmae_threshold: float = 0.05
+    """NMAE ceiling. Training aims to stay at or below this threshold."""
     lv_constraint_mode: str = "gradient_balanced" #  "one_sided"
     """Constraint mode: 'one_sided' (rec or vol), 'gated' (rec + vol), 'gradient_balanced' (auto-scaled)."""
     lv_ema_beta: float = 0.9
@@ -933,7 +934,7 @@ if __name__ == "__main__":
     condition_tensors = [training_ds[key][:] for key in conditions]
 
     # Calculate train data variance
-    data_var = set_data_variance(training_ds["optimal_upsampled"][:].unsqueeze(1))
+    data_std = th.sqrt(set_data_variance(training_ds["optimal_upsampled"][:].unsqueeze(1)))
 
     # Move to device only here
     th_training_ds = th.utils.data.TensorDataset(
@@ -1031,6 +1032,7 @@ if __name__ == "__main__":
         wandb.define_metric("vqvae_q_loss", step_metric="vqvae_step")
         wandb.define_metric("vqvae_loss", step_metric="vqvae_step")
         wandb.define_metric("epoch_vqvae", step_metric="vqvae_step")
+        wandb.define_metric("designs_vqvae", step_metric="vqvae_step")
         wandb.define_metric("transformer_step", summary="max")
         wandb.define_metric("transformer_loss", step_metric="transformer_step")
         wandb.define_metric("epoch_transformer", step_metric="transformer_step")
@@ -1047,9 +1049,11 @@ if __name__ == "__main__":
         wandb.define_metric("vqvae_token_usage_frac", step_metric="vqvae_step")
         wandb.define_metric("transformer_logits_entropy", step_metric="transformer_step")
         wandb.define_metric("lv_active_dims", step_metric="vqvae_step")
-        wandb.define_metric("lv_nmse", step_metric="vqvae_step")
+        wandb.define_metric("lv_nmae", step_metric="vqvae_step")
         wandb.define_metric("lv_vol_active", step_metric="vqvae_step")
         wandb.define_metric("next_prune_epoch", step_metric="vqvae_step")
+        wandb.define_metric("latent_std_sorted", step_metric="vqvae_step")
+
 
     vqvae = VQVAE(
         device=device,
@@ -1146,13 +1150,23 @@ if __name__ == "__main__":
     opt_transformer = th.optim.AdamW(optim_groups, lr=args.lr_transformer, betas=(0.9, 0.95))
 
     @th.no_grad()
-    def sample_designs_vqvae(n_designs: int) -> list[th.Tensor]:
+    def sample_designs_vqvae(
+        n_designs: int,
+        active_mask: th.Tensor,
+        frozen_mean: th.Tensor
+    ) -> list[th.Tensor]:
         """Sample reconstructions from trained Stage 1 (VQVAE)."""
         vqvae.eval()
 
         designs, *_ = next(iter(log_dataloader))
         designs = designs[:n_designs].to(device)
-        reconstructions, _, _ = vqvae(designs)
+
+        # Pass the pruning context here
+        reconstructions, _, _ = vqvae(
+            designs,
+            active_mask=active_mask,
+            frozen_mean=frozen_mean
+        )
 
         vqvae.train()
         return reconstructions
@@ -1290,7 +1304,7 @@ if __name__ == "__main__":
                 )
 
             rec_loss = th.abs(designs - decoded_images).mean()
-            nmse = rec_loss / data_var
+            nmae = rec_loss / data_std
 
             # Update EMAs for gradient balancing (always update for logging)
             rec_ema = args.lv_ema_beta * rec_ema + (1 - args.lv_ema_beta) * rec_loss.item()
@@ -1300,7 +1314,7 @@ if __name__ == "__main__":
             # Apply constraint mode
             if args.lv_constraint_mode == "one_sided":
                 # Mutually exclusive: only one loss active at a time
-                if nmse > args.lv_nmse_threshold:
+                if nmae > args.lv_nmae_threshold:
                     vol_active = False
                     combined_loss = args.rec_loss_factor * rec_loss
                 else:
@@ -1309,7 +1323,7 @@ if __name__ == "__main__":
 
             elif args.lv_constraint_mode == "gated":
                 # Additive: rec always, vol only when below threshold
-                if nmse > args.lv_nmse_threshold:
+                if nmae > args.lv_nmae_threshold:
                     vol_active = False
                     combined_loss = args.rec_loss_factor * rec_loss
                 else:
@@ -1318,7 +1332,7 @@ if __name__ == "__main__":
 
             elif args.lv_constraint_mode == "gradient_balanced":
                 # Additive with auto-scaling based on loss magnitudes
-                if nmse > args.lv_nmse_threshold:
+                if nmae > args.lv_nmae_threshold:
                     vol_active = False
                     combined_loss = args.rec_loss_factor * rec_loss
                 else:
@@ -1357,7 +1371,7 @@ if __name__ == "__main__":
                     "vqvae_token_usage_frac": tstats["token_usage_frac"],
                     "lv_active_dims": int(active_mask.sum().item()),
                     "lv_vol_active": int(vol_active),
-                    "lv_nmse": nmse.item(),
+                    "lv_nmae": nmae.item(),
                     "next_prune_epoch": next_prune_epoch
                 }
                 # print(
@@ -1368,7 +1382,13 @@ if __name__ == "__main__":
                 if (batches_done + 1) % args.sample_interval_vqvae == 0:
                     # Extract 25 designs
                     designs = resize_to(
-                        data=sample_designs_vqvae(n_designs=n_logged_designs), h=design_shape[0], w=design_shape[1]
+                        data=sample_designs_vqvae(
+                            n_designs=n_logged_designs,
+                            active_mask=active_mask,
+                            frozen_mean=frozen_mean
+                        ),
+                        h=design_shape[0],
+                        w=design_shape[1]
                     )
                     fig, axes = plt.subplots(5, 5, figsize=(12, 12))
 
@@ -1570,8 +1590,8 @@ if __name__ == "__main__":
                     best_ckpt_tr = {
                         "epoch": epoch,
                         "batches_done": batches_done,
-                        "transformer": transformer.state_dict(),
-                        "optimizer_transformer": opt_transformer.state_dict(),
+                        "transformer": copy.deepcopy(transformer.state_dict()),
+                        "optimizer_transformer": copy.deepcopy(opt_transformer.state_dict()),
                         "loss": loss.item(),
                         "val_loss": val_loss,
                     }
