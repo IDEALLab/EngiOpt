@@ -171,3 +171,4 @@ logs/*
 
 .ruff_cache/
 engibench_studies/*
+workshops/dcc26/artifacts/*
