@@ -109,6 +109,17 @@ We have some colab notebooks that show how to use some of the EngiBench/EngiOpt 
 * [Example easy model (GAN)](https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/main/example_easy_model.ipynb)
 * [Example hard model (Diffusion)](https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/main/example_hard_model.ipynb)
 
+## Workshop notebooks
+
+For the DCC'26 hands-on tutorial flow, see:
+
+- `workshops/dcc26/00_setup_api_warmup.ipynb`
+- `workshops/dcc26/01_train_generate.ipynb`
+- `workshops/dcc26/02_evaluate_metrics.ipynb`
+- `workshops/dcc26/03_add_new_problem_scaffold.ipynb`
+
+See `workshops/dcc26/README.md` for the agenda mapping, fallback path, and artifact outputs.
+
 
 ## Citing
 
