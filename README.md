@@ -113,12 +113,16 @@ We have some colab notebooks that show how to use some of the EngiBench/EngiOpt 
 
 For the DCC'26 hands-on tutorial flow, see:
 
-- `workshops/dcc26/00_setup_api_warmup.ipynb`
-- `workshops/dcc26/01_train_generate.ipynb`
-- `workshops/dcc26/02_evaluate_metrics.ipynb`
-- `workshops/dcc26/03_add_new_problem_scaffold.ipynb`
+- `workshops/dcc26/participant/00_setup_api_warmup.ipynb`
+- `workshops/dcc26/participant/01_train_generate.ipynb`
+- `workshops/dcc26/participant/02_evaluate_metrics.ipynb`
+- `workshops/dcc26/participant/03_add_new_problem_scaffold.ipynb`
 
-See `workshops/dcc26/README.md` for the agenda mapping, fallback path, and artifact outputs.
+Facilitator solutions are in:
+
+- `workshops/dcc26/solutions/`
+
+See `workshops/dcc26/README.md` for agenda mapping, fallback path, and artifact outputs.
 
 
 ## Citing

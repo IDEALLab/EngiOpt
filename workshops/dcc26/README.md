@@ -2,25 +2,30 @@
 
 This folder contains the DCC'26 hands-on notebook suite for benchmarking AI methods in engineering design with EngiBench and EngiOpt.
 
+It is split into two tracks:
+
+- `participant/`: notebooks with `TODO` cells for attendees
+- `solutions/`: fully completed facilitator notebooks
+
 ## Workshop flow (3.5h)
 
-- `00_setup_api_warmup.ipynb` (10-15 min)
+- `participant/00_setup_api_warmup.ipynb` and `solutions/00_setup_api_warmup.ipynb` (10-15 min)
   - Environment setup
   - Problem + dataset inspection
   - Rendering and constraint checks
 
-- `01_train_generate.ipynb` (30 min)
+- `participant/01_train_generate.ipynb` and `solutions/01_train_generate.ipynb` (30 min)
   - Lightweight conditional generator training
   - Deterministic seeds
   - Fallback path with nearest-neighbor generation
 
-- `02_evaluate_metrics.ipynb` (20 min)
+- `participant/02_evaluate_metrics.ipynb` and `solutions/02_evaluate_metrics.ipynb` (20 min)
   - Constraint validation
   - Physics simulation
   - Baseline comparison
   - Metric and artifact export
 
-- `03_add_new_problem_scaffold.ipynb` (25 min)
+- `participant/03_add_new_problem_scaffold.ipynb` and `solutions/03_add_new_problem_scaffold.ipynb` (25 min)
   - Minimal `Problem` scaffold
   - Toy simulator and optimization loop
   - Mapping to contribution docs
@@ -37,7 +42,7 @@ Use the pinned requirements in `requirements-colab.txt`.
 
 ## Output artifacts
 
-By default, notebooks write generated artifacts to:
+By default, solution notebooks write generated artifacts to:
 
 - `workshops/dcc26/artifacts/`
 
