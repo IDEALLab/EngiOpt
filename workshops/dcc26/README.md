@@ -63,7 +63,8 @@ Pre-merge (current branch) links:
 
 By default, solution notebooks write generated artifacts to:
 
-- `workshops/dcc26/artifacts/`
+- Local/Jupyter: `workshops/dcc26/artifacts/`
+- Google Colab: `/content/drive/MyDrive/dcc26_workshop/artifacts/` (auto-mounted when possible)
 
 These include:
 
