@@ -64,7 +64,12 @@ Pre-merge (current branch) links:
 By default, solution notebooks write generated artifacts to:
 
 - Local/Jupyter: `workshops/dcc26/artifacts/`
-- Google Colab: `/content/drive/MyDrive/dcc26_workshop/artifacts/` (auto-mounted when possible)
+- Google Colab runtime: `/content/dcc26_artifacts/` (no auth required)
+
+Optional:
+
+- You can enable W&B artifact upload/download in Notebook 01/02 by setting `USE_WANDB_ARTIFACTS = True`.
+- W&B is disabled by default so participants can run without account setup.
 
 These include:
 
