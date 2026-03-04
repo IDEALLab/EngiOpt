@@ -44,6 +44,7 @@ All notebooks now include a conditional dependency bootstrap cell:
 
 - On Colab: installs required packages automatically.
 - On local envs: skips install by default (`FORCE_INSTALL = False`).
+- Note: `engiopt` is not installed from PyPI in these notebooks; workshop execution relies on `engibench` + standard ML libraries.
 
 ## Open in Colab
 
