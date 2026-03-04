@@ -70,6 +70,7 @@ Optional:
 
 - You can enable W&B artifact upload/download in Notebook 01/02 by setting `USE_WANDB_ARTIFACTS = True`.
 - W&B is disabled by default so participants can run without account setup.
+- Notebook 02 auto-regenerates Notebook 01-style artifacts if they are missing in a fresh Colab runtime.
 
 These include:
 
