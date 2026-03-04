@@ -15,7 +15,7 @@ It is split into two tracks:
   - Rendering and constraint checks
 
 - `participant/01_train_generate.ipynb` and `solutions/01_train_generate.ipynb` (30 min)
-  - Lightweight conditional generator training
+  - Lightweight training using `engiopt.cgan_2d.Generator`
   - Deterministic seeds
   - Fallback path with nearest-neighbor generation
 
