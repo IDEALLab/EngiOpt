@@ -432,19 +432,12 @@ def prepare_data(problem, batch_size, device, seed=None):
         *[problem_dataset[key][:] for key, _ in problem.conditions],
     )
 
-    if seed is None:
-        dataloader = th.utils.data.DataLoader(
-            training_ds,
-            batch_size=batch_size,
-            shuffle=True,
-        )
-    else:
-        dataloader = th.utils.data.DataLoader(
-            training_ds,
-            batch_size=batch_size,
-            shuffle=True,
-            generator=make_dataloader_generator(seed),
-        )
+    dataloader = th.utils.data.DataLoader(
+        training_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        generator=make_dataloader_generator(seed) if seed is not None else None,
+    )
     design_scalars_min = training_ds.tensors[1].amin(dim=0).to(device)
     design_scalars_max = training_ds.tensors[1].amax(dim=0).to(device)
 
