@@ -77,6 +77,12 @@ python engiopt/cgan_cnn_2d/cgan_cnn_2d.py --problem-id "beams2d" --track --wandb
 
 This will run a CGAN 2D using CNN model on the beams2d problem. `--track` will track the run on wandb, `--wandb-entity None` will use the default wandb entity, `--save-model` will save the model, `--n-epochs 200` will run for 200 epochs, and `--seed 1` will set the random seed.
 
+For reproducible debugging runs, you can additionally enable strict deterministic mode:
+```
+python engiopt/cgan_cnn_2d/cgan_cnn_2d.py --problem-id "beams2d" --seed 1 --strict-determinism
+```
+This enables stricter PyTorch deterministic settings and deterministic data shuffling while keeping the default behavior unchanged when the flag is omitted.
+
 You can always check the help for more options:
 ```
 python engiopt/cgan_cnn_2d/cgan_cnn_2d.py -h
