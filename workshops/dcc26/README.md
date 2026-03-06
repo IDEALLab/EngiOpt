@@ -17,7 +17,7 @@ It is split into two tracks:
 - `participant/01_train_generate.ipynb` and `solutions/01_train_generate.ipynb` (30 min)
   - Lightweight training using `engiopt.cgan_2d.Generator`
   - Deterministic seeds
-  - Fallback path with nearest-neighbor generation
+  - Artifact export for downstream evaluation (runtime/W&B optional transport)
 
 - `participant/02_evaluate_metrics.ipynb` and `solutions/02_evaluate_metrics.ipynb` (20 min)
   - Constraint validation
@@ -44,7 +44,7 @@ All notebooks now include a conditional dependency bootstrap cell:
 
 - On Colab: installs required packages automatically.
 - On local envs: skips install by default (`FORCE_INSTALL = False`).
-- Note: `engiopt` is not installed from PyPI in these notebooks; workshop execution relies on `engibench` + standard ML libraries.
+- Note: `engiopt` is installed from the EngiOpt GitHub branch in Notebook 01 bootstrap.
 
 ## Open in Colab
 
@@ -64,13 +64,13 @@ Pre-merge (current branch) links:
 By default, solution notebooks write generated artifacts to:
 
 - Local/Jupyter: `workshops/dcc26/artifacts/`
-- Google Colab runtime: `/content/dcc26_artifacts/` (no auth required)
+- Google Colab runtime: `/content/dcc26_artifacts/` (no Google Drive permission needed)
 
 Optional:
 
 - You can enable W&B artifact upload/download in Notebook 01/02 by setting `USE_WANDB_ARTIFACTS = True`.
 - W&B is disabled by default so participants can run without account setup.
-- Notebook 02 auto-regenerates Notebook 01-style artifacts if they are missing in a fresh Colab runtime.
+- Notebook 02 does not regenerate artifacts; it expects Notebook 01 artifacts (or W&B download when enabled).
 
 These include:
 
@@ -85,9 +85,10 @@ These include:
 
 If runtime is constrained:
 
-1. Skip long training in `01_train_generate.ipynb` by enabling fallback mode.
-2. Continue directly to `02_evaluate_metrics.ipynb` with fallback-generated designs.
-3. Keep `03_add_new_problem_scaffold.ipynb` as the capstone for extensibility.
+1. Reuse a previously saved checkpoint/artifact set from W&B or local runtime files.
+2. Set `TRAIN_FROM_SCRATCH = False` in `01_train_generate.ipynb` to load the checkpoint.
+3. Continue to `02_evaluate_metrics.ipynb` with the exported artifacts.
+4. Keep `03_add_new_problem_scaffold.ipynb` as the capstone for extensibility.
 
 ## Suggested pre-workshop checks
 
