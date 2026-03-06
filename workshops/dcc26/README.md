@@ -48,16 +48,16 @@ All notebooks now include a conditional dependency bootstrap cell:
 
 ## Open in Colab
 
-Pre-merge (current branch) links:
+Use these `#copy=true` links for workshop sharing so attendees are prompted to create their own Drive copy first.
 
-- Participant 00: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/participant/00_setup_api_warmup.ipynb
-- Participant 01: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/participant/01_train_generate.ipynb
-- Participant 02: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/participant/02_evaluate_metrics.ipynb
-- Participant 03: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/participant/03_add_new_problem_scaffold.ipynb
-- Solution 00: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/solutions/00_setup_api_warmup.ipynb
-- Solution 01: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/solutions/01_train_generate.ipynb
-- Solution 02: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/solutions/02_evaluate_metrics.ipynb
-- Solution 03: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/solutions/03_add_new_problem_scaffold.ipynb
+- Participant 00: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/participant/00_setup_api_warmup.ipynb#copy=true
+- Participant 01: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/participant/01_train_generate.ipynb#copy=true
+- Participant 02: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/participant/02_evaluate_metrics.ipynb#copy=true
+- Participant 03: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/participant/03_add_new_problem_scaffold.ipynb#copy=true
+- Solution 00: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/solutions/00_setup_api_warmup.ipynb#copy=true
+- Solution 01: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/solutions/01_train_generate.ipynb#copy=true
+- Solution 02: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/solutions/02_evaluate_metrics.ipynb#copy=true
+- Solution 03: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/solutions/03_add_new_problem_scaffold.ipynb#copy=true
 
 ## Output artifacts
 
@@ -69,7 +69,9 @@ By default, solution notebooks write generated artifacts to:
 Optional:
 
 - You can enable W&B artifact upload/download in Notebook 01/02 by setting `USE_WANDB_ARTIFACTS = True`.
-- W&B is disabled by default so participants can run without account setup.
+- Notebook 01 logs training dynamics (`train/loss`) and can upload checkpoint/history/plots as artifact payload.
+- Notebook 02 can log evaluation metrics, tables, and figures to W&B.
+- W&B is disabled by default so participants can run without account setup or API keys.
 - Notebook 02 auto-builds Notebook 01-style artifacts locally with EngiOpt if they are missing (`AUTO_BUILD_ARTIFACTS_IF_MISSING = True`).
 
 These include:
@@ -77,8 +79,12 @@ These include:
 - `generated_designs.npy`
 - `baseline_designs.npy`
 - `conditions.json`
+- `engiopt_cgan2d_generator_supervised.pt`
+- `training_history.csv`
+- `training_curve.png`
 - `metrics_summary.csv`
 - `objective_histogram.png`
+- `objective_scatter.png`
 - `design_grid.png`
 
 ## Facilitator fallback policy
