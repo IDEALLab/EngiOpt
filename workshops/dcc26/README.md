@@ -70,7 +70,7 @@ Optional:
 
 - You can enable W&B artifact upload/download in Notebook 01/02 by setting `USE_WANDB_ARTIFACTS = True`.
 - W&B is disabled by default so participants can run without account setup.
-- Notebook 02 does not regenerate artifacts; it expects Notebook 01 artifacts (or W&B download when enabled).
+- Notebook 02 auto-builds Notebook 01-style artifacts locally with EngiOpt if they are missing (`AUTO_BUILD_ARTIFACTS_IF_MISSING = True`).
 
 These include:
 
@@ -85,10 +85,9 @@ These include:
 
 If runtime is constrained:
 
-1. Reuse a previously saved checkpoint/artifact set from W&B or local runtime files.
-2. Set `TRAIN_FROM_SCRATCH = False` in `01_train_generate.ipynb` to load the checkpoint.
-3. Continue to `02_evaluate_metrics.ipynb` with the exported artifacts.
-4. Keep `03_add_new_problem_scaffold.ipynb` as the capstone for extensibility.
+1. Skip Notebook 01 and run `02_evaluate_metrics.ipynb`; it can build required artifacts automatically.
+2. Or reuse a previously saved checkpoint/artifact set from W&B or local runtime files.
+3. Keep `03_add_new_problem_scaffold.ipynb` as the capstone for extensibility.
 
 ## Suggested pre-workshop checks
 
