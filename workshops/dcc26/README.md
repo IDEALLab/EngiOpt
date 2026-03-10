@@ -26,8 +26,8 @@ It is split into two tracks:
   - Metric and artifact export
 
 - `participant/03_add_new_problem_scaffold.ipynb` and `solutions/03_add_new_problem_scaffold.ipynb` (25 min)
-  - Minimal `Problem` scaffold
-  - Toy simulator and optimization loop
+  - Ambitious `Problem` scaffold (`BatteryColdPlate2DProblem`, not currently in EngiBench)
+  - Lightweight thermal-flow tradeoff simulator and optimization loop
   - Mapping to contribution docs
 
 ## Runtime assumptions
