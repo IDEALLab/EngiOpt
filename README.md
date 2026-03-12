@@ -30,6 +30,7 @@ As much as we can, we follow the [CleanRL](https://github.com/vwxyzjn/cleanrl) p
 [cgan_vae](engiopt/cgan_vae/) | Inverse Design | 3D | ✅ | MultiView GAN + VAE
 [diffusion_1d](engiopt/diffusion_1d/) | Inverse Design | 1D | ❌ | Diffusion
 [diffusion_2d_cond](engiopt/diffusion_2d_cond/) | Inverse Design | 2D | ✅ | Diffusion
+[flow_matching_2d_cond](engiopt/flow_matching_2d_cond/) | Inverse Design | 2D | ✅ | Conditional Flow Matching
 [gan_1d](engiopt/gan_1d/) | Inverse Design | 1D | ❌ | GAN MLP
 [gan_2d](engiopt/gan_2d/) | Inverse Design | 2D | ❌ | GAN MLP
 [gan_bezier](engiopt/gan_bezier/) | Inverse Design | 1D | ❌ | GAN + Bezier layer
@@ -90,6 +91,13 @@ Then you can restore a trained model and evaluate it:
 python engiopt/cgan_cnn_2d/evaluate_cgan_cnn_2d.py --problem-id "beams2d" --wandb-entity None --seed 1 --n-samples 10
 ```
 This will generate 10 designs from the trained model and run some [metrics](https://github.com/IDEALLab/EngiOpt/blob/main/engiopt/metrics.py) on them. This is what we used to generate the results in the paper. This by default will pull the model from wandb. It is possible to restore a model from a local file but is not currently supported.
+
+The flow-matching baseline follows the same train/evaluate split and additionally supports local checkpoint evaluation for smoke validation:
+
+```
+python engiopt/flow_matching_2d_cond/flow_matching_2d_cond.py --problem-id "beams2d" --no-track --save-model --checkpoint-path flow_matching_beams2d.pth --n-epochs 1 --max-train-batches 1 --device cpu --seed 1
+python engiopt/flow_matching_2d_cond/evaluate_flow_matching_2d_cond.py --problem-id "beams2d" --checkpoint-path flow_matching_beams2d.pth --device cpu --seed 1 --n-samples 10
+```
 
 ### Surrogate model
 
