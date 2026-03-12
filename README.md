@@ -99,6 +99,20 @@ python engiopt/flow_matching_2d_cond/flow_matching_2d_cond.py --problem-id "beam
 python engiopt/flow_matching_2d_cond/evaluate_flow_matching_2d_cond.py --problem-id "beams2d" --checkpoint-path flow_matching_beams2d.pth --device cpu --seed 1 --n-samples 10
 ```
 
+For paper reporting, keep raw result files outside Git and aggregate them after evaluation:
+
+```bash
+python -m engiopt.report_metrics \
+  --shard-dir /cluster/scratch/$USER/results/engiopt-flow-matching/csv_shards \
+  --output-dir /cluster/scratch/$USER/results/engiopt-flow-matching/reports \
+  --problem-id beams2d \
+  --upload-wandb \
+  --wandb-project engiopt-flow-matching-dev \
+  --wandb-entity smassoudi-eth-z-rich
+```
+
+Evaluation scripts overwrite per-seed shard files by default, which keeps reruns clean and avoids mixing multiple campaigns in the same CSV.
+
 ### Surrogate model
 
 The current surrogate model comprises several steps:

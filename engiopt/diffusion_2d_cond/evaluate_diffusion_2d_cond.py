@@ -8,7 +8,6 @@ import os
 from diffusers import UNet2DConditionModel
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import numpy as np
-import pandas as pd
 import torch as th
 import tyro
 
@@ -16,6 +15,7 @@ from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.diffusion_2d_cond.diffusion_2d_cond import beta_schedule
 from engiopt.diffusion_2d_cond.diffusion_2d_cond import DiffusionSampler
+from engiopt.reporting import write_metrics_csv
 import wandb
 
 
@@ -37,6 +37,8 @@ class Args:
     """Kernel bandwidth for MMD and DPP metrics."""
     output_csv: str = "diffusion_2d_cond_{problem_id}_metrics.csv"
     """Output CSV path template; may include {problem_id}."""
+    append_output: bool = False
+    """Append to an existing CSV instead of overwriting it."""
 
 
 if __name__ == "__main__":
@@ -48,7 +50,6 @@ if __name__ == "__main__":
 
     # Seeding for reproducibility
     th.manual_seed(seed)
-    rng = np.random.default_rng(seed)
     th.backends.cudnn.deterministic = True
 
     # Select device
@@ -155,9 +156,7 @@ if __name__ == "__main__":
     )
 
     # Append result row to CSV
-    metrics_df = pd.DataFrame([metrics_dict])
     out_path = args.output_csv.format(problem_id=args.problem_id)
-    write_header = not os.path.exists(out_path)
-    metrics_df.to_csv(out_path, mode="a", header=write_header, index=False)
+    write_metrics_csv([metrics_dict], out_path, append_output=args.append_output)
 
-    print(f"Seed {seed} done; appended to {out_path}")
+    print(f"Seed {seed} done; wrote metrics to {out_path}")
