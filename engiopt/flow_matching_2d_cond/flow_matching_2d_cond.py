@@ -231,16 +231,22 @@ if __name__ == "__main__":
                     f"[loss: {loss.item():.6f}] [{time.time() - batch_start_time:.2f} sec]"
                 )
 
-                if batches_done % args.sample_interval == 0:
+                should_preview = args.sample_interval > 0 and batches_done > 0 and batches_done % args.sample_interval == 0
+                if should_preview:
                     preview_conditions = sample_preview_conditions(conds_min, conds_max, 25, device)
-                    preview_designs = generate_samples(
-                        model=model,
-                        design_shape=design_shape,
-                        encoder_hidden_states=preview_conditions,
-                        integration_steps=args.integration_steps,
-                        num_train_timesteps=args.num_train_timesteps,
-                        device=device,
-                    )
+                    was_training = model.training
+                    model.eval()
+                    with th.no_grad():
+                        preview_designs = generate_samples(
+                            model=model,
+                            design_shape=design_shape,
+                            encoder_hidden_states=preview_conditions,
+                            integration_steps=args.integration_steps,
+                            num_train_timesteps=args.num_train_timesteps,
+                            device=device,
+                        )
+                    if was_training:
+                        model.train()
                     img_fname = f"images/{batches_done}.png"
                     save_design_grid(
                         designs=preview_designs,
