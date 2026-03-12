@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from pathlib import Path
 import random
 import time
 
@@ -42,6 +43,14 @@ class Args:
     """Random seed."""
     save_model: bool = False
     """Saves the model to disk."""
+    checkpoint_dir: str = "checkpoints"
+    """Directory for local checkpoints."""
+    checkpoint_interval_epochs: int = 0
+    """Save a local checkpoint every N epochs. Disabled when set to 0."""
+    generator_checkpoint_path: str = "generator.pth"
+    """Final generator checkpoint path used when save_model is enabled."""
+    discriminator_checkpoint_path: str = "discriminator.pth"
+    """Final discriminator checkpoint path used when save_model is enabled."""
 
     # Algorithm specific
     n_epochs: int = 200
@@ -249,6 +258,8 @@ if __name__ == "__main__":
     th.backends.cudnn.deterministic = True
 
     os.makedirs("images", exist_ok=True)
+    if args.checkpoint_interval_epochs > 0:
+        Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
     if th.backends.mps.is_available():
         device = th.device("mps")
@@ -300,7 +311,11 @@ if __name__ == "__main__":
     # ----------
     #  Training
     # ----------
+    run_start_time = time.time()
     for epoch in tqdm.trange(args.n_epochs):
+        epoch_start_time = time.time()
+        last_g_loss: float | None = None
+        last_d_loss: float | None = None
         for i, data in enumerate(dataloader):
             # THIS IS PROBLEM DEPENDENT
             designs = data[0]
@@ -328,6 +343,7 @@ if __name__ == "__main__":
 
             g_loss.backward()
             optimizer_generator.step()
+            last_g_loss = float(g_loss.item())
 
             # ---------------------
             #  Train Discriminator
@@ -344,6 +360,7 @@ if __name__ == "__main__":
 
             d_loss.backward()
             optimizer_discriminator.step()
+            last_d_loss = float(d_loss.item())
 
             # ----------
             #  Logging
@@ -388,34 +405,76 @@ if __name__ == "__main__":
                     plt.close()
                     wandb.log({"designs": wandb.Image(img_fname)})
 
-                # --------------
-                #  Save models
-                # --------------
-                if args.save_model and epoch == args.n_epochs - 1 and i == len(dataloader) - 1:
-                    ckpt_gen = {
-                        "epoch": epoch,
-                        "batches_done": batches_done,
-                        "generator": generator.state_dict(),
-                        "optimizer_generator": optimizer_generator.state_dict(),
-                        "loss": g_loss.item(),
-                    }
-                    ckpt_disc = {
-                        "epoch": epoch,
-                        "batches_done": batches_done,
-                        "discriminator": discriminator.state_dict(),
-                        "optimizer_discriminator": optimizer_discriminator.state_dict(),
-                        "loss": d_loss.item(),
-                    }
+        epoch_runtime_sec = time.time() - epoch_start_time
+        if args.track:
+            wandb.log(
+                {
+                    "epoch_runtime_sec": epoch_runtime_sec,
+                    "cumulative_runtime_sec": time.time() - run_start_time,
+                    "epoch_completed": epoch,
+                }
+            )
 
-                    th.save(ckpt_gen, "generator.pth")
-                    th.save(ckpt_disc, "discriminator.pth")
-                    if args.track:
-                        artifact_gen = wandb.Artifact(f"{args.problem_id}_{args.algo}_generator", type="model")
-                        artifact_gen.add_file("generator.pth")
-                        artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
-                        artifact_disc.add_file("discriminator.pth")
+        should_save_periodic = (
+            args.checkpoint_interval_epochs > 0
+            and (epoch + 1) % args.checkpoint_interval_epochs == 0
+            and last_g_loss is not None
+            and last_d_loss is not None
+        )
+        if should_save_periodic:
+            periodic_gen_path = Path(args.checkpoint_dir) / f"generator_epoch_{epoch + 1:04d}.pth"
+            periodic_disc_path = Path(args.checkpoint_dir) / f"discriminator_epoch_{epoch + 1:04d}.pth"
+            th.save(
+                {
+                    "epoch": epoch,
+                    "batches_done": (epoch + 1) * len(dataloader) - 1,
+                    "generator": generator.state_dict(),
+                    "optimizer_generator": optimizer_generator.state_dict(),
+                    "loss": last_g_loss,
+                    "args": vars(args),
+                },
+                periodic_gen_path,
+            )
+            th.save(
+                {
+                    "epoch": epoch,
+                    "batches_done": (epoch + 1) * len(dataloader) - 1,
+                    "discriminator": discriminator.state_dict(),
+                    "optimizer_discriminator": optimizer_discriminator.state_dict(),
+                    "loss": last_d_loss,
+                    "args": vars(args),
+                },
+                periodic_disc_path,
+            )
 
-                        wandb.log_artifact(artifact_gen, aliases=[f"seed_{args.seed}"])
-                        wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
+        if args.save_model and epoch == args.n_epochs - 1 and last_g_loss is not None and last_d_loss is not None:
+            ckpt_gen = {
+                "epoch": epoch,
+                "batches_done": (epoch + 1) * len(dataloader) - 1,
+                "generator": generator.state_dict(),
+                "optimizer_generator": optimizer_generator.state_dict(),
+                "loss": last_g_loss,
+                "args": vars(args),
+            }
+            ckpt_disc = {
+                "epoch": epoch,
+                "batches_done": (epoch + 1) * len(dataloader) - 1,
+                "discriminator": discriminator.state_dict(),
+                "optimizer_discriminator": optimizer_discriminator.state_dict(),
+                "loss": last_d_loss,
+                "args": vars(args),
+            }
 
-    wandb.finish()
+            th.save(ckpt_gen, args.generator_checkpoint_path)
+            th.save(ckpt_disc, args.discriminator_checkpoint_path)
+            if args.track:
+                artifact_gen = wandb.Artifact(f"{args.problem_id}_{args.algo}_generator", type="model")
+                artifact_gen.add_file(args.generator_checkpoint_path, name="generator.pth")
+                artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
+                artifact_disc.add_file(args.discriminator_checkpoint_path, name="discriminator.pth")
+
+                wandb.log_artifact(artifact_gen, aliases=[f"seed_{args.seed}"])
+                wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
+
+    if args.track:
+        wandb.finish()

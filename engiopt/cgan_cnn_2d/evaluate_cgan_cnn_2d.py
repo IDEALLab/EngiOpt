@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+from typing import Any
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import numpy as np
@@ -37,6 +38,8 @@ class Args:
     """Output CSV path template; may include {problem_id}."""
     append_output: bool = False
     """Append to an existing CSV instead of overwriting it."""
+    checkpoint_path: str | None = None
+    """Optional local generator checkpoint path. Preferred over WandB artifacts when set."""
 
 
 if __name__ == "__main__":
@@ -68,27 +71,34 @@ if __name__ == "__main__":
     ### Set Up Generator ###
 
     # Restores the pytorch model from wandb
-    if args.wandb_entity is not None:
-        artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_cgan_cnn_2d_generator:seed_{seed}"
+    if args.checkpoint_path is not None:
+        ckpt = th.load(args.checkpoint_path, map_location=th.device(device))
+        run_config: dict[str, Any] = dict(ckpt.get("args", {}))
     else:
-        artifact_path = f"{args.wandb_project}/{args.problem_id}_cgan_cnn_2d_generator:seed_{seed}"
+        if args.wandb_entity is not None:
+            artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_cgan_cnn_2d_generator:seed_{seed}"
+        else:
+            artifact_path = f"{args.wandb_project}/{args.problem_id}_cgan_cnn_2d_generator:seed_{seed}"
 
-    api = wandb.Api()
-    artifact = api.artifact(artifact_path, type="model")
+        api = wandb.Api()
+        artifact = api.artifact(artifact_path, type="model")
 
-    class RunRetrievalError(ValueError):
-        def __init__(self):
-            super().__init__("Failed to retrieve the run")
+        class RunRetrievalError(ValueError):
+            def __init__(self):
+                super().__init__("Failed to retrieve the run")
 
-    run = artifact.logged_by()
-    if run is None or not hasattr(run, "config"):
-        raise RunRetrievalError
-    artifact_dir = artifact.download()
+        run = artifact.logged_by()
+        if run is None or not hasattr(run, "config"):
+            raise RunRetrievalError
+        artifact_dir = artifact.download()
 
-    ckpt_path = os.path.join(artifact_dir, "generator.pth")
-    ckpt = th.load(ckpt_path, map_location=th.device(device))
+        ckpt_path = os.path.join(artifact_dir, "generator.pth")
+        ckpt = th.load(ckpt_path, map_location=th.device(device))
+        run_config = dict(run.config)
     model = Generator(
-        latent_dim=run.config["latent_dim"], n_conds=len(problem.conditions_keys), design_shape=problem.design_space.shape
+        latent_dim=int(run_config["latent_dim"]),
+        n_conds=len(problem.conditions_keys),
+        design_shape=problem.design_space.shape,
     )
     model.load_state_dict(ckpt["generator"])
     model.eval()  # Set to evaluation mode

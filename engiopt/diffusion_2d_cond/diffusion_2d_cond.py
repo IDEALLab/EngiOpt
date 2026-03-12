@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import math
 import os
+from pathlib import Path
 import random
 import time
 from typing import Literal, TYPE_CHECKING
@@ -44,6 +45,12 @@ class Args:
     """Random seed."""
     save_model: bool = False
     """Saves the model to disk."""
+    checkpoint_path: str = "model.pth"
+    """Final checkpoint path used when save_model is enabled."""
+    checkpoint_interval_epochs: int = 0
+    """Save a local checkpoint every N epochs. Disabled when set to 0."""
+    checkpoint_dir: str = "checkpoints"
+    """Directory for periodic local checkpoints."""
 
     # Algorithm specific
     n_epochs: int = 200
@@ -254,6 +261,8 @@ if __name__ == "__main__":
     th.backends.cudnn.deterministic = True
 
     os.makedirs("images", exist_ok=True)
+    if args.checkpoint_interval_epochs > 0:
+        Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
     if th.backends.mps.is_available():
         device = th.device("mps")
@@ -358,7 +367,10 @@ if __name__ == "__main__":
     # ----------
     #  Training
     # ----------
+    run_start_time = time.time()
     for epoch in tqdm.trange(args.n_epochs):
+        epoch_start_time = time.time()
+        last_loss: float | None = None
         for i, data in enumerate(dataloader):
             batch_start_time = time.time()
             # Zero the parameter gradients
@@ -380,6 +392,7 @@ if __name__ == "__main__":
             # Backpropagation
             loss.backward()
             optimizer.step()
+            last_loss = float(loss.item())
 
             # ----------
             #  Logging
@@ -424,23 +437,60 @@ if __name__ == "__main__":
                     plt.close()
                     wandb.log({"designs": wandb.Image(img_fname)})
 
-                # --------------
-                #  Save models
-                # --------------
-                if args.save_model and epoch == args.n_epochs - 1 and i == len(dataloader) - 1:
-                    ckpt_model = {
-                        "epoch": epoch,
-                        "batches_done": batches_done,
-                        "model": model.state_dict(),
-                        "optimizer_generator": optimizer.state_dict(),
-                        "loss": loss.item(),
-                    }
+        epoch_runtime_sec = time.time() - epoch_start_time
+        if args.track:
+            wandb.log(
+                {
+                    "epoch_runtime_sec": epoch_runtime_sec,
+                    "cumulative_runtime_sec": time.time() - run_start_time,
+                    "epoch_completed": epoch,
+                }
+            )
 
-                    th.save(ckpt_model, "model.pth")
-                    if args.track:
-                        artifact_model = wandb.Artifact(f"{args.problem_id}_{args.algo}_model", type="model")
-                        artifact_model.add_file("model.pth")
+        should_save_periodic = (
+            args.checkpoint_interval_epochs > 0
+            and (epoch + 1) % args.checkpoint_interval_epochs == 0
+            and last_loss is not None
+        )
+        if should_save_periodic:
+            periodic_path = Path(args.checkpoint_dir) / f"epoch_{epoch + 1:04d}.pth"
+            th.save(
+                {
+                    "epoch": epoch,
+                    "batches_done": (epoch + 1) * len(dataloader) - 1,
+                    "model": model.state_dict(),
+                    "optimizer_generator": optimizer.state_dict(),
+                    "loss": last_loss,
+                    "args": vars(args),
+                    "model_config": {
+                        "layers_per_block": args.layers_per_block,
+                        "num_timesteps": args.num_timesteps,
+                        "noise_schedule": args.noise_schedule,
+                    },
+                },
+                periodic_path,
+            )
 
-                        wandb.log_artifact(artifact_model, aliases=[f"seed_{args.seed}"])
+        if args.save_model and epoch == args.n_epochs - 1 and last_loss is not None:
+            ckpt_model = {
+                "epoch": epoch,
+                "batches_done": (epoch + 1) * len(dataloader) - 1,
+                "model": model.state_dict(),
+                "optimizer_generator": optimizer.state_dict(),
+                "loss": last_loss,
+                "args": vars(args),
+                "model_config": {
+                    "layers_per_block": args.layers_per_block,
+                    "num_timesteps": args.num_timesteps,
+                    "noise_schedule": args.noise_schedule,
+                },
+            }
 
-    wandb.finish()
+            th.save(ckpt_model, args.checkpoint_path)
+            if args.track:
+                artifact_model = wandb.Artifact(f"{args.problem_id}_{args.algo}_model", type="model")
+                artifact_model.add_file(args.checkpoint_path, name="model.pth")
+                wandb.log_artifact(artifact_model, aliases=[f"seed_{args.seed}"])
+
+    if args.track:
+        wandb.finish()

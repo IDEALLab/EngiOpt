@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from pathlib import Path
 import random
 import time
 from typing import Literal
@@ -44,6 +45,10 @@ class Args:
     """Saves the model to disk."""
     checkpoint_path: str = "model.pth"
     """Local checkpoint path used when save_model is enabled."""
+    checkpoint_interval_epochs: int = 0
+    """Save a local checkpoint every N epochs. Disabled when set to 0."""
+    checkpoint_dir: str = "checkpoints"
+    """Directory for periodic local checkpoints."""
     device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
     """Device selection for local smoke runs and training."""
 
@@ -160,6 +165,8 @@ if __name__ == "__main__":
     encoder_hid_dim = len(problem.conditions_keys)
 
     os.makedirs("images", exist_ok=True)
+    if args.checkpoint_interval_epochs > 0:
+        Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
     model = build_model(
         design_shape=design_shape,
@@ -191,7 +198,9 @@ if __name__ == "__main__":
     batches_processed = 0
     stop_training = False
 
+    run_start_time = time.time()
     for epoch in tqdm.trange(args.n_epochs):
+        epoch_start_time = time.time()
         for batch_idx, batch in enumerate(dataloader):
             batch_start_time = time.time()
             optimizer.zero_grad()
@@ -264,6 +273,43 @@ if __name__ == "__main__":
 
         if stop_training:
             break
+
+        if args.track:
+            wandb.log(
+                {
+                    "epoch_runtime_sec": time.time() - epoch_start_time,
+                    "cumulative_runtime_sec": time.time() - run_start_time,
+                    "epoch_completed": epoch,
+                }
+            )
+
+        should_save_periodic = (
+            args.checkpoint_interval_epochs > 0
+            and (epoch + 1) % args.checkpoint_interval_epochs == 0
+            and last_loss is not None
+        )
+        if should_save_periodic:
+            periodic_path = Path(args.checkpoint_dir) / f"epoch_{epoch + 1:04d}.pth"
+            th.save(
+                {
+                    "epoch": last_epoch,
+                    "batch": last_batch,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "loss": last_loss,
+                    "args": args_to_dict(args),
+                    "model_config": {
+                        "layers_per_block": args.layers_per_block,
+                        "num_train_timesteps": args.num_train_timesteps,
+                        "integration_steps": args.integration_steps,
+                    },
+                    "design_shape": design_shape,
+                    "encoder_hid_dim": encoder_hid_dim,
+                    "design_min": design_min,
+                    "design_max": design_max,
+                },
+                periodic_path,
+            )
 
     if args.save_model and last_loss is not None:
         checkpoint = {
