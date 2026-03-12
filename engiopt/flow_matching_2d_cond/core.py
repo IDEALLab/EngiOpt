@@ -122,7 +122,8 @@ def generate_samples(
 ) -> th.Tensor:
     """Generate designs by integrating from Gaussian noise."""
     initial_state = th.randn((encoder_hidden_states.shape[0], 1, *design_shape), device=device)
-    return euler_integrate(model, initial_state, encoder_hidden_states, integration_steps, num_train_timesteps)
+    with th.no_grad():
+        return euler_integrate(model, initial_state, encoder_hidden_states, integration_steps, num_train_timesteps)
 
 
 def args_to_dict(args: Any) -> dict[str, Any]:
@@ -137,4 +138,3 @@ def load_local_checkpoint(checkpoint_path: str, device: th.device) -> dict[str, 
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     return th.load(checkpoint_path, map_location=device)
-
