@@ -105,7 +105,7 @@ if __name__ == "__main__":
     model.to(device)
 
     # Sample noise as generator input
-    z = th.randn((args.n_samples, run.config["latent_dim"], 1, 1), device=device, dtype=th.float)
+    z = th.randn((args.n_samples, int(run_config["latent_dim"]), 1, 1), device=device, dtype=th.float)
 
     # Generate a batch of designs
     gen_designs = model(z, conditions_tensor)
