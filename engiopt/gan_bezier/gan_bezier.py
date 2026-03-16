@@ -7,7 +7,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
-import random
 import time
 from typing import TYPE_CHECKING
 
@@ -19,8 +18,11 @@ import torch as th
 from torch import nn
 import torch.nn.functional as f
 import tyro
-
 import wandb
+
+from engiopt.reproducibility import enable_strict_determinism
+from engiopt.reproducibility import make_dataloader_generator
+from engiopt.reproducibility import seed_training
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -46,6 +48,9 @@ class Args:
     """Wandb entity name."""
     seed: int = 1
     """Random seed."""
+
+    strict_determinism: bool = False
+    """Enable strict deterministic operations for reproducibility debugging."""
     save_model: bool = False
     """Saves the model to disk."""
 
@@ -414,7 +419,7 @@ class Normalizer:
         return x * (self.max_val - self.min_val + self.eps) + self.min_val
 
 
-def prepare_data(problem, batch_size, device):
+def prepare_data(problem, batch_size, device, seed=None):
     """Prepares the dataset and normalizer for training."""
     problem_dataset = problem.dataset.with_format("torch")["train"]
     design_scalar_keys = list(problem_dataset["optimal_design"][0].keys())
@@ -427,7 +432,12 @@ def prepare_data(problem, batch_size, device):
         *[problem_dataset[key][:] for key, _ in problem.conditions],
     )
 
-    dataloader = th.utils.data.DataLoader(training_ds, batch_size=batch_size, shuffle=True)
+    dataloader = th.utils.data.DataLoader(
+        training_ds,
+        batch_size=batch_size,
+        shuffle=True,
+        generator=make_dataloader_generator(seed) if seed is not None else None,
+    )
     design_scalars_min = training_ds.tensors[1].amin(dim=0).to(device)
     design_scalars_max = training_ds.tensors[1].amax(dim=0).to(device)
 
@@ -451,11 +461,9 @@ if __name__ == "__main__":
             save_code=True,
             name=run_name,
         )
-
-    th.manual_seed(args.seed)
-    rng = np.random.default_rng(args.seed)
-    random.seed(args.seed)
-    th.backends.cudnn.deterministic = True
+    rng = seed_training(args.seed)
+    if args.strict_determinism:
+        enable_strict_determinism(warn_only=True)
 
     if not isinstance(problem.design_space, (spaces.Box, spaces.Dict)):
         raise ValueError("This algorithm only works with Box or Dict spaces.")
@@ -468,7 +476,7 @@ if __name__ == "__main__":
     n_data_points = coords_space.shape[1]
 
     # Prepare data
-    dataloader, design_scalars_normalizer, design_scalar_keys = prepare_data(problem, args.batch_size, device)
+    dataloader, design_scalars_normalizer, design_scalar_keys = prepare_data(problem, args.batch_size, device, args.seed)
 
     generator = Generator(
         latent_dim=args.latent_dim,
