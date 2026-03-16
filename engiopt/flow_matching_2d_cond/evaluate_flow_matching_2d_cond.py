@@ -38,8 +38,8 @@ class Args:
     """Kernel bandwidth for MMD and DPP metrics."""
     output_csv: str = "flow_matching_2d_cond_{problem_id}_metrics.csv"
     """Output CSV path template; may include {problem_id}."""
-    append_output: bool = False
-    """Append to an existing CSV instead of overwriting it."""
+    append_output: bool = True
+    """Append to an existing CSV. Use --no-append-output to overwrite instead."""
     checkpoint_path: str | None = None
     """Optional local checkpoint path. Preferred over WandB artifacts when set."""
     device: str = "auto"

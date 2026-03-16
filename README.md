@@ -111,7 +111,7 @@ python -m engiopt.report_metrics \
   --wandb-entity smassoudi-eth-z-rich
 ```
 
-Evaluation scripts overwrite per-seed shard files by default, which keeps reruns clean and avoids mixing multiple campaigns in the same CSV.
+Evaluation scripts append by default (backward compatible behavior). For per-seed shard workflows where reruns should replace old rows, pass `--no-append-output`.
 
 ### Surrogate model
 
