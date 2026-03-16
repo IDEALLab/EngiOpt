@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from pathlib import Path
 import random
 import time
 
@@ -42,6 +43,14 @@ class Args:
     """Random seed."""
     save_model: bool = False
     """Saves the model to disk."""
+    checkpoint_dir: str = "checkpoints"
+    """Directory for local checkpoints."""
+    checkpoint_interval_epochs: int = 0
+    """Save a local checkpoint every N epochs. Disabled when set to 0."""
+    generator_checkpoint_path: str = "generator.pth"
+    """Final generator checkpoint path used when save_model is enabled."""
+    discriminator_checkpoint_path: str = "discriminator.pth"
+    """Final discriminator checkpoint path used when save_model is enabled."""
 
     # Algorithm specific
     n_epochs: int = 1000
@@ -184,6 +193,8 @@ if __name__ == "__main__":
     th.backends.cudnn.deterministic = True
 
     os.makedirs("images", exist_ok=True)
+    if args.checkpoint_interval_epochs > 0:
+        Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
     if th.backends.mps.is_available():
         device = th.device("mps")
@@ -317,6 +328,7 @@ if __name__ == "__main__":
                         "generator": generator.state_dict(),
                         "optimizer_generator": optimizer_generator.state_dict(),
                         "loss": g_loss.item(),
+                        "args": vars(args),
                     }
                     ckpt_disc = {
                         "epoch": epoch,
@@ -324,15 +336,16 @@ if __name__ == "__main__":
                         "discriminator": discriminator.state_dict(),
                         "optimizer_discriminator": optimizer_discriminator.state_dict(),
                         "loss": d_loss.item(),
+                        "args": vars(args),
                     }
 
-                    th.save(ckpt_gen, "generator.pth")
-                    th.save(ckpt_disc, "discriminator.pth")
+                    th.save(ckpt_gen, args.generator_checkpoint_path)
+                    th.save(ckpt_disc, args.discriminator_checkpoint_path)
                     if args.track:
                         artifact_gen = wandb.Artifact(f"{args.problem_id}_{args.algo}_generator", type="model")
-                        artifact_gen.add_file("generator.pth")
+                        artifact_gen.add_file(args.generator_checkpoint_path, name="generator.pth")
                         artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
-                        artifact_disc.add_file("discriminator.pth")
+                        artifact_disc.add_file(args.discriminator_checkpoint_path, name="discriminator.pth")
 
                         wandb.log_artifact(artifact_gen, aliases=[f"seed_{args.seed}"])
                         wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])

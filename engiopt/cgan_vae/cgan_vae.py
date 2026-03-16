@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from pathlib import Path
 import random
 import time
 
@@ -49,6 +50,12 @@ class Args:
     """Random seed."""
     save_model: bool = False
     """Saves the model to disk."""
+    checkpoint_dir: str = "checkpoints"
+    """Directory for local checkpoints."""
+    checkpoint_interval_epochs: int = 0
+    """Save a local checkpoint every N epochs. Disabled when set to 0."""
+    checkpoint_path: str = "multiview_3d_vaegan.pth"
+    """Final checkpoint path used when save_model is enabled."""
 
     # Algorithm specific
     n_epochs: int = 300
@@ -467,6 +474,8 @@ if __name__ == "__main__":
     th.backends.cudnn.deterministic = True
 
     os.makedirs("images_3d", exist_ok=True)
+    if args.checkpoint_interval_epochs > 0:
+        Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
     # Device
     if th.backends.mps.is_available():
@@ -800,12 +809,12 @@ if __name__ == "__main__":
                     "design_shape": design_shape,
                     "n_conds": n_conds,
                 },
-                "multiview_3d_vaegan.pth",
+                args.checkpoint_path,
             )
 
             if args.track:
                 artifact = wandb.Artifact(f"{args.problem_id}_{args.algo}_models", type="model")
-                artifact.add_file("multiview_3d_vaegan.pth")
+                artifact.add_file(args.checkpoint_path, name="multiview_3d_vaegan.pth")
                 wandb.log_artifact(artifact, aliases=[f"seed_{args.seed}"])
 
             print("3D vae models saved successfully!")

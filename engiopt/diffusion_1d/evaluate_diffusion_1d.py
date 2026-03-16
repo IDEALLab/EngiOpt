@@ -4,19 +4,20 @@ from __future__ import annotations
 
 import dataclasses
 import os
+from typing import Any
 
 from denoising_diffusion_pytorch import GaussianDiffusion1D
 from denoising_diffusion_pytorch import Unet1D
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 from gymnasium import spaces
 import numpy as np
-import pandas as pd
 import torch as th
 import tyro
 
 from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.diffusion_1d.diffusion_1d import prepare_data
+from engiopt.reporting import write_metrics_csv
 import wandb
 
 
@@ -38,6 +39,10 @@ class Args:
     """Kernel bandwidth for MMD and DPP metrics."""
     output_csv: str = "diffusion_1d_{problem_id}_metrics.csv"
     """Output CSV path template; may include {problem_id}."""
+    append_output: bool = True
+    """Append to an existing CSV. Use --no-append-output to overwrite instead."""
+    checkpoint_path: str | None = None
+    """Optional local checkpoint path. Preferred over WandB artifacts when set."""
 
 
 if __name__ == "__main__":
@@ -49,7 +54,6 @@ if __name__ == "__main__":
 
     # Seeding for reproducibility
     th.manual_seed(seed)
-    rng = np.random.default_rng(seed)
     th.backends.cudnn.deterministic = True
 
     # Select device
@@ -83,31 +87,36 @@ if __name__ == "__main__":
     )
 
     ### Load Diffusion Model ###
-    if args.wandb_entity is not None:
-        artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_diffusion_1d_model:seed_{seed}"
+    if args.checkpoint_path is not None:
+        ckpt = th.load(args.checkpoint_path, map_location=device)
+        run_config: dict[str, Any] = dict(ckpt.get("args", {}))
     else:
-        artifact_path = f"{args.wandb_project}/{args.problem_id}_diffusion_1d_model:seed_{seed}"
+        if args.wandb_entity is not None:
+            artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_diffusion_1d_model:seed_{seed}"
+        else:
+            artifact_path = f"{args.wandb_project}/{args.problem_id}_diffusion_1d_model:seed_{seed}"
 
-    api = wandb.Api()
-    artifact = api.artifact(artifact_path, type="model")
+        api = wandb.Api()
+        artifact = api.artifact(artifact_path, type="model")
 
-    class RunRetrievalError(ValueError):
-        def __init__(self):
-            super().__init__("Failed to retrieve the run")
+        class RunRetrievalError(ValueError):
+            def __init__(self):
+                super().__init__("Failed to retrieve the run")
 
-    run = artifact.logged_by()
-    if run is None or not hasattr(run, "config"):
-        raise RunRetrievalError
+        run = artifact.logged_by()
+        if run is None or not hasattr(run, "config"):
+            raise RunRetrievalError
 
-    artifact_dir = artifact.download()
-    ckpt_path = os.path.join(artifact_dir, "model.pth")
-    ckpt = th.load(ckpt_path, map_location=device)
+        artifact_dir = artifact.download()
+        ckpt_path = os.path.join(artifact_dir, "model.pth")
+        ckpt = th.load(ckpt_path, map_location=device)
+        run_config = dict(run.config)
 
     _, design_normalizer = prepare_data(problem, padding_size, device)
 
     model = Unet1D(
-        dim=run.config["unet_dim"],  # Used for the sinusoidal positional embeddings
-        channels=run.config["n_channels"],  # Number of channels in the input
+        dim=int(run_config["unet_dim"]),  # Used for the sinusoidal positional embeddings
+        channels=int(run_config["n_channels"]),  # Number of channels in the input
     ).to(device)
 
     diffusion = GaussianDiffusion1D(
@@ -139,9 +148,7 @@ if __name__ == "__main__":
         "n_samples": args.n_samples,
         "fail_ratio": fail_ratio,
     }
-    metrics_df = pd.DataFrame(results_dict, index=[0])
     out_path = args.output_csv.format(problem_id=args.problem_id)
-    write_header = not os.path.exists(out_path)
-    metrics_df.to_csv(out_path, mode="a", header=write_header, index=False)
+    write_metrics_csv([results_dict], out_path, append_output=args.append_output)
 
-    print(f"Seed {seed} done; appended to {out_path}")
+    print(f"Seed {seed} done; wrote metrics to {out_path}")

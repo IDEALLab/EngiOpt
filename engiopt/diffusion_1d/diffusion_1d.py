@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from pathlib import Path
 import random
 import time
 from typing import TYPE_CHECKING
@@ -102,6 +103,12 @@ class Args:
     """Random seed."""
     save_model: bool = False
     """Saves the model to disk."""
+    checkpoint_path: str = "model.pth"
+    """Final checkpoint path used when save_model is enabled."""
+    checkpoint_interval_epochs: int = 0
+    """Save a local checkpoint every N epochs. Disabled when set to 0."""
+    checkpoint_dir: str = "checkpoints"
+    """Directory for periodic local checkpoints."""
 
     # Algorithm specific
     n_epochs: int = 200
@@ -159,6 +166,8 @@ if __name__ == "__main__":
     th.backends.cudnn.deterministic = True
 
     os.makedirs("images", exist_ok=True)
+    if args.checkpoint_interval_epochs > 0:
+        Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
     if th.backends.mps.is_available():
         device = th.device("mps")
@@ -266,12 +275,13 @@ if __name__ == "__main__":
                         "batches_done": batches_done,
                         "model": diffusion.state_dict(),
                         "loss": loss.item(),
+                        "args": vars(args),
                     }
 
-                    th.save(ckpt, "model.pth")
+                    th.save(ckpt, args.checkpoint_path)
                     if args.track:
                         artifact = wandb.Artifact(f"{args.problem_id}_{args.algo}_model", type="model")
-                        artifact.add_file("model.pth")
+                        artifact.add_file(args.checkpoint_path, name="model.pth")
 
                         wandb.log_artifact(artifact, aliases=[f"seed_{args.seed}"])
 

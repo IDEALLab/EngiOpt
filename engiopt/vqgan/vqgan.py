@@ -19,6 +19,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from pathlib import Path
 import random
 import time
 import warnings
@@ -70,6 +71,18 @@ class Args:
     """Random seed."""
     save_model: bool = True
     """Saves the model to disk."""
+    checkpoint_dir: str = "checkpoints"
+    """Directory for local checkpoints."""
+    checkpoint_interval_epochs: int = 0
+    """Reserved for periodic checkpointing; currently disabled when set to 0."""
+    cvqgan_checkpoint_path: str = "cvqgan.pth"
+    """Final CVQGAN checkpoint path used when save_model is enabled."""
+    vqgan_checkpoint_path: str = "vqgan.pth"
+    """Final VQGAN checkpoint path used when save_model is enabled."""
+    discriminator_checkpoint_path: str = "discriminator.pth"
+    """Final discriminator checkpoint path used when save_model is enabled."""
+    transformer_checkpoint_path: str = "transformer.pth"
+    """Final transformer checkpoint path used when save_model is enabled."""
 
     # Algorithm-specific: General
     conditional: bool = True
@@ -650,6 +663,8 @@ if __name__ == "__main__":
 
     os.makedirs("images/vqgan", exist_ok=True)
     os.makedirs("images/transformer", exist_ok=True)
+    if args.checkpoint_interval_epochs > 0:
+        Path(args.checkpoint_dir).mkdir(parents=True, exist_ok=True)
 
     if th.backends.mps.is_available():
         device = th.device("mps")
@@ -968,11 +983,12 @@ if __name__ == "__main__":
                             "cvqgan": cvqgan.state_dict(),
                             "optimizer_cvqgan": opt_cvq.state_dict(),
                             "loss": cvq_loss.item(),
+                            "args": vars(args),
                         }
 
-                        th.save(ckpt_cvq, "cvqgan.pth")
+                        th.save(ckpt_cvq, args.cvqgan_checkpoint_path)
                         artifact_cvq = wandb.Artifact(f"{args.problem_id}_{args.algo}_cvqgan", type="model")
-                        artifact_cvq.add_file("cvqgan.pth")
+                        artifact_cvq.add_file(args.cvqgan_checkpoint_path, name="cvqgan.pth")
                         wandb.log_artifact(artifact_cvq, aliases=[f"seed_{args.seed}"])
 
         # Freeze CVQGAN for later use in Stage 2 Transformer
@@ -1066,6 +1082,7 @@ if __name__ == "__main__":
                         "vqgan": vqgan.state_dict(),
                         "optimizer_vqgan": opt_vq.state_dict(),
                         "loss": vq_loss.item(),
+                        "args": vars(args),
                     }
                     ckpt_disc = {
                         "epoch": epoch,
@@ -1073,14 +1090,15 @@ if __name__ == "__main__":
                         "discriminator": discriminator.state_dict(),
                         "optimizer_discriminator": opt_disc.state_dict(),
                         "loss": gan_loss.item(),
+                        "args": vars(args),
                     }
 
-                    th.save(ckpt_vq, "vqgan.pth")
-                    th.save(ckpt_disc, "discriminator.pth")
+                    th.save(ckpt_vq, args.vqgan_checkpoint_path)
+                    th.save(ckpt_disc, args.discriminator_checkpoint_path)
                     artifact_vq = wandb.Artifact(f"{args.problem_id}_{args.algo}_vqgan", type="model")
-                    artifact_vq.add_file("vqgan.pth")
+                    artifact_vq.add_file(args.vqgan_checkpoint_path, name="vqgan.pth")
                     artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
-                    artifact_disc.add_file("discriminator.pth")
+                    artifact_disc.add_file(args.discriminator_checkpoint_path, name="discriminator.pth")
 
                     wandb.log_artifact(artifact_vq, aliases=[f"seed_{args.seed}"])
                     wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
@@ -1181,8 +1199,9 @@ if __name__ == "__main__":
                         "optimizer_transformer": opt_transformer.state_dict(),
                         "loss": loss.item(),
                         "val_loss": val_loss,
+                        "args": vars(args),
                     }
-                    th.save(ckpt_tr, "transformer.pth")
+                    th.save(ckpt_tr, args.transformer_checkpoint_path)
             else:
                 patience_counter += 1
                 if patience_counter >= patience:
@@ -1201,11 +1220,12 @@ if __name__ == "__main__":
                 "transformer": transformer.state_dict(),
                 "optimizer_transformer": opt_transformer.state_dict(),
                 "loss": loss.item(),
+                "args": vars(args),
             }
-            th.save(ckpt_tr, "transformer.pth")
+            th.save(ckpt_tr, args.transformer_checkpoint_path)
 
         artifact_tr = wandb.Artifact(f"{args.problem_id}_{args.algo}_transformer", type="model")
-        artifact_tr.add_file("transformer.pth")
+        artifact_tr.add_file(args.transformer_checkpoint_path, name="transformer.pth")
         wandb.log_artifact(artifact_tr, aliases=[f"seed_{args.seed}"])
 
     wandb.finish()

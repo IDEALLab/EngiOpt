@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+from typing import Any
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import numpy as np
-import pandas as pd
 import torch as th
 import tyro
 import wandb
@@ -16,6 +16,7 @@ from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.pixel_cnn_pp_2d.pixel_cnn_pp_2d import PixelCNNpp
 from engiopt.pixel_cnn_pp_2d.pixel_cnn_pp_2d import sample_from_discretized_mix_logistic
+from engiopt.reporting import write_metrics_csv
 
 
 @dataclass
@@ -38,6 +39,10 @@ class Args:
     """Kernel bandwidth for MMD and DPP metrics."""
     output_csv: str = "pixel_cnn_pp_2d_{problem_id}_metrics.csv"
     """Output CSV path template; may include {problem_id}."""
+    append_output: bool = True
+    """Append to an existing CSV. Use --no-append-output to overwrite instead."""
+    checkpoint_path: str | None = None
+    """Optional local checkpoint path. Preferred over WandB artifacts when set."""
 
 
 if __name__ == "__main__":
@@ -49,7 +54,6 @@ if __name__ == "__main__":
 
     # Seeding for reproducibility
     th.manual_seed(seed)
-    rng = np.random.default_rng(seed)
     th.backends.cudnn.deterministic = True
 
     # Select device
@@ -73,32 +77,37 @@ if __name__ == "__main__":
     design_shape = (problem.design_space.shape[0], problem.design_space.shape[1])
 
     # Set up PixelCNN++ model
-    if args.wandb_entity is not None:
-        artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_pixel_cnn_pp_2d_model:seed_{seed}"
+    if args.checkpoint_path is not None:
+        ckpt = th.load(args.checkpoint_path, map_location=device)
+        run_config: dict[str, Any] = dict(ckpt.get("args", {}))
     else:
-        artifact_path = f"{args.wandb_project}/{args.problem_id}_pixel_cnn_pp_2d_model:seed_{seed}"
+        if args.wandb_entity is not None:
+            artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_pixel_cnn_pp_2d_model:seed_{seed}"
+        else:
+            artifact_path = f"{args.wandb_project}/{args.problem_id}_pixel_cnn_pp_2d_model:seed_{seed}"
 
-    api = wandb.Api()
-    artifact = api.artifact(artifact_path, type="model")
+        api = wandb.Api()
+        artifact = api.artifact(artifact_path, type="model")
 
-    class RunRetrievalError(ValueError):
-        def __init__(self):
-            super().__init__("Failed to retrieve the run")
+        class RunRetrievalError(ValueError):
+            def __init__(self):
+                super().__init__("Failed to retrieve the run")
 
-    run = artifact.logged_by()
-    if run is None or not hasattr(run, "config"):
-        raise RunRetrievalError
+        run = artifact.logged_by()
+        if run is None or not hasattr(run, "config"):
+            raise RunRetrievalError
 
-    artifact_dir = artifact.download()
-    ckpt_path = os.path.join(artifact_dir, "model.pth")
-    ckpt = th.load(ckpt_path, map_location=device)
+        artifact_dir = artifact.download()
+        ckpt_path = os.path.join(artifact_dir, "model.pth")
+        ckpt = th.load(ckpt_path, map_location=device)
+        run_config = dict(run.config)
 
     model = PixelCNNpp(
-        nr_resnet=run.config["nr_resnet"],
-        nr_filters=run.config["nr_filters"],
-        nr_logistic_mix=run.config["nr_logistic_mix"],
-        resnet_nonlinearity=run.config["resnet_nonlinearity"],
-        dropout_p=run.config["dropout_p"],
+        nr_resnet=int(run_config["nr_resnet"]),
+        nr_filters=int(run_config["nr_filters"]),
+        nr_logistic_mix=int(run_config["nr_logistic_mix"]),
+        resnet_nonlinearity=run_config["resnet_nonlinearity"],
+        dropout_p=float(run_config["dropout_p"]),
         input_channels=1,
         nr_conditions=conditions_tensor.shape[1],
     )
@@ -122,7 +131,7 @@ if __name__ == "__main__":
         for i in range(design_shape[0]):
             for j in range(design_shape[1]):
                 out = model(data, batch_conds)
-                out_sample = sample_from_discretized_mix_logistic(out, run.config["nr_logistic_mix"])
+                out_sample = sample_from_discretized_mix_logistic(out, int(run_config["nr_logistic_mix"]))
                 data[:, :, i, j] = out_sample.data[:, :, i, j]
 
         # move completed batch to CPU to free GPU memory and store
@@ -156,9 +165,7 @@ if __name__ == "__main__":
     )
 
     # Append result row to CSV
-    metrics_df = pd.DataFrame([metrics_dict])
     out_path = args.output_csv.format(problem_id=args.problem_id)
-    write_header = not os.path.exists(out_path)
-    metrics_df.to_csv(out_path, mode="a", header=write_header, index=False)
+    write_metrics_csv([metrics_dict], out_path, append_output=args.append_output)
 
-    print(f"Seed {seed} done; appended to {out_path}")
+    print(f"Seed {seed} done; wrote metrics to {out_path}")

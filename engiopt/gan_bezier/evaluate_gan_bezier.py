@@ -4,11 +4,11 @@ from __future__ import annotations
 
 import dataclasses
 import os
+from typing import Any
 from typing import TYPE_CHECKING
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import numpy as np
-import pandas as pd
 import torch as th
 import tyro
 
@@ -16,6 +16,7 @@ from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.gan_bezier.gan_bezier import Generator
 from engiopt.gan_bezier.gan_bezier import prepare_data
+from engiopt.reporting import write_metrics_csv
 from engiopt.transforms import flatten_dict_factory
 import wandb
 
@@ -43,6 +44,10 @@ class Args:
     """Kernel bandwidth for MMD and DPP metrics."""
     output_csv: str = "gan_bezier_{problem_id}_metrics.csv"
     """Output CSV path template; may include {problem_id}."""
+    append_output: bool = True
+    """Append to an existing CSV. Use --no-append-output to overwrite instead."""
+    checkpoint_path: str | None = None
+    """Optional local generator checkpoint path. Preferred over WandB artifacts when set."""
 
 
 if __name__ == "__main__":
@@ -54,7 +59,6 @@ if __name__ == "__main__":
 
     # Seeding for reproducibility
     th.manual_seed(seed)
-    rng = np.random.default_rng(seed)
     th.backends.cudnn.deterministic = True
 
     # Select device
@@ -76,32 +80,37 @@ if __name__ == "__main__":
     )
 
     ### Set Up Generator ###
-    if args.wandb_entity is not None:
-        artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_gan_bezier_generator:seed_{seed}"
+    if args.checkpoint_path is not None:
+        ckpt = th.load(args.checkpoint_path, map_location=device)
+        run_config: dict[str, Any] = dict(ckpt.get("args", {}))
     else:
-        artifact_path = f"{args.wandb_project}/{args.problem_id}_gan_bezier_generator:seed_{seed}"
+        if args.wandb_entity is not None:
+            artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_gan_bezier_generator:seed_{seed}"
+        else:
+            artifact_path = f"{args.wandb_project}/{args.problem_id}_gan_bezier_generator:seed_{seed}"
 
-    api = wandb.Api()
-    artifact = api.artifact(artifact_path, type="model")
+        api = wandb.Api()
+        artifact = api.artifact(artifact_path, type="model")
 
-    class RunRetrievalError(ValueError):
-        def __init__(self):
-            super().__init__("Failed to retrieve the run")
+        class RunRetrievalError(ValueError):
+            def __init__(self):
+                super().__init__("Failed to retrieve the run")
 
-    run = artifact.logged_by()
-    if run is None or not hasattr(run, "config"):
-        raise RunRetrievalError
+        run = artifact.logged_by()
+        if run is None or not hasattr(run, "config"):
+            raise RunRetrievalError
 
-    artifact_dir = artifact.download()
-    ckpt_path = os.path.join(artifact_dir, "bezier_generator.pth")
-    ckpt = th.load(ckpt_path, map_location=device)
+        artifact_dir = artifact.download()
+        ckpt_path = os.path.join(artifact_dir, "bezier_generator.pth")
+        ckpt = th.load(ckpt_path, map_location=device)
+        run_config = dict(run.config)
 
     _, design_scalars_normalizer, _ = prepare_data(problem, args.n_samples, device)
 
     model = Generator(
-        latent_dim=run.config["latent_dim"],
-        noise_dim=run.config["noise_dim"],
-        n_control_points=run.config["bezier_control_pts"],
+        latent_dim=int(run_config["latent_dim"]),
+        noise_dim=int(run_config["noise_dim"]),
+        n_control_points=int(run_config["bezier_control_pts"]),
         n_data_points=coords_space.shape[1],
         design_scalars_normalizer=design_scalars_normalizer,
         eps=_EPS,
@@ -112,8 +121,8 @@ if __name__ == "__main__":
 
     # Sample noise and generate designs
     bounds = (0.0, 1.0)  # Bounds for angle of attack
-    c = (bounds[1] - bounds[0]) * th.rand(args.n_samples, run.config["latent_dim"], device=device) + bounds[0]
-    z = 0.5 * th.randn(args.n_samples, run.config["noise_dim"], device=device)
+    c = (bounds[1] - bounds[0]) * th.rand(args.n_samples, int(run_config["latent_dim"]), device=device) + bounds[0]
+    z = 0.5 * th.randn(args.n_samples, int(run_config["noise_dim"]), device=device)
     gen_designs, _, _, _, _, alphas = model(c, z)
 
     gen_designs_np = gen_designs.detach().cpu().numpy()
@@ -144,9 +153,7 @@ if __name__ == "__main__":
         "n_samples": args.n_samples,
         "fail_ratio": fail_ratio,
     }
-    metrics_df = pd.DataFrame(results_dict, index=[0])
     out_path = args.output_csv.format(problem_id=args.problem_id)
-    write_header = not os.path.exists(out_path)
-    metrics_df.to_csv(out_path, mode="a", header=write_header, index=False)
+    write_metrics_csv([results_dict], out_path, append_output=args.append_output)
 
-    print(f"Seed {seed} done; appended to {out_path}")
+    print(f"Seed {seed} done; wrote metrics to {out_path}")

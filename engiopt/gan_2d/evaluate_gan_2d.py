@@ -4,16 +4,17 @@ from __future__ import annotations
 
 import dataclasses
 import os
+from typing import Any
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import numpy as np
-import pandas as pd
 import torch as th
 import tyro
 
 from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.gan_2d.gan_2d import Generator
+from engiopt.reporting import write_metrics_csv
 import wandb
 
 
@@ -35,6 +36,10 @@ class Args:
     """Kernel bandwidth for MMD and DPP metrics."""
     output_csv: str = "gan_2d_{problem_id}_metrics.csv"
     """Output CSV path template; may include {problem_id}."""
+    append_output: bool = True
+    """Append to an existing CSV. Use --no-append-output to overwrite instead."""
+    checkpoint_path: str | None = None
+    """Optional local generator checkpoint path. Preferred over WandB artifacts when set."""
 
 
 if __name__ == "__main__":
@@ -46,7 +51,6 @@ if __name__ == "__main__":
 
     # Seeding for reproducibility
     th.manual_seed(seed)
-    rng = np.random.default_rng(seed)
     th.backends.cudnn.deterministic = True
 
     # Select device
@@ -66,35 +70,40 @@ if __name__ == "__main__":
     )
 
     ### Set Up Generator ###
-    if args.wandb_entity is not None:
-        artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_gan_2d_generator:seed_{seed}"
+    if args.checkpoint_path is not None:
+        ckpt = th.load(args.checkpoint_path, map_location=device)
+        run_config: dict[str, Any] = dict(ckpt.get("args", {}))
     else:
-        artifact_path = f"{args.wandb_project}/{args.problem_id}_gan_2d_generator:seed_{seed}"
+        if args.wandb_entity is not None:
+            artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_gan_2d_generator:seed_{seed}"
+        else:
+            artifact_path = f"{args.wandb_project}/{args.problem_id}_gan_2d_generator:seed_{seed}"
 
-    api = wandb.Api()
-    artifact = api.artifact(artifact_path, type="model")
+        api = wandb.Api()
+        artifact = api.artifact(artifact_path, type="model")
 
-    class RunRetrievalError(ValueError):
-        def __init__(self):
-            super().__init__("Failed to retrieve the run")
+        class RunRetrievalError(ValueError):
+            def __init__(self):
+                super().__init__("Failed to retrieve the run")
 
-    run = artifact.logged_by()
-    if run is None or not hasattr(run, "config"):
-        raise RunRetrievalError
+        run = artifact.logged_by()
+        if run is None or not hasattr(run, "config"):
+            raise RunRetrievalError
 
-    artifact_dir = artifact.download()
-    ckpt_path = os.path.join(artifact_dir, "generator.pth")
-    ckpt = th.load(ckpt_path, map_location=device)
+        artifact_dir = artifact.download()
+        ckpt_path = os.path.join(artifact_dir, "generator.pth")
+        ckpt = th.load(ckpt_path, map_location=device)
+        run_config = dict(run.config)
 
     model = Generator(
-        latent_dim=run.config["latent_dim"],
+        latent_dim=int(run_config["latent_dim"]),
         design_shape=problem.design_space.shape,
     ).to(device)
     model.load_state_dict(ckpt["generator"])
     model.eval()
 
     # Sample noise and generate designs
-    z = th.randn((args.n_samples, run.config["latent_dim"]), device=device)
+    z = th.randn((args.n_samples, int(run_config["latent_dim"])), device=device)
     gen_designs = model(z)
     gen_designs_np = gen_designs.detach().cpu().numpy()
     gen_designs_np = np.clip(gen_designs_np, 1e-3, 1.0)
@@ -120,9 +129,7 @@ if __name__ == "__main__":
     )
 
     # Append result row to CSV
-    metrics_df = pd.DataFrame([metrics_dict])
     out_path = args.output_csv.format(problem_id=args.problem_id)
-    write_header = not os.path.exists(out_path)
-    metrics_df.to_csv(out_path, mode="a", header=write_header, index=False)
+    write_metrics_csv([metrics_dict], out_path, append_output=args.append_output)
 
-    print(f"Seed {seed} done; appended to {out_path}")
+    print(f"Seed {seed} done; wrote metrics to {out_path}")
