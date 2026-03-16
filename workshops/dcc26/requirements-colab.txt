@@ -1,9 +1,15 @@
-engibench[beams2d]>=0.1.0
-engiopt>=0.0.1
-torch>=2.5.0
-torchvision>=0.20.1
-numpy>=1.26
-pandas>=2.2
-matplotlib>=3.9
-seaborn>=0.13
-scikit-learn>=1.6
+# Local convenience snapshot for workshop notebooks.
+# Source of truth for Colab is the install/bootstrap cell inside each notebook.
+# EngiOpt is intentionally installed from Git in notebook bootstrap cells.
+
+engibench[beams2d]
+sqlitedict
+matplotlib
+seaborn
+gymnasium
+pybullet
+tqdm
+tyro
+wandb
+torch
+torchvision
