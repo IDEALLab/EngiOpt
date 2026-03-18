@@ -293,25 +293,32 @@ if __name__ == "__main__":
                     axes = axes.flatten()
 
                     # Plot each tensor as a scatter plot
-                    for j, tensor in enumerate(tensors):
-                        if isinstance(problem.design_space, spaces.Dict):
-                            design = spaces.unflatten(problem.design_space, tensor.cpu().numpy())
-                        else:
-                            design = tensor.cpu().numpy()
-                        # use problem's render method to get the image
-                        fig, ax = problem.render(design)
-                        ax.figure.canvas.draw()
-                        img = np.array(fig.canvas.renderer.buffer_rgba())
-                        axes[j].imshow(img)
-                        axes[j].set_xticks([])  # Hide x ticks
-                        axes[j].set_yticks([])  # Hide y ticks
-                        plt.close(fig)  # Close the original figure to free memory
+                for j, tensor in enumerate(tensors):
+                    if isinstance(problem.design_space, spaces.Dict):
+                        design = spaces.unflatten(problem.design_space, tensor.cpu().numpy())
+                    else:
+                        design = tensor.cpu().numpy()
+                    # use problem's render method to get the image
+                    out = problem.render(design)
+                    if isinstance(out, tuple):
+                        fig, ax = out
+                    else:
+                        fig = out
+                        ax = fig.axes[0] if fig.axes else fig.add_subplot(111)
+                    ax.figure.canvas.draw()
+                    img = np.array(fig.canvas.renderer.buffer_rgba())
 
-                    plt.tight_layout()
-                    img_fname = f"images/{batches_done}.png"
-                    plt.savefig(img_fname)
-                    plt.close()
-                    wandb.log({"designs": wandb.Image(img_fname)})
+                    axes[j].imshow(img)
+                    axes[j].set_xticks([])
+                    axes[j].set_yticks([])
+
+                    plt.close(fig)
+
+                plt.tight_layout()
+                img_fname = f"images/{batches_done}.png"
+                plt.savefig(img_fname)
+                plt.close()
+                wandb.log({"designs": wandb.Image(img_fname)})
 
                 # --------------
                 #  Save models
