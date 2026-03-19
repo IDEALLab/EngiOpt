@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import dataclasses
 import os
+import time
 from typing import Any
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
@@ -32,6 +33,12 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
+    track: bool = True
+    """Log evaluation metrics and metadata to W&B."""
+    run_name: str | None = None
+    """Optional W&B run name override."""
+    wandb_job_type: str = "evaluation"
+    """W&B job type for evaluation runs."""
     n_samples: int = 50
     """Number of generated samples per seed."""
     sigma: float = 10.0
@@ -103,6 +110,7 @@ def load_artifact_checkpoint(
 
 if __name__ == "__main__":
     args = tyro.cli(Args)
+    eval_start = time.perf_counter()
 
     problem = BUILTIN_PROBLEMS[args.problem_id]()
     problem.reset(seed=args.seed)
@@ -125,6 +133,7 @@ if __name__ == "__main__":
     if args.checkpoint_path is not None:
         checkpoint = load_local_checkpoint(args.checkpoint_path, device)
         run_config: dict[str, Any] = dict(checkpoint.get("args", {}))
+        checkpoint_source = "local_checkpoint"
     else:
         checkpoint, run_config = load_artifact_checkpoint(
             problem_id=args.problem_id,
@@ -133,6 +142,7 @@ if __name__ == "__main__":
             wandb_entity=args.wandb_entity,
             device=device,
         )
+        checkpoint_source = "wandb_artifact"
 
     layers_per_block = int(checkpoint_config(checkpoint, "layers_per_block", run_config.get("layers_per_block", 2)))
     num_train_timesteps = int(
@@ -150,6 +160,7 @@ if __name__ == "__main__":
     model.load_state_dict(checkpoint["model"])
     model.eval()
 
+    generation_start = time.perf_counter()
     gen_designs = generate_samples(
         model=model,
         design_shape=problem.design_space.shape,
@@ -158,10 +169,12 @@ if __name__ == "__main__":
         num_train_timesteps=num_train_timesteps,
         device=device,
     )
+    generation_runtime_sec = time.perf_counter() - generation_start
     gen_designs = gen_designs.squeeze(1)
     gen_designs_np = gen_designs.detach().cpu().numpy().reshape(args.n_samples, *problem.design_space.shape)
     gen_designs_np = np.clip(gen_designs_np, args.clip_min, args.clip_max)
 
+    metrics_start = time.perf_counter()
     metrics_dict = metrics.metrics(
         problem,
         gen_designs_np,
@@ -169,6 +182,9 @@ if __name__ == "__main__":
         sampled_conditions,
         sigma=args.sigma,
     )
+    metrics_runtime_sec = time.perf_counter() - metrics_start
+    evaluation_runtime_sec = time.perf_counter() - eval_start
+    generation_samples_per_sec = args.n_samples / generation_runtime_sec if generation_runtime_sec > 0 else float("nan")
     metrics_dict.update(
         {
             "seed": args.seed,
@@ -177,10 +193,64 @@ if __name__ == "__main__":
             "n_samples": args.n_samples,
             "sigma": args.sigma,
             "integration_steps": integration_steps,
+            "num_train_timesteps": num_train_timesteps,
+            "layers_per_block": layers_per_block,
+            "checkpoint_source": checkpoint_source,
+            "generation_runtime_sec": generation_runtime_sec,
+            "metrics_runtime_sec": metrics_runtime_sec,
+            "evaluation_runtime_sec": evaluation_runtime_sec,
+            "generation_samples_per_sec": generation_samples_per_sec,
         }
     )
 
     out_path = args.output_csv.format(problem_id=args.problem_id)
     write_metrics_csv([metrics_dict], out_path, append_output=args.append_output)
 
-    print(f"Seed {args.seed} done; wrote metrics to {out_path}")
+    if args.track:
+        run_name = args.run_name or f"{args.problem_id}__flow_matching_2d_cond__eval__seed{args.seed}__{int(time.time())}"
+        run = wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            job_type=args.wandb_job_type,
+            name=run_name,
+            config={
+                **vars(args),
+                "model_id": "flow_matching_2d_cond",
+                "checkpoint_source": checkpoint_source,
+                "resolved_integration_steps": integration_steps,
+                "resolved_num_train_timesteps": num_train_timesteps,
+                "resolved_layers_per_block": layers_per_block,
+            },
+        )
+        if run is None:
+            raise RuntimeError("Failed to initialize Weights & Biases run")
+        run.log(
+            {
+                "cog": metrics_dict["cog"],
+                "fog": metrics_dict["fog"],
+                "iog_raw_objective": metrics_dict["iog"],
+                "mmd": metrics_dict["mmd"],
+                "dpp": metrics_dict["dpp"],
+                "viol": metrics_dict["viol"],
+                "generation_runtime_sec": generation_runtime_sec,
+                "metrics_runtime_sec": metrics_runtime_sec,
+                "evaluation_runtime_sec": evaluation_runtime_sec,
+                "generation_samples_per_sec": generation_samples_per_sec,
+                "eval/cog": metrics_dict["cog"],
+                "eval/fog": metrics_dict["fog"],
+                "eval/iog_raw_objective": metrics_dict["iog"],
+                "eval/mmd": metrics_dict["mmd"],
+                "eval/dpp": metrics_dict["dpp"],
+                "eval/viol": metrics_dict["viol"],
+                "eval/runtime/generation_sec": generation_runtime_sec,
+                "eval/runtime/metrics_sec": metrics_runtime_sec,
+                "eval/runtime/total_sec": evaluation_runtime_sec,
+                "eval/runtime/generation_samples_per_sec": generation_samples_per_sec,
+            }
+        )
+        run.finish()
+
+    print(
+        f"Seed {args.seed} done; wrote metrics to {out_path} "
+        f"(gen={generation_runtime_sec:.2f}s, total={evaluation_runtime_sec:.2f}s)"
+    )

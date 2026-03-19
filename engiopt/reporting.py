@@ -117,6 +117,20 @@ def upload_report_to_wandb(
         }
     )
 
+    scalar_payload: dict[str, float] = {}
+    for row in summary_long_df.itertuples(index=False):
+        problem_id = str(getattr(row, "problem_id"))
+        model_id = str(getattr(row, "model_id"))
+        metric = str(getattr(row, "metric"))
+        mean = getattr(row, "mean")
+        std = getattr(row, "std")
+        if pd.notna(mean):
+            scalar_payload[f"evaluation/{problem_id}/{model_id}/{metric}_mean"] = float(mean)
+        if pd.notna(std):
+            scalar_payload[f"evaluation/{problem_id}/{model_id}/{metric}_std"] = float(std)
+    if scalar_payload:
+        run.log(scalar_payload)
+
     artifact = wandb.Artifact(name=artifact_name, type="evaluation-results")
     artifact.add_file(str(raw_csv_path), name=raw_csv_path.name)
     artifact.add_file(str(summary_long_csv_path), name=summary_long_csv_path.name)
