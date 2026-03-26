@@ -33,6 +33,7 @@ import tqdm
 import tyro
 import wandb
 
+from engiopt.lv_vqvae.utils import token_stats_from_indices
 from engiopt.transforms import drop_constant
 from engiopt.transforms import normalize
 from engiopt.transforms import resize_to
@@ -140,7 +141,7 @@ class Args:
     """tuple of resolutions at which to apply attention in the decoder"""
     decoder_num_res_blocks: int = 3
     """number of residual blocks per decoder layer"""
-    sample_interval_vqgan: int = 100
+    sample_interval_vqgan: int | None = None
     """interval between Stage 1 image samples"""
 
     # Algorithm-specific: Stage 2 (Transformer)
@@ -499,10 +500,16 @@ class VQGANTransformer(nn.Module):
         block_size = (image_size // (2 ** (len(decoder_channels) - 1))) ** 2
         if conditional:
             block_size += cond_feature_map_dim**2
+            # Grab the CVQGAN vocab size directly from its codebook
+            self.image_offset = cvqgan.codebook.embedding.weight.shape[0]
+            total_vocab_size = self.image_offset + num_codebook_vectors
+        else:
+            self.image_offset = 1  # Reserve token 0 as the basic SOS token
+            total_vocab_size = 1 + num_codebook_vectors
 
         #  Create config object for NanoGPT
         transformer_config = GPTConfig(
-            vocab_size=num_codebook_vectors,
+            vocab_size=total_vocab_size,
             block_size=block_size,
             n_layer=n_layer,
             n_head=n_head,
@@ -521,13 +528,16 @@ class VQGANTransformer(nn.Module):
             quant_z, indices, _, _, _ = self.cvqgan.encode(x)
         else:
             quant_z, indices, _, _, _ = self.vqgan.encode(x)
+            # Offset image tokens so they do not collide with condition tokens
+            indices = indices + self.image_offset
         indices = indices.view(quant_z.shape[0], -1)
         return quant_z, indices
 
     @th.no_grad()
     def z_to_image(self, indices: th.Tensor) -> th.Tensor:
         """Convert quantized latent indices back to image space."""
-        ix_to_vectors = self.vqgan.codebook.embedding(indices).reshape(indices.shape[0], self.sidelen, self.sidelen, -1)
+        raw_indices = indices - self.image_offset
+        ix_to_vectors = self.vqgan.codebook.embedding(raw_indices).reshape(raw_indices.shape[0], self.sidelen, self.sidelen, -1)
         ix_to_vectors = ix_to_vectors.permute(0, 3, 1, 2)
         return self.vqgan.decode(ix_to_vectors)
 
@@ -539,13 +549,19 @@ class VQGANTransformer(nn.Module):
         if self.conditional:
             _, sos_tokens = self.encode_to_z(x=c, is_c=True)
         else:
-            sos_tokens = th.ones(x.shape[0], 1) * self.sos_token
-            sos_tokens = sos_tokens.long().to(x.device)
+            # SOS token is index 0
+            sos_tokens = th.zeros(x.shape[0], 1, dtype=th.int64, device=x.device)
 
         if pkeep < 1.0:
             mask = th.bernoulli(pkeep * th.ones(indices.shape, device=indices.device))
             mask = mask.round().to(dtype=th.int64)
-            random_indices = th.randint_like(indices, self.transformer.config.vocab_size)
+            # Generate random replacements specifically from the shifted image vocabulary
+            random_indices = th.randint(
+                low=self.image_offset, 
+                high=self.transformer.config.vocab_size, 
+                size=indices.shape, 
+                device=indices.device
+            )
             new_indices = mask * indices + (1 - mask) * random_indices
         else:
             new_indices = indices
@@ -580,6 +596,10 @@ class VQGANTransformer(nn.Module):
             logits, _ = self.transformer(x, None)
             logits = logits[:, -1, :] / temperature
 
+            # NEW: Logit Masking (Structural Prior)
+            # Prevent the model from generating condition tokens or the generic SOS token
+            logits[:, :self.image_offset] = -float("inf")
+
             if top_k is not None:
                 # Determine the actual vocabulary size for this batch
                 # Count non-negative infinity values in the logits
@@ -594,8 +614,8 @@ class VQGANTransformer(nn.Module):
                 else:
                     # Fallback if all logits are -inf (shouldn't happen, but just in case)
                     warnings.warn("Warning: No finite logits found for sampling", stacklevel=2)
-                    # Make all logits equal (uniform distribution)
-                    logits = th.zeros_like(logits)
+                    # Make all valid logits equal (uniform distribution over image space)
+                    logits[:, self.image_offset:] = 0.0
 
             probs = f.softmax(logits, dim=-1)
 
@@ -616,8 +636,8 @@ class VQGANTransformer(nn.Module):
         if self.conditional:
             _, sos_tokens = self.encode_to_z(x=c, is_c=True)
         else:
-            sos_tokens = th.ones(x.shape[0], 1) * self.sos_token
-            sos_tokens = sos_tokens.long().to(x.device)
+            # SOS token is index 0
+            sos_tokens = th.zeros(x.shape[0], 1, dtype=th.int64, device=x.device)
 
         start_indices = indices[:, : indices.shape[1] // 2]
         sample_indices = self.sample(
@@ -714,6 +734,9 @@ if __name__ == "__main__":
         batch_size=args.batch_size_transformer,
         shuffle=True,
     )
+    # If None, log once per epoch (in steps)
+    if args.sample_interval_vqgan is None:
+        args.sample_interval_vqgan = len(dataloader_vqgan)
 
     # If early stopping enabled, create a validation dataloader
     if args.early_stopping:
@@ -1024,9 +1047,25 @@ if __name__ == "__main__":
             # ----------
             if args.track:
                 batches_done = epoch * len(dataloader_vqgan) + i
-                wandb.log({"vqgan_loss": vq_loss.item(), "vqgan_step": batches_done})
-                wandb.log({"discriminator_loss": gan_loss.item(), "vqgan_step": batches_done})
-                wandb.log({"epoch_vqgan": epoch, "vqgan_step": batches_done})
+
+                with th.no_grad():
+                    tstats = token_stats_from_indices(
+                        codebook_indices,
+                        vocab_size=args.num_codebook_vectors,
+                    )
+
+                wandb.log({
+                    "vqgan_loss": vq_loss.item(),
+                    "discriminator_loss": gan_loss.item(),
+                    "vqgan_step": batches_done,
+                    "epoch_vqgan": epoch,
+                    "vqgan_rec_loss": rec_loss.mean().item(),
+                    "vqgan_q_loss": q_loss.item(),
+                    "vqgan_token_perplexity": tstats["token_perplexity"],
+                    "vqgan_token_perplexity_frac": tstats["token_perplexity_frac"],
+                    "vqgan_token_usage_frac": tstats["token_usage_frac"],
+                })
+
                 print(
                     f"[Epoch {epoch}/{args.n_epochs_vqgan}] [Batch {i}/{len(dataloader_vqgan)}] [D loss: {gan_loss.item()}] [VQ loss: {vq_loss.item()}]"
                 )
@@ -1084,6 +1123,27 @@ if __name__ == "__main__":
 
                     wandb.log_artifact(artifact_vq, aliases=[f"seed_{args.seed}"])
                     wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
+
+        # End-of-epoch: held-out val MAE
+        vqgan.eval()
+        maes = []
+        with th.no_grad():
+            for val_data in dataloader_val:
+                val_designs = val_data[0].to(dtype=th.float32, device=device)
+                val_recon, _, _ = vqgan(val_designs)
+                maes.append(th.abs(val_designs - val_recon).mean().item())
+
+        val_mae = sum(maes) / max(1, len(maes))
+
+        if args.track:
+            batches_done = (epoch + 1) * len(dataloader_vqgan) - 1
+            wandb.log({
+                "vqgan_step": batches_done,
+                "epoch_vqgan": epoch,
+                "vqgan_val_mae": val_mae,
+            })
+
+        vqgan.train()
 
     # Freeze VQGAN for later use in Stage 2 Transformer
     for p in vqgan.parameters():

@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import itertools
 import os
+import matplotlib.pyplot as plt
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import numpy as np
@@ -303,10 +304,40 @@ if __name__ == "__main__":
                 print(f"  Failed for rec={rec_thresh}, perf={perf_thresh}: {e}")
 
     # Append result row to CSV
+    os.makedirs("evals", exist_ok=True)
     metrics_df = pd.DataFrame([metrics_dict])
-    out_path = args.output_csv.format(problem_id=args.problem_id)
+    out_path = os.path.join("evals", args.output_csv.format(problem_id=args.problem_id))
     write_header = not os.path.exists(out_path)
     metrics_df.to_csv(out_path, mode="a", header=write_header, index=False)
+    
+    # --------------------------------------------------------------------------
+    # Plot and Save Test vs. Generated Visual Comparisons
+    # --------------------------------------------------------------------------
+    num_vis = min(8, args.n_samples) # How many pairs to plot
+    fig, axes = plt.subplots(num_vis, 2, figsize=(6, 2 * num_vis))
+    
+    for i in range(num_vis):
+        ax_true = axes[i, 0] if num_vis > 1 else axes[0]
+        ax_gen = axes[i, 1] if num_vis > 1 else axes[1]
+        
+        # Squeeze in case the shape is (1, H, W) to make it (H, W) for imshow
+        img_true = sampled_designs_np[i].squeeze()
+        img_gen = gen_designs_np[i].squeeze()
+        
+        ax_true.imshow(img_true, cmap='gray_r', vmin=0, vmax=1)
+        ax_true.axis('off')
+        if i == 0:
+            ax_true.set_title("Ground Truth (Test)")
+            
+        ax_gen.imshow(img_gen, cmap='gray_r', vmin=0, vmax=1)
+        ax_gen.axis('off')
+        if i == 0:
+            ax_gen.set_title("Generated (VQGAN)")
+
+    plt.tight_layout()
+    img_out_path = os.path.join("evals", f"{args.problem_id}_seed_{seed}_vqgan_comparison.png")
+    plt.savefig(img_out_path, dpi=300, bbox_inches='tight')
+    plt.close()
 
     # Log to WandB training run
     if args.log_to_wandb and run is not None:
@@ -341,3 +372,4 @@ if __name__ == "__main__":
         print(f"  Logged metrics to WandB run: {run.name}")
 
     print(f"Seed {seed} done; appended to {out_path}")
+    print(f"Saved visual comparison to {img_out_path}")

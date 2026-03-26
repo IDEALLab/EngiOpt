@@ -164,6 +164,8 @@ class Args:
     """number of residual blocks per decoder layer"""
     sample_interval_vqvae: int | None = None
     """interval between Stage 1 image samples; integer default 100; if None then calculated as once at the end of each epoch"""
+    use_vq: bool = True
+    """whether to use vector quantization (VQ) or just a continuous autoencoder (AE) with equivalent architecture for Stage 1"""
 
     # LV + dynamic pruning (n_z). NOTE: All LV params share the same names with the LVAE code, except the prefix "lv_" has been added to them.
     lv_start_epoch: int = 0  # NOTE: Reduced lv_start_epoch and lv_ramp_epochs to 0 so as to remove the warm-up phase. In the future, if we deem the warm-up entirely unnecessary, we can remove these params.
@@ -191,8 +193,8 @@ class Args:
     lv_recon_tol: float = float("inf")
     """relative tolerance to best validation recon (default: inf = no constraint)"""
     # LV constraint parameters (uses Normalized MSE = MSE / Var(data) for problem-independence)
-    lv_nmae_threshold: float = 0.05
-    """NMAE ceiling. Training aims to stay at or below this threshold."""
+    lv_nmae_threshold: float = 0.2
+    """NMAE ceiling. Training aims to stay at or below this threshold (default: 0.2)"""
     lv_constraint_mode: str = "gradient_balanced" #  "one_sided"
     """Constraint mode: 'one_sided' (rec or vol), 'gated' (rec + vol), 'gradient_balanced' (auto-scaled)."""
     lv_ema_beta: float = 0.9
@@ -477,6 +479,7 @@ class VQVAE(nn.Module):
         device: th.device,
         # CVQVAE parameters
         is_c: bool = False,
+        use_vq: bool = True,
         cond_feature_map_dim: int = 4,
         cond_dim: int = 3,
         cond_hidden_dim: int = 256,
@@ -524,10 +527,12 @@ class VQVAE(nn.Module):
             self.quant_conv = nn.Conv2d(latent_dim, latent_dim, kernel_size=1).to(device=device)
             self.post_quant_conv = nn.Conv2d(latent_dim, latent_dim, kernel_size=1).to(device=device)
 
-        self.codebook = Codebook(
-            num_codebook_vectors=cond_codebook_vectors if is_c else num_codebook_vectors,
-            latent_dim=cond_latent_dim if is_c else latent_dim,
-        ).to(device=device)
+        self.use_vq = use_vq
+        if self.use_vq:
+            self.codebook = Codebook(
+                num_codebook_vectors=cond_codebook_vectors if is_c else num_codebook_vectors,
+                latent_dim=cond_latent_dim if is_c else latent_dim,
+            ).to(device=device)
 
     def forward(
         self,
@@ -541,7 +546,14 @@ class VQVAE(nn.Module):
         encoded = self.encoder(designs)
         quant_encoded = self.quant_conv(encoded)
         quant_encoded = self.apply_pruning(quant_encoded, active_mask, frozen_mean)
-        quant, indices, q_loss, _, _ = self.codebook(quant_encoded)
+        
+        if self.use_vq:
+            quant, indices, q_loss, _, _ = self.codebook(quant_encoded)
+        else:
+            quant = quant_encoded
+            indices = None
+            q_loss = th.tensor(0.0, device=quant.device)
+
         post_quant = self.post_quant_conv(quant)
         decoded = self.decoder(post_quant)
         if return_latents:
@@ -558,7 +570,16 @@ class VQVAE(nn.Module):
         encoded = self.encoder(designs)
         quant_encoded = self.quant_conv(encoded)
         quant_encoded = self.apply_pruning(quant_encoded, active_mask, frozen_mean)
-        z_q, indices, loss, min_encodings, perplexity = self.codebook(quant_encoded)
+
+        if self.use_vq:
+            z_q, indices, loss, min_encodings, perplexity = self.codebook(quant_encoded)
+        else:
+            z_q = quant_encoded
+            indices = None
+            loss = th.tensor(0.0, device=quant_encoded.device)
+            min_encodings = None
+            perplexity = None
+
         return z_q, indices, loss, min_encodings, perplexity
 
     def decode(
@@ -743,10 +764,16 @@ class VQVAETransformer(nn.Module):
         block_size = (image_size // (2 ** (len(decoder_channels) - 1))) ** 2
         if conditional:
             block_size += cond_feature_map_dim**2
+            # Grab the CVQVAE vocab size directly from its codebook
+            self.image_offset = cvqvae.codebook.embedding.weight.shape[0]
+            total_vocab_size = self.image_offset + num_codebook_vectors
+        else:
+            self.image_offset = 1  # Reserve token 0 as the basic SOS token
+            total_vocab_size = 1 + num_codebook_vectors
 
         #  Create config object for NanoGPT
         transformer_config = GPTConfig(
-            vocab_size=num_codebook_vectors,
+            vocab_size=total_vocab_size,
             block_size=block_size,
             n_layer=n_layer,
             n_head=n_head,
@@ -764,16 +791,25 @@ class VQVAETransformer(nn.Module):
         if is_c:  #  For the conditional tokens, use the CVQVAE encoder
             quant_z, indices, _, _, _ = self.cvqvae.encode(x)
         else:
-            quant_z, indices, _, _, _ = self.vqvae.encode(x)
+            mask = getattr(self, "active_mask", None)
+            mean = getattr(self, "frozen_mean", None)
+            quant_z, indices, _, _, _ = self.vqvae.encode(x, active_mask=mask, frozen_mean=mean)
+            # Offset image tokens so they do not collide with condition tokens
+            indices = indices + self.image_offset
+
         indices = indices.view(quant_z.shape[0], -1)
         return quant_z, indices
 
     @th.no_grad()
     def z_to_image(self, indices: th.Tensor) -> th.Tensor:
         """Convert quantized latent indices back to image space."""
-        ix_to_vectors = self.vqvae.codebook.embedding(indices).reshape(indices.shape[0], self.sidelen, self.sidelen, -1)
+        raw_indices = indices - self.image_offset
+        ix_to_vectors = self.vqvae.codebook.embedding(raw_indices).reshape(raw_indices.shape[0], self.sidelen, self.sidelen, -1)
         ix_to_vectors = ix_to_vectors.permute(0, 3, 1, 2)
-        return self.vqvae.decode(ix_to_vectors)
+
+        mask = getattr(self, "active_mask", None)
+        mean = getattr(self, "frozen_mean", None)
+        return self.vqvae.decode(ix_to_vectors, active_mask=mask, frozen_mean=mean)
 
     def forward(self, x: th.Tensor, c: th.Tensor, pkeep: float = 1.0) -> tuple[th.Tensor, th.Tensor]:
         """Forward pass through the Transformer. Returns logits and targets for loss computation."""
@@ -783,13 +819,19 @@ class VQVAETransformer(nn.Module):
         if self.conditional:
             _, sos_tokens = self.encode_to_z(x=c, is_c=True)
         else:
-            sos_tokens = th.ones(x.shape[0], 1) * self.sos_token
-            sos_tokens = sos_tokens.long().to(x.device)
+            # SOS token is index 0
+            sos_tokens = th.zeros(x.shape[0], 1, dtype=th.int64, device=x.device)
 
         if pkeep < 1.0:
             mask = th.bernoulli(pkeep * th.ones(indices.shape, device=indices.device))
             mask = mask.round().to(dtype=th.int64)
-            random_indices = th.randint_like(indices, self.transformer.config.vocab_size)
+            # Generate random replacements specifically from the shifted image vocabulary
+            random_indices = th.randint(
+                low=self.image_offset, 
+                high=self.transformer.config.vocab_size, 
+                size=indices.shape, 
+                device=indices.device
+            )
             new_indices = mask * indices + (1 - mask) * random_indices
         else:
             new_indices = indices
@@ -825,6 +867,10 @@ class VQVAETransformer(nn.Module):
             logits, _ = self.transformer(x, None)
             logits = logits[:, -1, :] / temperature
 
+            # NEW: Logit Masking (Structural Prior)
+            # Prevent the model from generating condition tokens or the generic SOS token
+            logits[:, :self.image_offset] = -float("inf")
+
             if top_k is not None:
                 # Determine the actual vocabulary size for this batch
                 # Count non-negative infinity values in the logits
@@ -839,8 +885,8 @@ class VQVAETransformer(nn.Module):
                 else:
                     # Fallback if all logits are -inf (shouldn't happen, but just in case)
                     warnings.warn("Warning: No finite logits found for sampling", stacklevel=2)
-                    # Make all logits equal (uniform distribution)
-                    logits = th.zeros_like(logits)
+                    # Make all valid logits equal (uniform distribution over image space)
+                    logits[:, self.image_offset:] = 0.0
 
             probs = f.softmax(logits, dim=-1)
             ix = th.multinomial(probs, num_samples=1)  # Use multinomial sampling for variety and to mitigate image collapse
@@ -858,8 +904,8 @@ class VQVAETransformer(nn.Module):
         if self.conditional:
             _, sos_tokens = self.encode_to_z(x=c, is_c=True)
         else:
-            sos_tokens = th.ones(x.shape[0], 1) * self.sos_token
-            sos_tokens = sos_tokens.long().to(x.device)
+            # SOS token is index 0
+            sos_tokens = th.zeros(x.shape[0], 1, dtype=th.int64, device=x.device)
 
         start_indices = indices[:, : indices.shape[1] // 2]
         sample_indices = self.sample(
@@ -1058,6 +1104,7 @@ if __name__ == "__main__":
     vqvae = VQVAE(
         device=device,
         is_c=False,
+        use_vq=args.use_vq,
         encoder_channels=args.encoder_channels,
         encoder_start_resolution=args.image_size,
         encoder_attn_resolutions=args.encoder_attn_resolutions,
@@ -1073,6 +1120,7 @@ if __name__ == "__main__":
     cvqvae = VQVAE(
         device=device,
         is_c=True,
+        use_vq=True,
         cond_feature_map_dim=args.cond_feature_map_dim,
         cond_dim=args.cond_dim,
         cond_hidden_dim=args.cond_hidden_dim,
@@ -1080,19 +1128,23 @@ if __name__ == "__main__":
         cond_codebook_vectors=args.cond_codebook_vectors,
     ).to(device=device)
 
-    transformer = VQVAETransformer(
-        conditional=args.conditional,
-        vqvae=vqvae,
-        cvqvae=cvqvae,
-        image_size=args.image_size,
-        decoder_channels=args.decoder_channels,
-        cond_feature_map_dim=args.cond_feature_map_dim,
-        num_codebook_vectors=args.num_codebook_vectors,
-        n_layer=args.n_layer,
-        n_head=args.n_head,
-        n_embd=args.n_embd,
-        dropout=args.dropout,
-    ).to(device=device)
+    transformer = None
+    opt_transformer = None
+    
+    if args.use_vq:
+        transformer = VQVAETransformer(
+            conditional=args.conditional,
+            vqvae=vqvae,
+            cvqvae=cvqvae,
+            image_size=args.image_size,
+            decoder_channels=args.decoder_channels,
+            cond_feature_map_dim=args.cond_feature_map_dim,
+            num_codebook_vectors=args.num_codebook_vectors,
+            n_layer=args.n_layer,
+            n_head=args.n_head,
+            n_embd=args.n_embd,
+            dropout=args.dropout,
+        ).to(device=device)
 
     # CVQVAE Stage 0 optimizer
     opt_cvq = th.optim.Adam(
@@ -1110,7 +1162,7 @@ if __name__ == "__main__":
     opt_vq = th.optim.Adam(
         list(vqvae.encoder.parameters())
         + list(vqvae.decoder.parameters())
-        + list(vqvae.codebook.parameters())
+        + (list(vqvae.codebook.parameters()) if args.use_vq else [])
         + list(vqvae.quant_conv.parameters())
         + list(vqvae.post_quant_conv.parameters()),
         lr=args.lr_vqvae,
@@ -1119,35 +1171,36 @@ if __name__ == "__main__":
     )
 
     # Transformer Stage 2 optimizer
-    decay, no_decay = set(), set()
-    whitelist_weight_modules = (nn.Linear,)
-    blacklist_weight_modules = (nn.LayerNorm, nn.Embedding)
+    if args.use_vq:
+        decay, no_decay = set(), set()
+        whitelist_weight_modules = (nn.Linear,)
+        blacklist_weight_modules = (nn.LayerNorm, nn.Embedding)
 
-    for mn, m in transformer.transformer.named_modules():
-        for pn, _ in m.named_parameters():
-            fpn = f"{mn}.{pn}" if mn else pn
+        for mn, m in transformer.transformer.named_modules():
+            for pn, _ in m.named_parameters():
+                fpn = f"{mn}.{pn}" if mn else pn
 
-            if pn.endswith("bias"):
-                no_decay.add(fpn)
+                if pn.endswith("bias"):
+                    no_decay.add(fpn)
 
-            elif pn.endswith("weight") and isinstance(m, whitelist_weight_modules):
-                decay.add(fpn)
+                elif pn.endswith("weight") and isinstance(m, whitelist_weight_modules):
+                    decay.add(fpn)
 
-            elif pn.endswith("weight") and isinstance(m, blacklist_weight_modules):
-                no_decay.add(fpn)
+                elif pn.endswith("weight") and isinstance(m, blacklist_weight_modules):
+                    no_decay.add(fpn)
 
-    no_decay.add("pos_emb")
+        no_decay.add("pos_emb")
 
-    param_dict = dict(transformer.transformer.named_parameters())
-    decay = {pn for pn in decay if pn in param_dict}
-    no_decay = {pn for pn in no_decay if pn in param_dict}
+        param_dict = dict(transformer.transformer.named_parameters())
+        decay = {pn for pn in decay if pn in param_dict}
+        no_decay = {pn for pn in no_decay if pn in param_dict}
 
-    optim_groups = [
-        {"params": [param_dict[pn] for pn in sorted(decay)], "weight_decay": 0.01},
-        {"params": [param_dict[pn] for pn in sorted(no_decay)], "weight_decay": 0.0},
-    ]
+        optim_groups = [
+            {"params": [param_dict[pn] for pn in sorted(decay)], "weight_decay": 0.01},
+            {"params": [param_dict[pn] for pn in sorted(no_decay)], "weight_decay": 0.0},
+        ]
 
-    opt_transformer = th.optim.AdamW(optim_groups, lr=args.lr_transformer, betas=(0.9, 0.95))
+        opt_transformer = th.optim.AdamW(optim_groups, lr=args.lr_transformer, betas=(0.9, 0.95))
 
     @th.no_grad()
     def sample_designs_vqvae(
@@ -1354,10 +1407,17 @@ if __name__ == "__main__":
             if args.track:
                 batches_done = epoch * len(dataloader_vqvae) + i
                 with th.no_grad():
-                    tstats = token_stats_from_indices(
-                        codebook_indices,
-                        vocab_size=args.num_codebook_vectors,
-                    )
+                    if args.use_vq:
+                        tstats = token_stats_from_indices(
+                            codebook_indices,
+                            vocab_size=args.num_codebook_vectors,
+                        )
+                    else:
+                        tstats = {
+                            "token_perplexity": 0.0, 
+                            "token_perplexity_frac": 0.0, 
+                            "token_usage_frac": 0.0
+                        }
                 log_vq = {
                     "vqvae_step": batches_done,
                     "epoch_vqvae": epoch,
@@ -1489,144 +1549,148 @@ if __name__ == "__main__":
         p.requires_grad_(requires_grad=False)
     vqvae.eval()
 
-    #  TODO: Persist the final active mask into Stage 2 so tokenization/decoding stays consistent
-
     # --------------------------------
     #  Stage 2: Training Transformer
     # --------------------------------
-    print("Stage 2: Training Transformer")
-    transformer.train()
+    if args.use_vq:
+        print("Stage 2: Training Transformer")
+        # Persist the final active mask into Stage 2 so tokenization/decoding stays consistent
+        transformer.active_mask = active_mask
+        transformer.frozen_mean = frozen_mean
+        transformer.train()
 
-    # If early stopping enabled, initialize necessary variables
-    if args.early_stopping:
-        best_val = float("inf")
-        best_ckpt_tr: dict | None = None
-        patience_counter = 0
-        patience = args.early_stopping_patience
-
-    for epoch in tqdm.trange(args.n_epochs_transformer):
-        for i, data in enumerate(dataloader_transformer):
-            # THIS IS PROBLEM DEPENDENT
-            designs = data[0].to(dtype=th.float32, device=device)
-            conds = th.stack((data[1:]), dim=1).to(dtype=th.float32, device=device)
-
-            opt_transformer.zero_grad()
-            logits, targets = transformer(designs, conds)
-            loss = f.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
-            with th.no_grad():
-                probs = f.softmax(logits, dim=-1)
-                transformer_logits_entropy = float(
-                    (-(probs.clamp_min(1e-12) * probs.clamp_min(1e-12).log()).sum(dim=-1)).mean().item()
-                )
-            loss.backward()
-            opt_transformer.step()
-
-            # ----------
-            #  Logging
-            # ----------
-            if args.track:
-                batches_done = epoch * len(dataloader_transformer) + i
-                wandb.log({"transformer_loss": loss.item(), "transformer_step": batches_done})
-                wandb.log({"epoch_transformer": epoch, "transformer_step": batches_done})
-                wandb.log(
-                    {
-                        "transformer_loss": loss.item(),
-                        "transformer_logits_entropy": transformer_logits_entropy,
-                        "transformer_step": batches_done,
-                    }
-                )
-                wandb.log({"epoch_transformer": epoch, "transformer_step": batches_done})
-                print(
-                    f"[Epoch {epoch}/{args.n_epochs_transformer}] [Batch {i}/{len(dataloader_transformer)}] [Transformer loss: {loss.item()}]"
-                )
-
-                # This saves a grid image of 25 generated designs every sample_interval
-                if batches_done % args.sample_interval_transformer == 0:
-                    # Extract 25 designs
-                    desired_conds, designs = sample_designs_transformer(n_designs=n_logged_designs)
-                    if args.normalize_conditions:
-                        desired_conds = (desired_conds.cpu() * std) + mean
-                    designs = resize_to(data=designs, h=design_shape[0], w=design_shape[1])
-                    fig, axes = plt.subplots(5, 5, figsize=(12, 12))
-
-                    # Flatten axes for easy indexing
-                    axes = axes.flatten()
-
-                    # Plot each tensor as a scatter plot
-                    for j, tensor in enumerate(designs):
-                        img = tensor.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
-                        dc = desired_conds[j].cpu()
-                        axes[j].imshow(img)  # Scatter plot
-                        title = [(conditions[i][0], f"{dc[i]:.2f}") for i in range(n_conds)]
-                        title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
-                        axes[j].title.set_text(title_string)  # Set title
-                        axes[j].set_xticks([])  # Hide x ticks
-                        axes[j].set_yticks([])  # Hide y ticks
-
-                    plt.tight_layout()
-                    wandb.log({"designs_transformer": wandb.Image(fig), "transformer_step": batches_done})
-                    plt.close(fig)
-
-        # Early stopping based on held-out validation loss
-        if args.track and args.early_stopping:
-            transformer.eval()
-            val_losses = []
-            with th.no_grad():
-                for val_data in dataloader_val:
-                    val_designs = val_data[0].to(dtype=th.float32, device=device)
-                    val_conds = th.stack((val_data[1:]), dim=1).to(dtype=th.float32, device=device)
-                    val_logits, val_targets = transformer(val_designs, val_conds)
-                    val_loss = f.cross_entropy(val_logits.reshape(-1, val_logits.size(-1)), val_targets.reshape(-1))
-                    val_losses.append(val_loss.item())
-            val_loss = sum(val_losses) / len(val_losses)
-            wandb.log({"transformer_val_loss": val_loss, "transformer_step": batches_done})
-
-            if val_loss < best_val - args.early_stopping_delta:
-                best_val = val_loss
-                patience_counter = 0
-
-                # Cache best model in memory; upload to W&B once at the end.
-                if args.save_model:
-                    best_ckpt_tr = {
-                        "epoch": epoch,
-                        "batches_done": batches_done,
-                        "transformer": copy.deepcopy(transformer.state_dict()),
-                        "optimizer_transformer": copy.deepcopy(opt_transformer.state_dict()),
-                        "loss": loss.item(),
-                        "val_loss": val_loss,
-                    }
-            else:
-                patience_counter += 1
-                if patience_counter >= patience:
-                    print(f"Early stopping at epoch {epoch} | best val loss: {best_val:.6f}")
-                    break
-            transformer.train()
-
-    # --------------
-    #  Save model
-    # --------------
-    if args.track and args.save_model:
+        # If early stopping enabled, initialize necessary variables
         if args.early_stopping:
-            ckpt_tr = best_ckpt_tr if best_ckpt_tr is not None else {
-                "epoch": epoch,
-                "batches_done": batches_done,
-                "transformer": transformer.state_dict(),
-                "optimizer_transformer": opt_transformer.state_dict(),
-                "loss": loss.item(),
-                "val_loss": float("nan"),
-            }
-        else:
-            ckpt_tr = {
-                "epoch": epoch,
-                "batches_done": batches_done,
-                "transformer": transformer.state_dict(),
-                "optimizer_transformer": opt_transformer.state_dict(),
-                "loss": loss.item(),
-            }
+            best_val = float("inf")
+            best_ckpt_tr: dict | None = None
+            patience_counter = 0
+            patience = args.early_stopping_patience
 
-        th.save(ckpt_tr, "transformer.pth")
-        artifact_tr = wandb.Artifact(f"{args.problem_id}_{args.algo}_transformer", type="model")
-        artifact_tr.add_file("transformer.pth")
-        wandb.log_artifact(artifact_tr, aliases=[f"seed_{args.seed}"])
+        for epoch in tqdm.trange(args.n_epochs_transformer):
+            for i, data in enumerate(dataloader_transformer):
+                # THIS IS PROBLEM DEPENDENT
+                designs = data[0].to(dtype=th.float32, device=device)
+                conds = th.stack((data[1:]), dim=1).to(dtype=th.float32, device=device)
+
+                opt_transformer.zero_grad()
+                logits, targets = transformer(designs, conds)
+                loss = f.cross_entropy(logits.reshape(-1, logits.size(-1)), targets.reshape(-1))
+                with th.no_grad():
+                    probs = f.softmax(logits, dim=-1)
+                    transformer_logits_entropy = float(
+                        (-(probs.clamp_min(1e-12) * probs.clamp_min(1e-12).log()).sum(dim=-1)).mean().item()
+                    )
+                loss.backward()
+                opt_transformer.step()
+
+                # ----------
+                #  Logging
+                # ----------
+                if args.track:
+                    batches_done = epoch * len(dataloader_transformer) + i
+                    wandb.log({"transformer_loss": loss.item(), "transformer_step": batches_done})
+                    wandb.log({"epoch_transformer": epoch, "transformer_step": batches_done})
+                    wandb.log(
+                        {
+                            "transformer_loss": loss.item(),
+                            "transformer_logits_entropy": transformer_logits_entropy,
+                            "transformer_step": batches_done,
+                        }
+                    )
+                    wandb.log({"epoch_transformer": epoch, "transformer_step": batches_done})
+                    print(
+                        f"[Epoch {epoch}/{args.n_epochs_transformer}] [Batch {i}/{len(dataloader_transformer)}] [Transformer loss: {loss.item()}]"
+                    )
+
+                    # This saves a grid image of 25 generated designs every sample_interval
+                    if batches_done % args.sample_interval_transformer == 0:
+                        # Extract 25 designs
+                        desired_conds, designs = sample_designs_transformer(n_designs=n_logged_designs)
+                        if args.normalize_conditions:
+                            desired_conds = (desired_conds.cpu() * std) + mean
+                        designs = resize_to(data=designs, h=design_shape[0], w=design_shape[1])
+                        fig, axes = plt.subplots(5, 5, figsize=(12, 12))
+
+                        # Flatten axes for easy indexing
+                        axes = axes.flatten()
+
+                        # Plot each tensor as a scatter plot
+                        for j, tensor in enumerate(designs):
+                            img = tensor.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
+                            dc = desired_conds[j].cpu()
+                            axes[j].imshow(img)  # Scatter plot
+                            title = [(conditions[i][0], f"{dc[i]:.2f}") for i in range(n_conds)]
+                            title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
+                            axes[j].title.set_text(title_string)  # Set title
+                            axes[j].set_xticks([])  # Hide x ticks
+                            axes[j].set_yticks([])  # Hide y ticks
+
+                        plt.tight_layout()
+                        wandb.log({"designs_transformer": wandb.Image(fig), "transformer_step": batches_done})
+                        plt.close(fig)
+
+            # Early stopping based on held-out validation loss
+            if args.track and args.early_stopping:
+                transformer.eval()
+                val_losses = []
+                with th.no_grad():
+                    for val_data in dataloader_val:
+                        val_designs = val_data[0].to(dtype=th.float32, device=device)
+                        val_conds = th.stack((val_data[1:]), dim=1).to(dtype=th.float32, device=device)
+                        val_logits, val_targets = transformer(val_designs, val_conds)
+                        val_loss = f.cross_entropy(val_logits.reshape(-1, val_logits.size(-1)), val_targets.reshape(-1))
+                        val_losses.append(val_loss.item())
+                val_loss = sum(val_losses) / len(val_losses)
+                wandb.log({"transformer_val_loss": val_loss, "transformer_step": batches_done})
+
+                if val_loss < best_val - args.early_stopping_delta:
+                    best_val = val_loss
+                    patience_counter = 0
+
+                    # Cache best model in memory; upload to W&B once at the end.
+                    if args.save_model:
+                        best_ckpt_tr = {
+                            "epoch": epoch,
+                            "batches_done": batches_done,
+                            "transformer": copy.deepcopy(transformer.state_dict()),
+                            "optimizer_transformer": copy.deepcopy(opt_transformer.state_dict()),
+                            "loss": loss.item(),
+                            "val_loss": val_loss,
+                        }
+                else:
+                    patience_counter += 1
+                    if patience_counter >= patience:
+                        print(f"Early stopping at epoch {epoch} | best val loss: {best_val:.6f}")
+                        break
+                transformer.train()
+
+        # --------------
+        #  Save model
+        # --------------
+        if args.track and args.save_model:
+            if args.early_stopping:
+                ckpt_tr = best_ckpt_tr if best_ckpt_tr is not None else {
+                    "epoch": epoch,
+                    "batches_done": batches_done,
+                    "transformer": transformer.state_dict(),
+                    "optimizer_transformer": opt_transformer.state_dict(),
+                    "loss": loss.item(),
+                    "val_loss": float("nan"),
+                }
+            else:
+                ckpt_tr = {
+                    "epoch": epoch,
+                    "batches_done": batches_done,
+                    "transformer": transformer.state_dict(),
+                    "optimizer_transformer": opt_transformer.state_dict(),
+                    "loss": loss.item(),
+                }
+
+            th.save(ckpt_tr, "transformer.pth")
+            artifact_tr = wandb.Artifact(f"{args.problem_id}_{args.algo}_transformer", type="model")
+            artifact_tr.add_file("transformer.pth")
+            wandb.log_artifact(artifact_tr, aliases=[f"seed_{args.seed}"])
+    else:
+        print("Skipping Stage 2 Transformer training since use_vq is set to False.")
 
     wandb.finish()

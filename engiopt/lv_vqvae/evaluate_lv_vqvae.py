@@ -10,6 +10,7 @@ import dataclasses
 import os
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 import torch as th
@@ -18,8 +19,8 @@ import wandb
 
 from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
-from engiopt.lv_vqvae.vqvae import VQVAE
-from engiopt.lv_vqvae.vqvae import VQVAETransformer
+from engiopt.lv_vqvae.lv_vqvae import VQVAE
+from engiopt.lv_vqvae.lv_vqvae import VQVAETransformer
 from engiopt.transforms import drop_constant
 from engiopt.transforms import normalize
 from engiopt.transforms import resize_to
@@ -68,14 +69,14 @@ if __name__ == "__main__":
 
     # Restores the pytorch model from wandb
     if args.wandb_entity is not None:
-        artifact_path_cvqvae = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_lv_vqvae_cvqvae:seed_{seed}"
-        artifact_path_vqvae = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_lv_vqvae_vqvae:seed_{seed}"
+        artifact_path_cvqvae = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_lv_vqvae_lv_cvqvae:seed_{seed}"
+        artifact_path_vqvae = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_lv_vqvae_lv_vqvae:seed_{seed}"
         artifact_path_transformer = (
             f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_lv_vqvae_transformer:seed_{seed}"
         )
     else:
-        artifact_path_cvqvae = f"{args.wandb_project}/{args.problem_id}_lv_vqvae_cvqvae:seed_{seed}"
-        artifact_path_vqvae = f"{args.wandb_project}/{args.problem_id}_lv_vqvae_vqvae:seed_{seed}"
+        artifact_path_cvqvae = f"{args.wandb_project}/{args.problem_id}_lv_vqvae_lv_cvqvae:seed_{seed}"
+        artifact_path_vqvae = f"{args.wandb_project}/{args.problem_id}_lv_vqvae_lv_vqvae:seed_{seed}"
         artifact_path_transformer = f"{args.wandb_project}/{args.problem_id}_lv_vqvae_transformer:seed_{seed}"
 
     api = wandb.Api()
@@ -96,12 +97,17 @@ if __name__ == "__main__":
     artifact_dir_vqvae = artifact_vqvae.download()
     artifact_dir_transformer = artifact_transformer.download()
 
-    ckpt_path_cvqvae = os.path.join(artifact_dir_cvqvae, "cvqvae.pth")
-    ckpt_path_vqvae = os.path.join(artifact_dir_vqvae, "vqvae.pth")
+    ckpt_path_cvqvae = os.path.join(artifact_dir_cvqvae, "lv_cvqvae.pth")
+    ckpt_path_vqvae = os.path.join(artifact_dir_vqvae, "lv_vqvae.pth")
     ckpt_path_transformer = os.path.join(artifact_dir_transformer, "transformer.pth")
     ckpt_cvqvae = th.load(ckpt_path_cvqvae, map_location=th.device(device), weights_only=False)
     ckpt_vqvae = th.load(ckpt_path_vqvae, map_location=th.device(device), weights_only=False)
-    lv_active_mask = ckpt_vqvae.get("lv_active_mask", None)
+    
+    # Extract the nested lv_state dictionary and pruning attributes
+    lv_state = ckpt_vqvae.get("lv_state", {})
+    active_mask = lv_state.get("active_mask", None)
+    frozen_mean = lv_state.get("frozen_mean", None)
+    
     ckpt_transformer = th.load(ckpt_path_transformer, map_location=th.device(device), weights_only=False)
 
     vqvae = VQVAE(
@@ -113,7 +119,6 @@ if __name__ == "__main__":
         encoder_num_res_blocks=run.config["encoder_num_res_blocks"],
         decoder_channels=run.config["decoder_channels"],
         decoder_start_resolution=run.config["latent_size"],
-        decoder_attn_resolutions=run.config["decoder_attn_resolutions"],
         decoder_num_res_blocks=run.config["decoder_num_res_blocks"],
         image_channels=run.config["image_channels"],
         latent_dim=run.config["latent_dim"],
@@ -153,8 +158,10 @@ if __name__ == "__main__":
     model.eval()
     model.to(device)
 
-    if lv_active_mask is not None:
-        model.vqvae_active_mask = th.as_tensor(lv_active_mask).to(device=device, dtype=th.float32)
+    # Assign both state variables with correct dtypes so the Transformer can pass them down to VQVAE methods
+    if active_mask is not None and frozen_mean is not None:
+        model.active_mask = active_mask.to(device=device, dtype=th.bool)
+        model.frozen_mean = frozen_mean.to(device=device, dtype=th.float32)
 
     ### Set up testing conditions ###
     _, sampled_conditions, sampled_designs_np, _ = sample_conditions(
@@ -215,9 +222,40 @@ if __name__ == "__main__":
     )
 
     # Append result row to CSV
+    os.makedirs("evals", exist_ok=True)
     metrics_df = pd.DataFrame([metrics_dict])
-    out_path = args.output_csv.format(problem_id=args.problem_id)
+    out_path = os.path.join("evals", args.output_csv.format(problem_id=args.problem_id))
     write_header = not os.path.exists(out_path)
     metrics_df.to_csv(out_path, mode="a", header=write_header, index=False)
 
+    # --------------------------------------------------------------------------
+    # Plot and Save Test vs. Generated Visual Comparisons
+    # --------------------------------------------------------------------------
+    num_vis = min(8, args.n_samples) # How many pairs to plot
+    fig, axes = plt.subplots(num_vis, 2, figsize=(6, 2 * num_vis))
+    
+    for i in range(num_vis):
+        ax_true = axes[i, 0] if num_vis > 1 else axes[0]
+        ax_gen = axes[i, 1] if num_vis > 1 else axes[1]
+        
+        # Squeeze in case the shape is (1, H, W) to make it (H, W) for imshow
+        img_true = sampled_designs_np[i].squeeze()
+        img_gen = gen_designs_np[i].squeeze()
+        
+        ax_true.imshow(img_true, cmap='gray_r', vmin=0, vmax=1)
+        ax_true.axis('off')
+        if i == 0:
+            ax_true.set_title("Ground Truth (Test)")
+            
+        ax_gen.imshow(img_gen, cmap='gray_r', vmin=0, vmax=1)
+        ax_gen.axis('off')
+        if i == 0:
+            ax_gen.set_title("Generated (LV-VQVAE)")
+
+    plt.tight_layout()
+    img_out_path = img_out_path = os.path.join("evals", f"{args.problem_id}_seed_{seed}_lv_vqvae_comparison.png")
+    plt.savefig(img_out_path, dpi=300, bbox_inches='tight')
+    plt.close()
+    
+    print(f"Saved visual comparison to {img_out_path}")
     print(f"Seed {seed} done; appended to {out_path}")
