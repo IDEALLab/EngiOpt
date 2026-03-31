@@ -89,26 +89,41 @@ def compute_flow_matching_loss(
     return loss, time
 
 
-def euler_integrate(
+def integrate(
     model,
     initial_state: th.Tensor,
     encoder_hidden_states: th.Tensor,
     integration_steps: int,
     num_train_timesteps: int,
+    method: str = 'euler'
 ) -> th.Tensor:
-    """Integrate the learned velocity field from noise to data with Euler steps."""
-    if integration_steps <= 0:
-        raise ValueError("integration_steps must be positive")
-
+    """Universal integrator supporting Euler, Midpoint, and RK4."""
     state = initial_state
-    time_grid = th.linspace(0.0, 1.0, integration_steps + 1, device=state.device, dtype=state.dtype)
+    dt = 1.0 / integration_steps
+    batch_size = state.shape[0]
 
     for step in range(integration_steps):
-        current_time = th.full((state.shape[0],), float(time_grid[step].item()), device=state.device, dtype=state.dtype)
-        dt = time_grid[step + 1] - time_grid[step]
-        velocity = predict_velocity(model, state, current_time, encoder_hidden_states, num_train_timesteps)
-        state = state + dt * velocity
+        t_val = step * dt
+        t = th.full((batch_size,), float(t_val), device=state.device, dtype=state.dtype)
 
+        if method == 'euler':
+            v = predict_velocity(model, state, t, encoder_hidden_states, num_train_timesteps)
+            state = state + dt * v
+
+        elif method == 'midpoint':
+            v1 = predict_velocity(model, state, t, encoder_hidden_states, num_train_timesteps)
+            t_mid = th.full((batch_size,), float(t_val + 0.5 * dt), device=state.device, dtype=state.dtype)
+            v_mid = predict_velocity(model, state + 0.5 * dt * v1, t_mid, encoder_hidden_states, num_train_timesteps)
+            state = state + dt * v_mid
+
+        elif method == 'rk4':
+            k1 = predict_velocity(model, state, t, encoder_hidden_states, num_train_timesteps)
+            t_half = th.full((batch_size,), float(t_val + 0.5 * dt), device=state.device, dtype=state.dtype)
+            k2 = predict_velocity(model, state + 0.5 * dt * k1, t_half, encoder_hidden_states, num_train_timesteps)
+            k3 = predict_velocity(model, state + 0.5 * dt * k2, t_half, encoder_hidden_states, num_train_timesteps)
+            t_full = th.full((batch_size,), float(t_val + dt), device=state.device, dtype=state.dtype)
+            k4 = predict_velocity(model, state + dt * k3, t_full, encoder_hidden_states, num_train_timesteps)
+            state = state + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
     return state
 
 
@@ -119,11 +134,20 @@ def generate_samples(
     integration_steps: int,
     num_train_timesteps: int,
     device: th.device,
+    method: str = 'euler'  # 1. Add the parameter here
 ) -> th.Tensor:
     """Generate designs by integrating from Gaussian noise."""
     initial_state = th.randn((encoder_hidden_states.shape[0], 1, *design_shape), device=device)
     with th.no_grad():
-        return euler_integrate(model, initial_state, encoder_hidden_states, integration_steps, num_train_timesteps)
+        # 2. Update this line to call 'integrate' and pass the 'method'
+        return integrate(
+            model, 
+            initial_state, 
+            encoder_hidden_states, 
+            integration_steps, 
+            num_train_timesteps, 
+            method=method
+        )
 
 
 def args_to_dict(args: Any) -> dict[str, Any]:

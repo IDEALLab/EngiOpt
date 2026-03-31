@@ -57,7 +57,7 @@ class Args:
     """Minimum value used when clipping generated designs."""
     clip_max: float = 1.0
     """Maximum value used when clipping generated designs."""
-
+    method: str = "euler"
 
 def select_device(device_arg: str) -> th.device:
     """Return the best available torch device."""
@@ -162,12 +162,13 @@ if __name__ == "__main__":
 
     generation_start = time.perf_counter()
     gen_designs = generate_samples(
-        model=model,
+	model=model,
         design_shape=problem.design_space.shape,
         encoder_hidden_states=conditions_tensor,
         integration_steps=integration_steps,
         num_train_timesteps=num_train_timesteps,
         device=device,
+	method=args.method
     )
     generation_runtime_sec = time.perf_counter() - generation_start
     gen_designs = gen_designs.squeeze(1)
