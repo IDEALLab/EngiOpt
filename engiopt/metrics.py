@@ -159,6 +159,8 @@ def metrics(
     dataset_designs: npt.NDArray,
     sampled_conditions: Dataset | None = None,
     sigma: float = 1.0,
+    gen_time: float = 0.0,
+    gen_speed: float = 0.0,
 ) -> dict[str, Any]:
     """Compute various metrics for evaluating generative model designs.
 
@@ -254,4 +256,6 @@ def metrics(
         "viol": average_viol,
         "binarization": float(np.mean(binarization_list)),
         "connectivity": float(np.mean(connectivity_list)),
+        "generation_runtime_sec": gen_time,
+        "generation_samples_per_sec": gen_speed,
     }
