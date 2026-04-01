@@ -167,6 +167,7 @@ if __name__ == "__main__":
         t = th.full((args.n_samples,), i, device=device, dtype=th.long)
         gen_designs = ddm_sampler.sample_timestep(model, gen_designs, t, conditions_tensor)
     generation_runtime_sec = time.perf_counter() - generation_start
+    generation_samples_per_sec = args.n_samples / generation_runtime_sec if generation_runtime_sec > 0 else float("nan")
 
     gen_designs = gen_designs.squeeze(1)
     gen_designs_np = gen_designs.detach().cpu().numpy().reshape(args.n_samples, *problem.design_space.shape)
@@ -180,6 +181,8 @@ if __name__ == "__main__":
         sampled_designs_np,
         sampled_conditions,
         sigma=args.sigma,
+        gen_time=generation_runtime_sec,
+        gen_speed=generation_samples_per_sec,
     )
     metrics_runtime_sec = time.perf_counter() - metrics_start
     evaluation_runtime_sec = time.perf_counter() - eval_start
