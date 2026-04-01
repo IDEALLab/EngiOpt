@@ -147,6 +147,7 @@ if __name__ == "__main__":
         gen_designs = gen_designs.squeeze(1)
         gen_designs_np = gen_designs.detach().cpu().numpy().reshape(args.n_samples, *problem.design_space.shape)
         gen_designs_np = np.clip(gen_designs_np, args.clip_min, args.clip_max)
+        generation_samples_per_sec = args.n_samples / generation_runtime_sec if generation_runtime_sec > 0 else 0.0
 
         metrics_start = time.perf_counter()
         metrics_dict = metrics.metrics(
@@ -155,6 +156,8 @@ if __name__ == "__main__":
             sampled_designs_np,
             sampled_conditions,
             sigma=args.sigma,
+            gen_time=generation_runtime_sec,
+            gen_speed=generation_samples_per_sec,
         )
         metrics_runtime_sec = time.perf_counter() - metrics_start
         evaluation_runtime_sec = generation_runtime_sec + metrics_runtime_sec
