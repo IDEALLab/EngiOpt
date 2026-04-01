@@ -15,6 +15,7 @@ from typing import Any, TYPE_CHECKING
 from gymnasium import spaces
 import numpy as np
 import numpy.typing as npt
+from scipy.ndimage import label
 from scipy.spatial.distance import cdist
 
 if TYPE_CHECKING:
@@ -183,6 +184,8 @@ def metrics(
     iog_list = []
     fog_list = []
     viol_list = []
+    binarization_list = []
+    connectivity_list = []
     for i in range(n_samples):
         conditions = sampled_conditions[i] if sampled_conditions is not None else None
         if isinstance(problem.design_space, spaces.Dict):
@@ -201,13 +204,23 @@ def metrics(
         cog_list.append(np.sum(opt_history_gaps))
         fog_list.append(opt_history_gaps[-1])
 
+        # Binarization ratio: fraction of design variables that are above 0.5 (assuming binary design)
+        binary_mask = unflattened_design > 0.5
+        _, num_features = label(binary_mask)
+        connectivity_list.append(num_features)
+
+        # --- New: Binarization Gap (Manufacturability) ---
+        # 0.0 = perfect discrete (0/1), high = blurry/grey
+        bin_gap = np.mean(4 * unflattened_design * (1 - unflattened_design))
+        binarization_list.append(bin_gap)
+
         # Check if conditions dict has 'volfrac' or 'volume' key and compare with design mean
         if conditions:
-            tol = 0.01  # Tolerance for equality constraint deviation
             target_vol = conditions.get("volfrac") or conditions.get("volume")
             if target_vol is not None:
-                viol = np.abs(np.mean(unflattened_design) - target_vol) >= tol
-                viol_list.append(viol)
+                # Recorded as Float (MAE) instead of Boolean
+                vol_error = np.abs(np.mean(unflattened_design) - target_vol)
+                viol_list.append(vol_error)
 
     # Compute the average Initial Optimality Gap (IOG), Cumulative Optimality Gap (COG), and Final Optimality Gap (FOG)
     average_iog: float = float(np.mean(iog_list))  # Average of initial optimality gaps
@@ -239,4 +252,6 @@ def metrics(
         "mmd": mmd_value,
         "dpp": dpp_value,
         "viol": average_viol,
+        "binarization": float(np.mean(binarization_list)),
+        "connectivity": float(np.mean(connectivity_list)),
     }
