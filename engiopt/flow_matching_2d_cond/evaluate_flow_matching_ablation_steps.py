@@ -61,6 +61,12 @@ class Args:
     """Maximum value used when clipping generated designs."""
     condition_seed: int | None = None
     """Seed used for condition sampling. Defaults to the main seed."""
+    method: str = "euler"
+    """Integration method: euler, midpoint, heun, rk4, rk45, dpm."""
+    atol: float = 1e-3
+    """Absolute tolerance for adaptive solvers (RK45)."""
+    rtol: float = 1e-3
+    """Relative tolerance for adaptive solvers (RK45)."""
 
 
 def parse_steps(steps_text: str) -> list[int]:
@@ -83,6 +89,12 @@ if __name__ == "__main__":
     args = tyro.cli(Args)
     eval_start = time.perf_counter()
     integration_steps_values = parse_steps(args.integration_steps_list)
+
+    # If using an adaptive solver, the number of steps is irrelevant. 
+    # We force the list to [0] so the loop runs exactly once.
+    if args.method == 'rk45':
+        print("Adaptive solver detected: Running single evaluation (ignoring step sweep).")
+        integration_steps_values = [0]
 
     problem = BUILTIN_PROBLEMS[args.problem_id]()
     problem.reset(seed=args.seed)
@@ -142,6 +154,9 @@ if __name__ == "__main__":
             integration_steps=integration_steps,
             num_train_timesteps=num_train_timesteps,
             device=device,
+            method=args.method,
+            atol=args.atol,
+            rtol=args.rtol
         )
         generation_runtime_sec = time.perf_counter() - generation_start
         gen_designs = gen_designs.squeeze(1)
@@ -179,6 +194,7 @@ if __name__ == "__main__":
                 "metrics_runtime_sec": metrics_runtime_sec,
                 "evaluation_runtime_sec": evaluation_runtime_sec,
                 "generation_samples_per_sec": generation_samples_per_sec,
+                "method": args.method,
             }
         )
         all_rows.append(metrics_dict)

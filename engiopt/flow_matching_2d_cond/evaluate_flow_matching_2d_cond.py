@@ -58,6 +58,11 @@ class Args:
     clip_max: float = 1.0
     """Maximum value used when clipping generated designs."""
     method: str = "euler"
+    """Integration method: euler, midpoint, heun, rk4, rk45, dpm."""
+    atol: float = 1e-3
+    """Absolute tolerance for adaptive solvers (RK45)."""
+    rtol: float = 1e-3
+    """Relative tolerance for adaptive solvers (RK45)."""
 
 def select_device(device_arg: str) -> th.device:
     """Return the best available torch device."""
@@ -168,6 +173,8 @@ if __name__ == "__main__":
         integration_steps=integration_steps,
         num_train_timesteps=num_train_timesteps,
         device=device,
+        atol=args.atol,      # Add this
+        rtol=args.rtol,
 	method=args.method
     )
     generation_runtime_sec = time.perf_counter() - generation_start
@@ -189,7 +196,7 @@ if __name__ == "__main__":
     metrics_runtime_sec = time.perf_counter() - metrics_start
     evaluation_runtime_sec = time.perf_counter() - eval_start
     generation_samples_per_sec = args.n_samples / generation_runtime_sec if generation_runtime_sec > 0 else float("nan")
-    
+
     metrics_dict.update(
         {
             "seed": args.seed,

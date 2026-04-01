@@ -9,6 +9,7 @@ from typing import Any
 
 import torch as th
 from torch.nn import functional
+from torchdiffeq import odeint
 
 DEFAULT_BLOCK_OUT_CHANNELS = (32, 64, 128, 256)
 DEFAULT_DOWN_BLOCK_TYPES = ("CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "DownBlock2D")
@@ -95,36 +96,70 @@ def integrate(
     encoder_hidden_states: th.Tensor,
     integration_steps: int,
     num_train_timesteps: int,
-    method: str = 'euler'
+    method: str = 'euler',
+    atol: float = 1e-3,  # Added for RK45
+    rtol: float = 1e-3   # Added for RK45
 ) -> th.Tensor:
     """Universal integrator supporting Euler, Midpoint, and RK4."""
     state = initial_state
-    dt = 1.0 / integration_steps
     batch_size = state.shape[0]
+    device = state.device
 
-    for step in range(integration_steps):
-        t_val = step * dt
-        t = th.full((batch_size,), float(t_val), device=state.device, dtype=state.dtype)
+    # --- 1. ADAPTIVE SOLVER (RK45) ---
+    # This solver ignores integration_steps and uses its own logic
+    if method == 'rk45':
+        def ode_func(t, s):
+            # t is a scalar from odeint, we need a batch of t
+            t_batch = th.full((batch_size,), float(t), device=device, dtype=s.dtype)
+            return predict_velocity(model, s, t_batch, encoder_hidden_states, num_train_timesteps)
+        
+        t_span = th.tensor([0.0, 1.0], device=device)
+        # We only want the final state at t=1.0
+        return odeint(ode_func, initial_state, t_span, method='rk45', rtol=rtol, atol=atol)[-1]
 
-        if method == 'euler':
-            v = predict_velocity(model, state, t, encoder_hidden_states, num_train_timesteps)
-            state = state + dt * v
+    # --- 2. FIXED-STEP SOLVERS ---
+    # All these methods share the same loop logic
+    else:
+        dt = 1.0 / integration_steps
+        for step in range(integration_steps):
+            t_val = step * dt
+            t = th.full((batch_size,), float(t_val), device=device, dtype=state.dtype)
 
-        elif method == 'midpoint':
-            v1 = predict_velocity(model, state, t, encoder_hidden_states, num_train_timesteps)
-            t_mid = th.full((batch_size,), float(t_val + 0.5 * dt), device=state.device, dtype=state.dtype)
-            v_mid = predict_velocity(model, state + 0.5 * dt * v1, t_mid, encoder_hidden_states, num_train_timesteps)
-            state = state + dt * v_mid
+            if method == 'euler':
+                v = predict_velocity(model, state, t, encoder_hidden_states, num_train_timesteps)
+                state = state + dt * v
 
-        elif method == 'rk4':
-            k1 = predict_velocity(model, state, t, encoder_hidden_states, num_train_timesteps)
-            t_half = th.full((batch_size,), float(t_val + 0.5 * dt), device=state.device, dtype=state.dtype)
-            k2 = predict_velocity(model, state + 0.5 * dt * k1, t_half, encoder_hidden_states, num_train_timesteps)
-            k3 = predict_velocity(model, state + 0.5 * dt * k2, t_half, encoder_hidden_states, num_train_timesteps)
-            t_full = th.full((batch_size,), float(t_val + dt), device=state.device, dtype=state.dtype)
-            k4 = predict_velocity(model, state + dt * k3, t_full, encoder_hidden_states, num_train_timesteps)
-            state = state + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
-    return state
+            elif method == 'midpoint':
+                v1 = predict_velocity(model, state, t, encoder_hidden_states, num_train_timesteps)
+                t_mid = th.full((batch_size,), float(t_val + 0.5 * dt), device=device, dtype=state.dtype)
+                v_mid = predict_velocity(model, state + 0.5 * dt * v1, t_mid, encoder_hidden_states, num_train_timesteps)
+                state = state + dt * v_mid
+
+            elif method == 'heun':
+                v1 = predict_velocity(model, state, t, encoder_hidden_states, num_train_timesteps)
+                t_next = th.full((batch_size,), float(t_val + dt), device=device, dtype=state.dtype)
+                v2 = predict_velocity(model, state + dt * v1, t_next, encoder_hidden_states, num_train_timesteps)
+                state = state + 0.5 * dt * (v1 + v2)
+
+            elif method == 'rk4':
+                k1 = predict_velocity(model, state, t, encoder_hidden_states, num_train_timesteps)
+                t_half = th.full((batch_size,), float(t_val + 0.5 * dt), device=device, dtype=state.dtype)
+                k2 = predict_velocity(model, state + 0.5 * dt * k1, t_half, encoder_hidden_states, num_train_timesteps)
+                k3 = predict_velocity(model, state + 0.5 * dt * k2, t_half, encoder_hidden_states, num_train_timesteps)
+                t_full = th.full((batch_size,), float(t_val + dt), device=device, dtype=state.dtype)
+                k4 = predict_velocity(model, state + dt * k3, t_full, encoder_hidden_states, num_train_timesteps)
+                state = state + (dt / 6.0) * (k1 + 2*k2 + 2*k3 + k4)
+
+            elif method == 'dpm':
+                # Simplified DPM-Solver style step (Exponential update)
+                v = predict_velocity(model, state, t, encoder_hidden_states, num_train_timesteps)
+                # This follows the probability flow ODE more naturally for Flow Matching
+                state = state + (th.exp(th.tensor(dt, device=device)) - 1) * v
+            
+            else:
+                raise ValueError(f"Unknown integration method: {method}")
+
+        return state
 
 
 def generate_samples(
@@ -134,19 +169,23 @@ def generate_samples(
     integration_steps: int,
     num_train_timesteps: int,
     device: th.device,
-    method: str = 'euler'  # 1. Add the parameter here
+    method: str = 'euler',
+    atol: float = 1e-3,
+    rtol: float = 1e-3
 ) -> th.Tensor:
     """Generate designs by integrating from Gaussian noise."""
     initial_state = th.randn((encoder_hidden_states.shape[0], 1, *design_shape), device=device)
     with th.no_grad():
-        # 2. Update this line to call 'integrate' and pass the 'method'
         return integrate(
-            model, 
-            initial_state, 
-            encoder_hidden_states, 
-            integration_steps, 
-            num_train_timesteps, 
-            method=method
+            model,
+            initial_state,
+            encoder_hidden_states,
+            integration_steps,
+            num_train_timesteps,
+            method=method,
+            atol=atol,
+            rtol=rtol
+
         )
 
 
