@@ -240,7 +240,7 @@ if __name__ == "__main__":
                     f"ablation/mmd/step_{step}": row["mmd"],
                     f"ablation/dpp/step_{step}": row["dpp"],
                     f"ablation/viol/step_{step}": row["viol"],
-                    f"ablation/bin_gap/step_{step}": row["bin_gap"],
+                    f"ablation/bin_gap/step_{step}": row["binarization"],
                     f"ablation/connectivity/step_{step}": row["connectivity"],
                     f"ablation/runtime_sec/step_{step}": row["generation_runtime_sec"],
                     f"ablation/samples_per_sec/step_{step}": row["generation_samples_per_sec"],
