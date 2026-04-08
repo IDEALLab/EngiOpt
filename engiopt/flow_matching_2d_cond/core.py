@@ -104,18 +104,19 @@ def integrate(
     state = initial_state
     batch_size = state.shape[0]
     device = state.device
-
-    # --- 1. ADAPTIVE SOLVER (RK45) ---
-    # This solver ignores integration_steps and uses its own logic
-    if method == 'rk45':
+# --- 1. ADAPTIVE SOLVERS (e.g., dopri5, bosh3) ---
+    # These solvers ignore integration_steps and use their own adaptive logic
+    adaptive_methods = {'dopri5', 'bosh3', 'adaptive_heun', 'dopri8'}
+    
+    if method in adaptive_methods:
         def ode_func(t, s):
             # t is a scalar from odeint, we need a batch of t
             t_batch = th.full((batch_size,), float(t), device=device, dtype=s.dtype)
             return predict_velocity(model, s, t_batch, encoder_hidden_states, num_train_timesteps)
         
         t_span = th.tensor([0.0, 1.0], device=device)
-        # We only want the final state at t=1.0
-        return odeint(ode_func, initial_state, t_span, method='rk45', rtol=rtol, atol=atol)[-1]
+        # We pass the 'method' variable directly to the library
+        return odeint(ode_func, initial_state, t_span, method=method, rtol=rtol, atol=atol)[-1]
 
     # --- 2. FIXED-STEP SOLVERS ---
     # All these methods share the same loop logic
