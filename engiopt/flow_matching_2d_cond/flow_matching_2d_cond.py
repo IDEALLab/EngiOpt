@@ -81,6 +81,12 @@ class Args:
     """Minimum value used when clipping generated designs for previews."""
     clip_max: float = 1.0
     """Maximum value used when clipping generated designs for previews."""
+    method: str = "euler"
+    """Integration method used for previews: euler, midpoint, heun, rk4, dopri5."""
+    atol: float = 1e-3
+    """Absolute tolerance for adaptive solvers."""
+    rtol: float = 1e-3
+    """Relative tolerance for adaptive solvers."""
 
 
 def select_device(device_arg: Literal["auto", "cpu", "mps", "cuda"]) -> th.device:
@@ -253,6 +259,9 @@ if __name__ == "__main__":
                             integration_steps=args.integration_steps,
                             num_train_timesteps=args.num_train_timesteps,
                             device=device,
+                            method=args.method,
+                            atol=args.atol,
+                            rtol=args.rtol,
                         )
                     if was_training:
                         model.train()
@@ -302,6 +311,9 @@ if __name__ == "__main__":
                         "layers_per_block": args.layers_per_block,
                         "num_train_timesteps": args.num_train_timesteps,
                         "integration_steps": args.integration_steps,
+                        "method": args.method,
+                        "atol": args.atol,
+                        "rtol": args.rtol,
                     },
                     "design_shape": design_shape,
                     "encoder_hid_dim": encoder_hid_dim,
@@ -323,6 +335,9 @@ if __name__ == "__main__":
                 "layers_per_block": args.layers_per_block,
                 "num_train_timesteps": args.num_train_timesteps,
                 "integration_steps": args.integration_steps,
+                "method": args.method,
+                "atol": args.atol,
+                "rtol": args.rtol,
             },
             "design_shape": design_shape,
             "encoder_hid_dim": encoder_hid_dim,
