@@ -167,7 +167,7 @@ if __name__ == "__main__":
 
     generation_start = time.perf_counter()
     gen_designs = generate_samples(
-	model=model,
+        model=model,
         design_shape=problem.design_space.shape,
         encoder_hidden_states=conditions_tensor,
         integration_steps=integration_steps,
@@ -175,7 +175,7 @@ if __name__ == "__main__":
         device=device,
         atol=args.atol,      # Add this
         rtol=args.rtol,
-	method=args.method
+        method=args.method
     )
     generation_runtime_sec = time.perf_counter() - generation_start
     gen_designs = gen_designs.squeeze(1)
@@ -219,7 +219,7 @@ if __name__ == "__main__":
     write_metrics_csv([metrics_dict], out_path, append_output=args.append_output)
 
     if args.track:
-        run_name = args.run_name or f"{args.problem_id}__flow_matching_2d_cond__eval__seed{args.seed}__{int(time.time())}"
+        run_name = args.run_name or f"{args.problem_id}__{args.method}__flow_matching_2d_cond__eval__seed{args.seed}__{int(time.time())}"
         run = wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
