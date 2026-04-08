@@ -822,7 +822,8 @@ def show_spatial_distribution_comparison(
     n_img = 3 if has_train else 2
 
     fig, axes = plt.subplots(1, n_img + 1, figsize=(4.2 * (n_img + 1), 4),
-                             gridspec_kw={"width_ratios": [1] * n_img + [1.3]})
+                             gridspec_kw={"width_ratios": [1] * n_img + [1.3]},
+                             constrained_layout=True)
 
     # ── Mean design images ───────────────────────────────────────────
     sets = [("Generated", gen_designs, "#4C72B0"),
@@ -837,7 +838,7 @@ def show_spatial_distribution_comparison(
         ax.set_title(f"Mean {label}\n(n={len(designs)})", fontsize=11)
         ax.axis("off")
     fig.colorbar(im, ax=axes[:n_img].tolist(), shrink=0.75,
-                 label="Avg. material density", pad=0.02)
+                 label="Avg. material density", pad=0.04)
 
     # ── Per-design volume fraction distributions ─────────────────────
     ax_vf = axes[n_img]
@@ -854,7 +855,6 @@ def show_spatial_distribution_comparison(
         "Spatial distribution comparison \u2014 where does each set place material?",
         fontsize=13, y=1.03,
     )
-    fig.tight_layout()
     plt.show()
     plt.close(fig)
 
