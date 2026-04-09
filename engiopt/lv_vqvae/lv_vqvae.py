@@ -546,7 +546,7 @@ class VQVAE(nn.Module):
         encoded = self.encoder(designs)
         quant_encoded = self.quant_conv(encoded)
         quant_encoded = self.apply_pruning(quant_encoded, active_mask, frozen_mean)
-        
+
         if self.use_vq:
             quant, indices, q_loss, _, _ = self.codebook(quant_encoded)
         else:
@@ -827,9 +827,9 @@ class VQVAETransformer(nn.Module):
             mask = mask.round().to(dtype=th.int64)
             # Generate random replacements specifically from the shifted image vocabulary
             random_indices = th.randint(
-                low=self.image_offset, 
-                high=self.transformer.config.vocab_size, 
-                size=indices.shape, 
+                low=self.image_offset,
+                high=self.transformer.config.vocab_size,
+                size=indices.shape,
                 device=indices.device
             )
             new_indices = mask * indices + (1 - mask) * random_indices
@@ -1130,7 +1130,7 @@ if __name__ == "__main__":
 
     transformer = None
     opt_transformer = None
-    
+
     if args.use_vq:
         transformer = VQVAETransformer(
             conditional=args.conditional,
@@ -1280,9 +1280,6 @@ if __name__ == "__main__":
                             "epoch_cvqvae": epoch,
                         }
                     )
-                    # print(
-                    #     f"[Epoch {epoch}/{args.n_epochs_cvqvae}] [Batch {i}/{len(dataloader_cvqvae)}] [CVQ loss: {cvq_loss.item()}]"
-                    # )
 
                     # --------------
                     #  Save model
@@ -1414,8 +1411,8 @@ if __name__ == "__main__":
                         )
                     else:
                         tstats = {
-                            "token_perplexity": 0.0, 
-                            "token_perplexity_frac": 0.0, 
+                            "token_perplexity": 0.0,
+                            "token_perplexity_frac": 0.0,
                             "token_usage_frac": 0.0
                         }
                 log_vq = {
@@ -1434,9 +1431,6 @@ if __name__ == "__main__":
                     "lv_nmae": nmae.item(),
                     "next_prune_epoch": next_prune_epoch
                 }
-                # print(
-                #     f"[Epoch {epoch}/{args.n_epochs_vqvae}] [Batch {i}/{len(dataloader_vqvae)}] [VQ loss: {vq_loss.item()}]"
-                # )
 
                 # This saves a grid image of 25 generated designs every sample_interval
                 if (batches_done + 1) % args.sample_interval_vqvae == 0:

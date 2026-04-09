@@ -196,7 +196,7 @@ class Codebook(nn.Module):
             normed_codebook = f.normalize(self.embedding.weight, dim=1)
             d = th.einsum("bd,dn->bn", normed_z_flattened, rearrange(normed_codebook, "n d -> d n"))
 
-        #  TODO: Prevent selecting pruned/inactive codebook entries.
+        #  T0D0: Prevent selecting pruned/inactive codebook entries.
         #  This is required for consistency with downstream transformer masking of inactive tokens.
 
         # encoding

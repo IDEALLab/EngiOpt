@@ -102,12 +102,12 @@ if __name__ == "__main__":
     ckpt_path_transformer = os.path.join(artifact_dir_transformer, "transformer.pth")
     ckpt_cvqvae = th.load(ckpt_path_cvqvae, map_location=th.device(device), weights_only=False)
     ckpt_vqvae = th.load(ckpt_path_vqvae, map_location=th.device(device), weights_only=False)
-    
+
     # Extract the nested lv_state dictionary and pruning attributes
     lv_state = ckpt_vqvae.get("lv_state", {})
     active_mask = lv_state.get("active_mask", None)
     frozen_mean = lv_state.get("frozen_mean", None)
-    
+
     ckpt_transformer = th.load(ckpt_path_transformer, map_location=th.device(device), weights_only=False)
 
     vqvae = VQVAE(
@@ -233,29 +233,28 @@ if __name__ == "__main__":
     # --------------------------------------------------------------------------
     num_vis = min(8, args.n_samples) # How many pairs to plot
     fig, axes = plt.subplots(num_vis, 2, figsize=(6, 2 * num_vis))
-    
     for i in range(num_vis):
         ax_true = axes[i, 0] if num_vis > 1 else axes[0]
         ax_gen = axes[i, 1] if num_vis > 1 else axes[1]
-        
+
         # Squeeze in case the shape is (1, H, W) to make it (H, W) for imshow
         img_true = sampled_designs_np[i].squeeze()
         img_gen = gen_designs_np[i].squeeze()
-        
-        ax_true.imshow(img_true, cmap='gray_r', vmin=0, vmax=1)
-        ax_true.axis('off')
+
+        ax_true.imshow(img_true, cmap="gray_r", vmin=0, vmax=1)
+        ax_true.axis("off")
         if i == 0:
             ax_true.set_title("Ground Truth (Test)")
-            
-        ax_gen.imshow(img_gen, cmap='gray_r', vmin=0, vmax=1)
-        ax_gen.axis('off')
+
+        ax_gen.imshow(img_gen, cmap="gray_r", vmin=0, vmax=1)
+        ax_gen.axis("off")
         if i == 0:
             ax_gen.set_title("Generated (LV-VQVAE)")
 
     plt.tight_layout()
-    img_out_path = img_out_path = os.path.join("evals", f"{args.problem_id}_seed_{seed}_lv_vqvae_comparison.png")
-    plt.savefig(img_out_path, dpi=300, bbox_inches='tight')
+    img_out_path = os.path.join("evals", f"{args.problem_id}_seed_{seed}_lv_vqvae_comparison.png")
+    plt.savefig(img_out_path, dpi=300, bbox_inches="tight")
     plt.close()
-    
+
     print(f"Saved visual comparison to {img_out_path}")
     print(f"Seed {seed} done; appended to {out_path}")
