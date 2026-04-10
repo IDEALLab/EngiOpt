@@ -229,6 +229,9 @@ if __name__ == "__main__":
             device=device,
             seed=args.seed + 123,
         )
+        validation_conditions_tensor = validation_conditions_tensor.reshape(
+            args.validation_batch_size, 1, encoder_hid_dim
+        )
 
         best_epoch_tracker = BestEpochTracker(
             checkpoint_dir=args.checkpoint_dir,
