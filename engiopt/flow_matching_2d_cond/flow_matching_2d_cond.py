@@ -16,6 +16,10 @@ import torch as th
 import tqdm
 import tyro
 
+from engiopt.best_epoch_selection import BestEpochTracker
+from engiopt import metrics
+from engiopt.best_epoch_selection import BestEpochTracker
+from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.flow_matching_2d_cond.core import args_to_dict
 from engiopt.flow_matching_2d_cond.core import build_model
 from engiopt.flow_matching_2d_cond.core import compute_flow_matching_loss
@@ -87,6 +91,16 @@ class Args:
     """Absolute tolerance for adaptive solvers."""
     rtol: float = 1e-3
     """Relative tolerance for adaptive solvers."""
+    best_validation_metric: str = "mmd"
+    """Metric used for best-epoch selection: mmd, iog, fog, viol."""
+    validation_batch_size: int = 50
+    """Batch size used for validation metric computation."""
+    validation_sigma: float = 1.0
+    """Bandwidth parameter used for MMD calculation."""
+    validation_interval_epochs: int = 5
+    """How often to compute validation metrics (epochs)."""
+    enable_best_epoch_selection: bool = True
+    """Enable tracking best epoch based on validation metrics."""
 
 
 def select_device(device_arg: Literal["auto", "cpu", "mps", "cuda"]) -> th.device:
@@ -198,6 +212,30 @@ if __name__ == "__main__":
     dataloader = th.utils.data.DataLoader(training_ds, batch_size=args.batch_size, shuffle=True)
     optimizer = th.optim.AdamW(model.parameters(), lr=args.lr, betas=(args.b1, args.b2))
 
+    # Initialize best epoch tracking
+    best_epoch_tracker = None
+    validation_conditions_tensor = None
+    validation_sampled_conditions = None
+    validation_sampled_designs_np = None
+    if args.enable_best_epoch_selection:
+        (
+            validation_conditions_tensor,
+            validation_sampled_conditions,
+            validation_sampled_designs_np,
+            _,
+        ) = sample_conditions(
+            problem=problem,
+            n_samples=args.validation_batch_size,
+            device=device,
+            seed=args.seed + 123,
+        )
+
+        best_epoch_tracker = BestEpochTracker(
+            checkpoint_dir=args.checkpoint_dir,
+            metric_name=args.best_validation_metric,
+            maximize=False,
+        )
+
     last_loss: float | None = None
     last_epoch = 0
     last_batch = 0
@@ -292,6 +330,65 @@ if __name__ == "__main__":
                 }
             )
 
+        # Compute validation metric if enabled
+        validation_metric_value = None
+        if (
+            args.enable_best_epoch_selection
+            and best_epoch_tracker is not None
+            and validation_conditions_tensor is not None
+            and validation_sampled_conditions is not None
+            and validation_sampled_designs_np is not None
+            and (epoch + 1) % args.validation_interval_epochs == 0
+        ):
+            model.eval()
+            with th.no_grad():
+                # Generate samples for validation using held-out conditions
+                gen_designs = generate_samples(
+                    model=model,
+                    design_shape=design_shape,
+                    encoder_hidden_states=validation_conditions_tensor,
+                    integration_steps=args.integration_steps,
+                    num_train_timesteps=args.num_train_timesteps,
+                    device=device,
+                    method=args.method,
+                    atol=args.atol,
+                    rtol=args.rtol,
+                )
+                gen_designs = gen_designs.squeeze(1)
+                gen_designs_np = gen_designs.detach().cpu().numpy().reshape(
+                    args.validation_batch_size,
+                    *problem.design_space.shape,
+                )
+                gen_designs_np = np.clip(gen_designs_np, args.clip_min, args.clip_max)
+
+                metrics_dict = metrics.metrics(
+                    problem,
+                    gen_designs_np,
+                    validation_sampled_designs_np,
+                    validation_sampled_conditions,
+                    sigma=args.sigma,
+                )
+                validation_metric_value = float(metrics_dict[args.best_validation_metric])
+            model.train()
+
+            is_best = best_epoch_tracker.update(epoch, validation_metric_value)
+            if args.track:
+                wandb.log(
+                    {
+                        "validation/mmd": metrics_dict["mmd"],
+                        "validation/iog": metrics_dict["iog"],
+                        "validation/fog": metrics_dict["fog"],
+                        "validation/viol": metrics_dict["viol"],
+                        "validation/is_best": is_best,
+                        f"validation/best_{args.best_validation_metric}": validation_metric_value,
+                    }
+                )
+            print(
+                f"Epoch {epoch+1} validation: {args.best_validation_metric}={validation_metric_value:.6f} "
+                f"(mmd={metrics_dict['mmd']:.6f}, fog={metrics_dict['fog']:.6f}) "
+                f"{'[BEST]' if is_best else ''}"
+            )
+
         should_save_periodic = (
             args.checkpoint_interval_epochs > 0
             and (epoch + 1) % args.checkpoint_interval_epochs == 0
@@ -322,6 +419,55 @@ if __name__ == "__main__":
                 },
                 periodic_path,
             )
+
+        if (
+            args.enable_best_epoch_selection
+            and args.checkpoint_interval_epochs == 0
+            and (epoch + 1) % args.validation_interval_epochs == 0
+            and last_loss is not None
+        ):
+            validation_checkpoint_path = Path(args.checkpoint_dir) / f"epoch_{epoch + 1:04d}.pth"
+            th.save(
+                {
+                    "epoch": last_epoch,
+                    "batch": last_batch,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "loss": last_loss,
+                    "args": args_to_dict(args),
+                    "model_config": {
+                        "layers_per_block": args.layers_per_block,
+                        "num_train_timesteps": args.num_train_timesteps,
+                        "integration_steps": args.integration_steps,
+                        "method": args.method,
+                        "atol": args.atol,
+                        "rtol": args.rtol,
+                    },
+                    "design_shape": design_shape,
+                    "encoder_hid_dim": encoder_hid_dim,
+                    "design_min": design_min,
+                    "design_max": design_max,
+                },
+                validation_checkpoint_path,
+            )
+
+    # Load best model before final save
+    if args.enable_best_epoch_selection and best_epoch_tracker is not None:
+        if best_epoch_tracker.best_epoch is not None:
+            best_checkpoint_path = best_epoch_tracker.get_best_checkpoint_path("epoch_{epoch:04d}.pth")
+            if best_checkpoint_path and best_checkpoint_path.exists():
+                print(
+                    f"Loading best model from epoch {best_epoch_tracker.best_epoch+1} "
+                    f"(MMD: {best_epoch_tracker.best_metric_value:.6f})"
+                )
+                checkpoint_data = th.load(best_checkpoint_path, map_location=device)
+                model.load_state_dict(checkpoint_data["model"])
+                last_loss = checkpoint_data.get("loss", last_loss)
+                last_epoch = checkpoint_data.get("epoch", last_epoch)
+            else:
+                print("Warning: best checkpoint not found, using final model")
+        else:
+            print("Warning: no validation metrics recorded, using final model")
 
     if args.save_model and last_loss is not None:
         checkpoint = {
