@@ -369,7 +369,7 @@ if __name__ == "__main__":
                     gen_designs_np,
                     validation_sampled_designs_np,
                     validation_sampled_conditions,
-                    sigma=args.sigma,
+                    sigma=args.validation_sigma,
                 )
                 validation_metric_value = float(metrics_dict[args.best_validation_metric])
             model.train()
