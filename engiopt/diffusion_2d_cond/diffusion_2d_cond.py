@@ -87,8 +87,10 @@ class Args:
     """Batch size for validation metric computation."""
     validation_sigma: float = 1.0
     """Bandwidth parameter for MMD computation during validation."""
-    validation_interval_epochs: int = 5
+    validation_interval_epochs: int = 10
     """Compute validation metrics every N epochs."""
+    early_stopping_patience: int = 25
+    """Stop training if no validation improvement is seen after this many validation checks."""
 
 
 def beta_schedule(
@@ -373,6 +375,10 @@ if __name__ == "__main__":
 
     ddm_sampler = DiffusionSampler(num_timesteps, betas)
 
+    # Training control
+    stop_training = False
+    validation_checks_without_improvement = 0
+
     # Loss function
     def ddm_loss_fn(noise_pred: th.Tensor, noise: th.Tensor) -> th.Tensor:
         """Compute the MSE loss between predicted and target noise.
@@ -522,6 +528,16 @@ if __name__ == "__main__":
             model.train()
 
             is_best = best_epoch_tracker.update(epoch, validation_metric_value)
+            if args.early_stopping_patience > 0:
+                if is_best:
+                    validation_checks_without_improvement = 0
+                else:
+                    validation_checks_without_improvement += 1
+                    if validation_checks_without_improvement >= args.early_stopping_patience:
+                        print(
+                            f"Early stopping after {args.early_stopping_patience} validation checks without improvement"
+                        )
+                        stop_training = True
             if args.track:
                 wandb.log(
                     {
@@ -538,6 +554,8 @@ if __name__ == "__main__":
                 f"(mmd={metrics_dict['mmd']:.6f}, fog={metrics_dict['fog']:.6f}) "
                 f"{'[BEST]' if is_best else ''}"
             )
+            if stop_training:
+                break
 
         should_save_periodic = (
             args.checkpoint_interval_epochs > 0
@@ -565,7 +583,6 @@ if __name__ == "__main__":
 
         if (
             args.enable_best_epoch_selection
-            and args.checkpoint_interval_epochs == 0
             and (epoch + 1) % args.validation_interval_epochs == 0
             and last_loss is not None
         ):
@@ -587,41 +604,40 @@ if __name__ == "__main__":
                 validation_checkpoint_path,
             )
 
-        if args.save_model and epoch == args.n_epochs - 1 and last_loss is not None:
-            # Load best model before final save
-            if args.enable_best_epoch_selection and best_epoch_tracker is not None:
-                if best_epoch_tracker.best_epoch is not None:
-                    best_checkpoint_path = best_epoch_tracker.checkpoint_dir / f"epoch_{best_epoch_tracker.best_epoch+1:04d}.pth"
-                    if best_checkpoint_path.exists():
-                        print(
-                            f"Loading best model from epoch {best_epoch_tracker.best_epoch+1} "
-                            f"(MMD: {best_epoch_tracker.best_metric_value:.6f})"
-                        )
-                        checkpoint_data = th.load(best_checkpoint_path, map_location=device)
-                        model.load_state_dict(checkpoint_data["model"])
-                    else:
-                        print("Warning: best checkpoint not found, using final model")
+    if args.save_model and last_loss is not None:
+        if args.enable_best_epoch_selection and best_epoch_tracker is not None:
+            if best_epoch_tracker.best_epoch is not None:
+                best_checkpoint_path = best_epoch_tracker.checkpoint_dir / f"epoch_{best_epoch_tracker.best_epoch+1:04d}.pth"
+                if best_checkpoint_path.exists():
+                    print(
+                        f"Loading best model from epoch {best_epoch_tracker.best_epoch+1} "
+                        f"(MMD: {best_epoch_tracker.best_metric_value:.6f})"
+                    )
+                    checkpoint_data = th.load(best_checkpoint_path, map_location=device)
+                    model.load_state_dict(checkpoint_data["model"])
                 else:
-                    print("Warning: no validation metrics recorded, using final model")
-            ckpt_model = {
-                "epoch": epoch,
-                "batches_done": (epoch + 1) * len(dataloader) - 1,
-                "model": model.state_dict(),
-                "optimizer_generator": optimizer.state_dict(),
-                "loss": last_loss,
-                "args": vars(args),
-                "model_config": {
-                    "layers_per_block": args.layers_per_block,
-                    "num_timesteps": args.num_timesteps,
-                    "noise_schedule": args.noise_schedule,
-                },
-            }
+                    print("Warning: best checkpoint not found, using final model")
+            else:
+                print("Warning: no validation metrics recorded, using final model")
 
-            th.save(ckpt_model, args.checkpoint_path)
-            if args.track:
-                artifact_model = wandb.Artifact(f"{args.problem_id}_{args.algo}_model", type="model")
-                artifact_model.add_file(args.checkpoint_path, name="model.pth")
-                wandb.log_artifact(artifact_model, aliases=[f"seed_{args.seed}"])
+        ckpt_model = {
+            "epoch": epoch,
+            "batches_done": (epoch + 1) * len(dataloader) - 1,
+            "model": model.state_dict(),
+            "optimizer_generator": optimizer.state_dict(),
+            "loss": last_loss,
+            "args": vars(args),
+            "model_config": {
+                "layers_per_block": args.layers_per_block,
+                "num_timesteps": args.num_timesteps,
+                "noise_schedule": args.noise_schedule,
+            },
+        }
+        th.save(ckpt_model, args.checkpoint_path)
+        if args.track:
+            artifact_model = wandb.Artifact(f"{args.problem_id}_{args.algo}_model", type="model")
+            artifact_model.add_file(args.checkpoint_path, name="model.pth")
+            wandb.log_artifact(artifact_model, aliases=[f"seed_{args.seed}"])
 
     if args.track:
         wandb.finish()

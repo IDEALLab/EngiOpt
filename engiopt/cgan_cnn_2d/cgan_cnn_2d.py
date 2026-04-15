@@ -82,8 +82,10 @@ class Args:
     """Batch size used for validation metric computation."""
     validation_sigma: float = 1.0
     """Bandwidth parameter used for MMD calculation."""
-    validation_interval_epochs: int = 5
+    validation_interval_epochs: int = 10
     """How often to compute validation metrics (epochs)."""
+    early_stopping_patience: int = 25
+    """Stop training if no validation improvement is seen after this many validation checks."""
 
 
 class Generator(nn.Module):
@@ -312,6 +314,8 @@ if __name__ == "__main__":
     validation_conditions_tensor = None
     validation_sampled_conditions = None
     validation_sampled_designs_np = None
+    stop_training = False
+    validation_checks_without_improvement = 0
     if args.enable_best_epoch_selection:
         (
             validation_conditions_tensor,
@@ -490,6 +494,16 @@ if __name__ == "__main__":
             generator.train()
 
             is_best = best_epoch_tracker.update(epoch, validation_metric_value)
+            if args.early_stopping_patience > 0:
+                if is_best:
+                    validation_checks_without_improvement = 0
+                else:
+                    validation_checks_without_improvement += 1
+                    if validation_checks_without_improvement >= args.early_stopping_patience:
+                        print(
+                            f"Early stopping after {args.early_stopping_patience} validation checks without improvement"
+                        )
+                        stop_training = True
             if args.track:
                 wandb.log(
                     {
@@ -506,6 +520,8 @@ if __name__ == "__main__":
                 f"(mmd={metrics_dict['mmd']:.6f}, fog={metrics_dict['fog']:.6f}) "
                 f"{'[BEST]' if is_best else ''}"
             )
+            if stop_training:
+                break
 
         should_save_periodic = (
             args.checkpoint_interval_epochs > 0
@@ -541,7 +557,6 @@ if __name__ == "__main__":
 
         if (
             args.enable_best_epoch_selection
-            and args.checkpoint_interval_epochs == 0
             and (epoch + 1) % args.validation_interval_epochs == 0
             and last_g_loss is not None
             and last_d_loss is not None
@@ -571,52 +586,59 @@ if __name__ == "__main__":
                 validation_disc_path,
             )
 
-        if args.save_model and epoch == args.n_epochs - 1 and last_g_loss is not None and last_d_loss is not None:
-            # Load best models before final save
-            if args.enable_best_epoch_selection and best_epoch_tracker is not None:
-                if best_epoch_tracker.best_epoch is not None:
-                    best_gen_path = best_epoch_tracker.checkpoint_dir / f"generator_epoch_{best_epoch_tracker.best_epoch+1:04d}.pth"
-                    best_disc_path = best_epoch_tracker.checkpoint_dir / f"discriminator_epoch_{best_epoch_tracker.best_epoch+1:04d}.pth"
-                    if best_gen_path.exists() and best_disc_path.exists():
-                        print(
-                            f"Loading best models from epoch {best_epoch_tracker.best_epoch+1} "
-                            f"(MMD: {best_epoch_tracker.best_metric_value:.6f})"
-                        )
-                        gen_checkpoint = th.load(best_gen_path, map_location=device)
-                        disc_checkpoint = th.load(best_disc_path, map_location=device)
-                        generator.load_state_dict(gen_checkpoint["generator"])
-                        discriminator.load_state_dict(disc_checkpoint["discriminator"])
-                    else:
-                        print("Warning: best checkpoint not found, using final models")
+    if args.save_model and last_g_loss is not None and last_d_loss is not None:
+        if args.enable_best_epoch_selection and best_epoch_tracker is not None:
+            if best_epoch_tracker.best_epoch is not None:
+                best_gen_path = best_epoch_tracker.checkpoint_dir / f"generator_epoch_{best_epoch_tracker.best_epoch+1:04d}.pth"
+                best_disc_path = best_epoch_tracker.checkpoint_dir / f"discriminator_epoch_{best_epoch_tracker.best_epoch+1:04d}.pth"
+                if best_gen_path.exists() and best_disc_path.exists():
+                    print(
+                        f"Loading best models from epoch {best_epoch_tracker.best_epoch+1} "
+                        f"(MMD: {best_epoch_tracker.best_metric_value:.6f})"
+                    )
+                    gen_checkpoint = th.load(best_gen_path, map_location=device)
+                    disc_checkpoint = th.load(best_disc_path, map_location=device)
+                    generator.load_state_dict(gen_checkpoint["generator"])
+                    discriminator.load_state_dict(disc_checkpoint["discriminator"])
                 else:
-                    print("Warning: no validation metrics recorded, using final models")
-            ckpt_gen = {
-                "epoch": epoch,
-                "batches_done": (epoch + 1) * len(dataloader) - 1,
-                "generator": generator.state_dict(),
-                "optimizer_generator": optimizer_generator.state_dict(),
-                "loss": last_g_loss,
-                "args": vars(args),
-            }
-            ckpt_disc = {
-                "epoch": epoch,
-                "batches_done": (epoch + 1) * len(dataloader) - 1,
-                "discriminator": discriminator.state_dict(),
-                "optimizer_discriminator": optimizer_discriminator.state_dict(),
-                "loss": last_d_loss,
-                "args": vars(args),
-            }
+                    print("Warning: best checkpoint not found, using final models")
+            else:
+                print("Warning: no validation metrics recorded, using final models")
 
-            th.save(ckpt_gen, args.generator_checkpoint_path)
-            th.save(ckpt_disc, args.discriminator_checkpoint_path)
-            if args.track:
-                artifact_gen = wandb.Artifact(f"{args.problem_id}_{args.algo}_generator", type="model")
-                artifact_gen.add_file(args.generator_checkpoint_path, name="generator.pth")
-                artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
-                artifact_disc.add_file(args.discriminator_checkpoint_path, name="discriminator.pth")
+        ckpt_gen = {
+            "epoch": epoch,
+            "batches_done": (epoch + 1) * len(dataloader) - 1,
+            "generator": generator.state_dict(),
+            "optimizer_generator": optimizer_generator.state_dict(),
+            "loss": last_g_loss,
+            "args": vars(args),
+        }
+        ckpt_disc = {
+            "epoch": epoch,
+            "batches_done": (epoch + 1) * len(dataloader) - 1,
+            "discriminator": discriminator.state_dict(),
+            "optimizer_discriminator": optimizer_discriminator.state_dict(),
+            "loss": last_d_loss,
+            "args": vars(args),
+        }
 
-                wandb.log_artifact(artifact_gen, aliases=[f"seed_{args.seed}"])
-                wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
+        th.save(ckpt_gen, args.generator_checkpoint_path)
+        th.save(ckpt_disc, args.discriminator_checkpoint_path)
+
+        # Also save explicit best-model files for later validation and easier loading.
+        best_output_gen = Path(args.checkpoint_dir) / "best_generator.pth"
+        best_output_disc = Path(args.checkpoint_dir) / "best_discriminator.pth"
+        th.save(ckpt_gen, best_output_gen)
+        th.save(ckpt_disc, best_output_disc)
+
+        if args.track:
+            artifact_gen = wandb.Artifact(f"{args.problem_id}_{args.algo}_generator", type="model")
+            artifact_gen.add_file(args.generator_checkpoint_path, name="generator.pth")
+            artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
+            artifact_disc.add_file(args.discriminator_checkpoint_path, name="discriminator.pth")
+
+            wandb.log_artifact(artifact_gen, aliases=[f"seed_{args.seed}"])
+            wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
 
     if args.track:
         wandb.finish()

@@ -97,8 +97,10 @@ class Args:
     """Batch size used for validation metric computation."""
     validation_sigma: float = 1.0
     """Bandwidth parameter used for MMD calculation."""
-    validation_interval_epochs: int = 5
+    validation_interval_epochs: int = 10
     """How often to compute validation metrics (epochs)."""
+    early_stopping_patience: int = 25
+    """Stop training if no validation improvement is seen after this many validation checks. Set to 0 to disable."""
     enable_best_epoch_selection: bool = True
     """Enable tracking best epoch based on validation metrics."""
 
@@ -244,6 +246,7 @@ if __name__ == "__main__":
     last_batch = 0
     batches_processed = 0
     stop_training = False
+    validation_checks_without_improvement = 0
 
     run_start_time = time.time()
     for epoch in tqdm.trange(args.n_epochs):
@@ -375,6 +378,16 @@ if __name__ == "__main__":
             model.train()
 
             is_best = best_epoch_tracker.update(epoch, validation_metric_value)
+            if args.early_stopping_patience > 0:
+                if is_best:
+                    validation_checks_without_improvement = 0
+                else:
+                    validation_checks_without_improvement += 1
+                    if validation_checks_without_improvement >= args.early_stopping_patience:
+                        print(
+                            f"Early stopping after {args.early_stopping_patience} validation checks without improvement"
+                        )
+                        stop_training = True
             if args.track:
                 wandb.log(
                     {
@@ -391,6 +404,8 @@ if __name__ == "__main__":
                 f"(mmd={metrics_dict['mmd']:.6f}, fog={metrics_dict['fog']:.6f}) "
                 f"{'[BEST]' if is_best else ''}"
             )
+            if stop_training:
+                break
 
         should_save_periodic = (
             args.checkpoint_interval_epochs > 0
@@ -425,7 +440,6 @@ if __name__ == "__main__":
 
         if (
             args.enable_best_epoch_selection
-            and args.checkpoint_interval_epochs == 0
             and (epoch + 1) % args.validation_interval_epochs == 0
             and last_loss is not None
         ):
