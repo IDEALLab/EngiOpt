@@ -81,8 +81,6 @@ class Args:
     """Diffusion schedule ('linear', 'cosine', 'exp')"""
     enable_best_epoch_selection: bool = True
     """Enable tracking best epoch based on validation metrics."""
-    best_validation_metric: str = "mmd"
-    """Metric used for best-epoch selection: mmd, iog, fog, viol."""
     validation_batch_size: int = 50
     """Batch size for validation metric computation."""
     validation_sigma: float = 1.0
@@ -353,7 +351,7 @@ if __name__ == "__main__":
         
         best_epoch_tracker = BestEpochTracker(
             checkpoint_dir=args.checkpoint_dir,
-            metric_name=args.best_validation_metric,
+            metric_name="mmd",
             maximize=False,
         )
 
@@ -517,14 +515,13 @@ if __name__ == "__main__":
                 )
                 gen_designs_np = np.clip(gen_designs_np, 0.0, 1.0)
 
-                metrics_dict = metrics.metrics(
-                    problem,
-                    gen_designs_np,
-                    validation_sampled_designs_np,
-                    validation_sampled_conditions,
-                    sigma=args.validation_sigma,
+                validation_metric_value = float(
+                    metrics.mmd(
+                        gen_designs_np,
+                        validation_sampled_designs_np,
+                        sigma=args.validation_sigma,
+                    )
                 )
-                validation_metric_value = float(metrics_dict[args.best_validation_metric])
             model.train()
 
             is_best = best_epoch_tracker.update(epoch, validation_metric_value)
@@ -541,17 +538,13 @@ if __name__ == "__main__":
             if args.track:
                 wandb.log(
                     {
-                        "validation/mmd": metrics_dict["mmd"],
-                        "validation/iog": metrics_dict["iog"],
-                        "validation/fog": metrics_dict["fog"],
-                        "validation/viol": metrics_dict["viol"],
+                        "validation/mmd": validation_metric_value,
                         "validation/is_best": is_best,
-                        f"validation/best_{args.best_validation_metric}": validation_metric_value,
+                        "validation/best_mmd": validation_metric_value,
                     }
                 )
             print(
-                f"Epoch {epoch+1} validation: {args.best_validation_metric}={validation_metric_value:.6f} "
-                f"(mmd={metrics_dict['mmd']:.6f}, fog={metrics_dict['fog']:.6f}) "
+                f"Epoch {epoch+1} validation: mmd={validation_metric_value:.6f} "
                 f"{'[BEST]' if is_best else ''}"
             )
             if stop_training:

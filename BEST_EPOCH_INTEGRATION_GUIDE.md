@@ -7,11 +7,6 @@ The current implementation does not stop training early. It keeps training for t
 ## What is supported now
 
 - `--enable-best-epoch-selection true`
-- `--best-validation-metric` with:
-  - `mmd`
-  - `iog`
-  - `fog`
-  - `viol`
 - `--validation-batch-size` to control validation sample count
 - `--validation-sigma` to control MMD bandwidth
 - `--validation-interval-epochs` to control validation frequency
@@ -21,19 +16,18 @@ The current implementation does not stop training early. It keeps training for t
 
 1. During initialization, the training script samples a fixed validation batch from the dataset test split.
 2. Every `validation_interval_epochs`, it generates designs for those sampled conditions.
-3. It computes all available validation metrics via `engiopt.metrics.metrics(...)`.
-4. It updates `BestEpochTracker` for the chosen `best_validation_metric`.
+3. It computes the validation metrics via `engiopt.metrics.metrics(...)`.
+4. It updates `BestEpochTracker` using the MMD value only.
 5. If `--save-model` is used, the script loads the best validation checkpoint before saving the final model.
 
 ## Key differences from the old guide
 
-- The code now tracks more metrics than just `mmd`.
 - The validation step computes:
   - `mmd`
   - `iog`
   - `fog`
   - `viol`
-- `best_validation_metric` chooses which one is used to select the best epoch.
+- Best-epoch selection uses `mmd` only.
 - Checkpoints are saved on validation epochs when best-epoch selection is enabled, even if `checkpoint_interval_epochs == 0`.
 
 ## Example Args to use in the script
@@ -43,7 +37,6 @@ The current implementation does not stop training early. It keeps training for t
 class Args:
     # existing args...
     enable_best_epoch_selection: bool = True
-    best_validation_metric: str = "mmd"
     validation_batch_size: int = 50
     validation_sigma: float = 1.0
     validation_interval_epochs: int = 5
@@ -81,6 +74,7 @@ if (
 ```
 
 The training script then logs the full metric set and whether the epoch was best.
+The training script then logs the validation metrics and whether the epoch was best.
 
 ## Final model save behavior
 
@@ -97,18 +91,19 @@ If no validation checkpoints were recorded, it falls back to the final trained m
 ### flow_matching_2d_cond
 
 - Validation uses sampled test-set conditions and optimal designs.
-- Best-epoch selection works with `mmd`, `iog`, `fog`, and `viol`.
+- Best-epoch selection uses `mmd` only.
 - Best checkpoint is reloaded before final save.
 
 ### diffusion_2d_cond
 
 - Validation uses the diffusion model sampler and test-set conditions.
-- It supports all current metrics and best-epoch selection.
+- It computes all metrics for reporting, but best-epoch selection uses `mmd` only.
 - The model will auto-select CUDA if available, even when `--device` is not explicitly passed.
 
 ### cgan_cnn_2d
 
 - Validation uses the conditional generator and sampled test-set conditions.
+- Best-epoch selection uses `mmd` only.
 - The best model loader restores both generator and discriminator checkpoints.
 
 ### gan_2d
@@ -156,8 +151,9 @@ If you need it, add a separate patience counter around the validation update log
 ## Summary
 
 This guide now matches the current code:
-- multiple validation metrics are supported
-- the best epoch is selected by the chosen metric
+- validation computes multiple metrics for reporting
+- best-epoch selection is based on MMD only
 - the checkpoint save/load flow is handled automatically
 - training still runs for the full configured epoch budget
+
 
