@@ -124,7 +124,7 @@ class Args:
     """number of vectors in the CVQVAE codebook"""
     cond_feature_map_dim: int = 4
     """feature map dimension for the CVQVAE encoder output"""
-    batch_size_cvqvae: int = 16
+    batch_size_cvqvae: int = 32
     """size of the batches for CVQVAE"""
     n_epochs_cvqvae: int = 1000
     """number of epochs of CVQVAE training"""
@@ -134,7 +134,7 @@ class Args:
     # Algorithm-specific: Stage 1 (VQVAE)
     n_epochs_vqvae: int = 100
     """number of epochs of training"""
-    batch_size_vqvae: int = 16
+    batch_size_vqvae: int = 32
     """size of the batches for Stage 1"""
     lr_vqvae: float = 2e-4
     """learning rate for Stage 1"""
@@ -193,8 +193,8 @@ class Args:
     lv_recon_tol: float = float("inf")
     """relative tolerance to best validation recon (default: inf = no constraint)"""
     # LV constraint parameters (uses Normalized MSE = MSE / Var(data) for problem-independence)
-    lv_nmae_threshold: float = 0.2
-    """NMAE ceiling. Training aims to stay at or below this threshold (default: 0.2)"""
+    lv_nmse_threshold: float = 0.05
+    """NMSE ceiling. Training aims to stay at or below this threshold (default: 0.05)"""
     lv_constraint_mode: str = "gradient_balanced" #  "one_sided"
     """Constraint mode: 'one_sided' (rec or vol), 'gated' (rec + vol), 'gradient_balanced' (auto-scaled)."""
     lv_ema_beta: float = 0.9
@@ -221,7 +221,7 @@ class Args:
     """number of epochs with no improvement after which training will be stopped"""
     early_stopping_delta: float = 1e-3
     """minimum change in the monitored quantity to qualify as an improvement"""
-    batch_size_transformer: int = 16
+    batch_size_transformer: int = 32
     """size of the batches for Stage 2"""
     lr_transformer: float = 6e-4
     """learning rate for Stage 2"""
@@ -982,7 +982,8 @@ if __name__ == "__main__":
     condition_tensors = [training_ds[key][:] for key in conditions]
 
     # Calculate train data variance
-    data_std = th.sqrt(set_data_variance(training_ds["optimal_upsampled"][:].unsqueeze(1)))
+    data_var = set_data_variance(training_ds["optimal_upsampled"][:].unsqueeze(1))
+    data_std = th.sqrt(data_var)
 
     # Move to device only here
     th_training_ds = th.utils.data.TensorDataset(
@@ -1047,10 +1048,10 @@ if __name__ == "__main__":
         shuffle=False,
     )
 
-    # For logging a fixed set of designs in Stage 1
-    n_logged_designs = 25
-    fixed_indices = random.sample(range(len_dataset), n_logged_designs)
-    log_subset = th.utils.data.Subset(th_training_ds, fixed_indices)
+    # For logging a fixed set of 16 designs in Stage 1 (Grid of 4x8 for pairs)
+    n_logged_designs = 16
+    fixed_indices = random.sample(range(len(th_val_ds)), n_logged_designs)
+    log_subset = th.utils.data.Subset(th_val_ds, fixed_indices)
     log_dataloader = th.utils.data.DataLoader(
         log_subset,
         batch_size=n_logged_designs,
@@ -1076,6 +1077,7 @@ if __name__ == "__main__":
         wandb.define_metric("epoch_cvqvae", step_metric="cvqvae_step")
         wandb.define_metric("vqvae_step", summary="max")
         wandb.define_metric("vqvae_rec_loss", step_metric="vqvae_step")
+        wandb.define_metric("vqvae_val_mse", step_metric="vqvae_step")
         wandb.define_metric("vqvae_val_mae", step_metric="vqvae_step")
         wandb.define_metric("vqvae_q_loss", step_metric="vqvae_step")
         wandb.define_metric("vqvae_loss", step_metric="vqvae_step")
@@ -1097,6 +1099,7 @@ if __name__ == "__main__":
         wandb.define_metric("vqvae_token_usage_frac", step_metric="vqvae_step")
         wandb.define_metric("transformer_logits_entropy", step_metric="transformer_step")
         wandb.define_metric("lv_active_dims", step_metric="vqvae_step")
+        wandb.define_metric("lv_nmse", step_metric="vqvae_step")
         wandb.define_metric("lv_nmae", step_metric="vqvae_step")
         wandb.define_metric("lv_vol_active", step_metric="vqvae_step")
         wandb.define_metric("next_prune_epoch", step_metric="vqvae_step")
@@ -1209,7 +1212,7 @@ if __name__ == "__main__":
         n_designs: int,
         active_mask: th.Tensor,
         frozen_mean: th.Tensor
-    ) -> list[th.Tensor]:
+    ) -> tuple[th.Tensor, th.Tensor]:
         """Sample reconstructions from trained Stage 1 (VQVAE)."""
         vqvae.eval()
 
@@ -1224,7 +1227,7 @@ if __name__ == "__main__":
         )
 
         vqvae.train()
-        return reconstructions
+        return designs, reconstructions
 
     @th.no_grad()
     def sample_designs_transformer(n_designs: int) -> tuple[th.Tensor, th.Tensor]:
@@ -1327,7 +1330,7 @@ if __name__ == "__main__":
     rec_ema: float = 0.0
     vol_ema: float = 0.0
     next_prune_epoch = args.lv_pruning_epoch
-    best_val_mae = float("inf")
+    best_val_mse = float("inf")
     active_mask = th.ones(args.latent_dim, dtype=th.bool, device=device)
     below_counts = th.zeros(args.latent_dim, dtype=th.long, device=device)
     frozen_mean = th.zeros(args.latent_dim, dtype=th.float32, device=device)
@@ -1355,8 +1358,11 @@ if __name__ == "__main__":
                     eta=float(args.lv_eta),
                 )
 
-            rec_loss = th.abs(designs - decoded_images).mean()
-            nmae = rec_loss / data_std
+            rec_loss = f.mse_loss(designs, decoded_images)
+            nmse = rec_loss / data_var
+
+            mae = th.abs(designs - decoded_images).mean()
+            nmae = mae / data_std
 
             # Update EMAs for gradient balancing (always update for logging)
             rec_ema = args.lv_ema_beta * rec_ema + (1 - args.lv_ema_beta) * rec_loss.item()
@@ -1366,7 +1372,7 @@ if __name__ == "__main__":
             # Apply constraint mode
             if args.lv_constraint_mode == "one_sided":
                 # Mutually exclusive: only one loss active at a time
-                if nmae > args.lv_nmae_threshold:
+                if nmse > args.lv_nmse_threshold:
                     vol_active = False
                     combined_loss = args.rec_loss_factor * rec_loss
                 else:
@@ -1375,7 +1381,7 @@ if __name__ == "__main__":
 
             elif args.lv_constraint_mode == "gated":
                 # Additive: rec always, vol only when below threshold
-                if nmae > args.lv_nmae_threshold:
+                if nmse > args.lv_nmse_threshold:
                     vol_active = False
                     combined_loss = args.rec_loss_factor * rec_loss
                 else:
@@ -1384,7 +1390,7 @@ if __name__ == "__main__":
 
             elif args.lv_constraint_mode == "gradient_balanced":
                 # Additive with auto-scaling based on loss magnitudes
-                if nmae > args.lv_nmae_threshold:
+                if nmse > args.lv_nmse_threshold:
                     vol_active = False
                     combined_loss = args.rec_loss_factor * rec_loss
                 else:
@@ -1430,34 +1436,42 @@ if __name__ == "__main__":
                     "vqvae_token_usage_frac": tstats["token_usage_frac"],
                     "lv_active_dims": int(active_mask.sum().item()),
                     "lv_vol_active": int(vol_active),
+                    "lv_nmse": nmse.item(),
                     "lv_nmae": nmae.item(),
                     "next_prune_epoch": next_prune_epoch
                 }
 
-                # This saves a grid image of 25 generated designs every sample_interval
+                # This saves a grid image of generated designs every sample_interval
                 if (batches_done + 1) % args.sample_interval_vqvae == 0:
-                    # Extract 25 designs
-                    designs = resize_to(
-                        data=sample_designs_vqvae(
-                            n_designs=n_logged_designs,
-                            active_mask=active_mask,
-                            frozen_mean=frozen_mean
-                        ),
-                        h=design_shape[0],
-                        w=design_shape[1]
+                    # Extract 16 original designs and their reconstructions
+                    origs, recons = sample_designs_vqvae(
+                        n_designs=n_logged_designs,
+                        active_mask=active_mask,
+                        frozen_mean=frozen_mean
                     )
-                    fig, axes = plt.subplots(5, 5, figsize=(12, 12))
+                    origs = resize_to(data=origs, h=design_shape[0], w=design_shape[1])
+                    recons = resize_to(data=recons, h=design_shape[0], w=design_shape[1])
+
+                    # 4 rows, 8 columns (16 pairs)
+                    fig, axes = plt.subplots(4, 4, figsize=(16, 16))
 
                     # Flatten axes for easy indexing
                     axes = axes.flatten()
 
-                    # Plot each tensor as a scatter plot
-                    for j, tensor in enumerate(designs):
-                        img = tensor.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
-                        axes[j].imshow(img)  # Scatter plot
-                        axes[j].title.set_text(f"Reconstruction {j + 1}")  # Set title
-                        axes[j].set_xticks([])  # Hide x ticks
-                        axes[j].set_yticks([])  # Hide y ticks
+                    # Plot GT and Recon side-by-side
+                    for j in range(n_logged_designs):
+                        img_gt = origs[j].cpu().numpy().reshape(design_shape[0], design_shape[1])
+                        img_rec = recons[j].cpu().numpy().reshape(design_shape[0], design_shape[1])
+
+                        # Create a 2-pixel blank separator so they don't bleed into each other
+                        separator = np.full((design_shape[0], 2), np.nan)
+
+                        # Fuse them horizontally: [GT | Sep | Rec]
+                        paired_img = np.concatenate((img_gt, separator, img_rec), axis=1)
+
+                        axes[j].imshow(paired_img)
+                        axes[j].set_title(f"Pair {j + 1} (GT | Rec)")
+                        axes[j].axis("off")
 
                     plt.tight_layout()
                     log_vq["designs_vqvae"] = wandb.Image(fig)
@@ -1488,7 +1502,7 @@ if __name__ == "__main__":
                             "zstd_ema": None if zstd is None else zstd.detach().cpu(),
                             "below_counts": below_counts.detach().cpu(),
                             "next_prune_epoch": int(next_prune_epoch),
-                            "best_val_mae": float(best_val_mae),
+                            "best_val_mse": float(best_val_mse),
                         },
                     }
 
@@ -1497,16 +1511,16 @@ if __name__ == "__main__":
                     artifact_lv_vq.add_file("lv_vqvae.pth")
                     wandb.log_artifact(artifact_lv_vq, aliases=[f"seed_{args.seed}"])
 
-        # End-of-epoch: held-out val MAE
+        # End-of-epoch: held-out val MSE
         vqvae.eval()
-        maes = []
+        mses = []
         with th.no_grad():
             for val_data in dataloader_val:
                 val_designs = val_data[0].to(dtype=th.float32, device=device)
                 val_recon, _, _ = vqvae(val_designs, active_mask=active_mask, frozen_mean=frozen_mean)
-                maes.append(th.abs(val_designs - val_recon).mean().item())
-        val_mae = sum(maes) / max(1, len(maes))
-        best_val_mae = min(best_val_mae, val_mae)
+                mses.append(f.mse_loss(val_designs, val_recon).mean().item())
+        val_mse = sum(mses) / max(1, len(mses))
+        best_val_mse = min(best_val_mse, val_mse)
 
         if args.track:
             batches_done = epoch * len(dataloader_vqvae) + i
@@ -1514,7 +1528,7 @@ if __name__ == "__main__":
                 {
                     "vqvae_step": batches_done,
                     "epoch_vqvae": epoch,
-                    "vqvae_val_mae": val_mae,
+                    "vqvae_val_mse": val_mse,
                 }
             )
 
@@ -1534,8 +1548,8 @@ if __name__ == "__main__":
             below_counts,
             epoch,
             next_prune_epoch,
-            best_val_mae,
-            val_mae
+            best_val_mse,
+            val_mse
         )
 
         vqvae.train()
@@ -1598,14 +1612,15 @@ if __name__ == "__main__":
                         f"[Epoch {epoch}/{args.n_epochs_transformer}] [Batch {i}/{len(dataloader_transformer)}] [Transformer loss: {loss.item()}]"
                     )
 
-                    # This saves a grid image of 25 generated designs every sample_interval
+                    # This saves a grid image of 16 generated designs every sample_interval
                     if batches_done % args.sample_interval_transformer == 0:
-                        # Extract 25 designs
+                        # Extract 16 designs
                         desired_conds, designs = sample_designs_transformer(n_designs=n_logged_designs)
                         if args.normalize_conditions:
                             desired_conds = (desired_conds.cpu() * std) + mean
                         designs = resize_to(data=designs, h=design_shape[0], w=design_shape[1])
-                        fig, axes = plt.subplots(5, 5, figsize=(12, 12))
+                        # Stage 2 generates 16 samples from linspace conditions
+                        fig, axes = plt.subplots(4, 4, figsize=(12, 12))
 
                         # Flatten axes for easy indexing
                         axes = axes.flatten()
