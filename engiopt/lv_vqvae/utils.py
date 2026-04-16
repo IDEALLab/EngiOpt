@@ -176,42 +176,41 @@ class Codebook(nn.Module):
         z = rearrange(z, "b c h w -> b h w c").contiguous()
         z_flattened = z.view(-1, self.embed_dim)
 
-        # Normalize inputs and weights to unit sphere immediately.
-        # This prevents collapse by forcing the model to learn angular features.
-        z_flattened = f.normalize(z_flattened, dim=1)
-        z = z_flattened.view(z.shape)  # Update reference for loss calc
+        # Capture original magnitude BEFORE normalizing
+        orig_norm = th.norm(z_flattened, p=2, dim=1, keepdim=True).clamp_min(1e-12)
+
+        # Normalize weights to unit sphere
         self.embedding.weight.data = f.normalize(self.embedding.weight.data, dim=1)
 
-        # clculate the distance
+        # Calculate distance using normalized versions of z
         if self.distance == "l2":
-            # negative squared distance (so argmax == nearest)
+            normed_z = z_flattened / orig_norm
             d = (
-                -th.sum(z_flattened.detach() ** 2, dim=1, keepdim=True)
+                -th.sum(normed_z.detach() ** 2, dim=1, keepdim=True)
                 - th.sum(self.embedding.weight**2, dim=1)
-                + 2 * th.einsum("bd,dn->bn", z_flattened.detach(), rearrange(self.embedding.weight, "n d-> d n"))
+                + 2 * th.einsum("bd,dn->bn", normed_z.detach(), rearrange(self.embedding.weight, "n d-> d n"))
             )
         elif self.distance == "cos":
-            # cosine similarity (argmax == nearest)
-            normed_z_flattened = f.normalize(z_flattened, dim=1).detach()
-            normed_codebook = f.normalize(self.embedding.weight, dim=1)
-            d = th.einsum("bd,dn->bn", normed_z_flattened, rearrange(normed_codebook, "n d -> d n"))
-
-        #  T0D0: Prevent selecting pruned/inactive codebook entries.
-        #  This is required for consistency with downstream transformer masking of inactive tokens.
+            normed_z_flattened = (z_flattened / orig_norm).detach()
+            d = th.einsum("bd,dn->bn", normed_z_flattened, rearrange(self.embedding.weight, "n d -> d n"))
 
         # encoding
         sort_distance, indices = d.sort(dim=1)
-        # look up the closest point for the indices
         encoding_indices = indices[:, -1]
         encodings = th.zeros(encoding_indices.unsqueeze(1).shape[0], self.num_embed, device=z.device)
         encodings.scatter_(1, encoding_indices.unsqueeze(1), 1)
 
-        # quantize and unflatten
-        z_q = th.matmul(encodings, self.embedding.weight).view(z.shape)
-        # compute loss for embedding
-        loss = self.beta * th.mean((z_q.detach() - z) ** 2) + th.mean((z_q - z.detach()) ** 2)
-        # preserve gradients
-        z_q = z + (z_q - z).detach()
+        # quantize (vector sits on unit sphere)
+        z_q_sphere = th.matmul(encodings, self.embedding.weight)
+
+        # RESTORE MAGNITUDE
+        z_q_restored = (z_q_sphere * orig_norm).view(z.shape)
+
+        # compute loss for embedding using restored magnitude against ORIGINAL z
+        loss = self.beta * th.mean((z_q_restored.detach() - z) ** 2) + th.mean((z_q_restored - z.detach()) ** 2)
+
+        # preserve gradients via straight-through estimator
+        z_q = z + (z_q_restored - z).detach()
         # reshape back to match original input shape
         z_q = rearrange(z_q, "b h w c -> b c h w").contiguous()
         # count
@@ -717,7 +716,7 @@ class TrueSNUpsample(nn.Module):
 class TrueSNResidualBlock(nn.Module):
     """1-Lipschitz Residual Block.
 
-    Uses GroupSort and scales residual branch by 1/sqrt(2).
+    Uses GroupSort and scales residual branch by 1/2.
     """
     def __init__(self, in_channels: int, out_channels: int, group_size: int = 2, n_power_iterations: int = 1, dilation: int = 1):
         super().__init__()
@@ -749,7 +748,7 @@ class TrueSNResidualBlock(nn.Module):
 
     def forward(self, x: th.Tensor) -> th.Tensor:
         # Scale to maintain unit variance / Lipschitz bound
-        return (self.shortcut(x) + self.block(x)) / (2**0.5)
+        return (self.shortcut(x) + self.block(x)) / 2.0
 
 ###########################################
 ########## LV-VQVAE BLOCKS ABOVE ##########

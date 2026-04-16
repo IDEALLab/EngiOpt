@@ -504,7 +504,7 @@ class VQVAE(nn.Module):
             self.decoder = TrueSNCondDecoder(cond_latent_dim, cond_dim, cond_hidden_dim, cond_feature_map_dim).to(device=device)
 
             self.quant_conv = nn.Conv2d(cond_latent_dim, cond_latent_dim, kernel_size=1).to(device=device)
-            self.post_quant_conv = nn.Conv2d(cond_latent_dim, cond_latent_dim, kernel_size=1).to(device=device)
+            self.post_quant_conv = spectral_norm(nn.Conv2d(cond_latent_dim, cond_latent_dim, kernel_size=1), n_power_iterations=1).to(device=device)
         else:
             self.encoder = Encoder(
                 encoder_channels,
@@ -525,7 +525,7 @@ class VQVAE(nn.Module):
             ).to(device=device)
 
             self.quant_conv = nn.Conv2d(latent_dim, latent_dim, kernel_size=1).to(device=device)
-            self.post_quant_conv = nn.Conv2d(latent_dim, latent_dim, kernel_size=1).to(device=device)
+            self.post_quant_conv = spectral_norm(nn.Conv2d(latent_dim, latent_dim, kernel_size=1), n_power_iterations=1).to(device=device)
 
         self.use_vq = use_vq
         if self.use_vq:
@@ -549,6 +549,7 @@ class VQVAE(nn.Module):
 
         if self.use_vq:
             quant, indices, q_loss, _, _ = self.codebook(quant_encoded)
+            quant = self.apply_pruning(quant, active_mask, frozen_mean)
         else:
             quant = quant_encoded
             indices = None
@@ -573,6 +574,7 @@ class VQVAE(nn.Module):
 
         if self.use_vq:
             z_q, indices, loss, min_encodings, perplexity = self.codebook(quant_encoded)
+            z_q = self.apply_pruning(z_q, active_mask, frozen_mean)
         else:
             z_q = quant_encoded
             indices = None
