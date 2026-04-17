@@ -1463,14 +1463,14 @@ if __name__ == "__main__":
                         img_gt = origs[j].cpu().numpy().reshape(design_shape[0], design_shape[1])
                         img_rec = recons[j].cpu().numpy().reshape(design_shape[0], design_shape[1])
 
-                        # Create a 2-pixel blank separator so they don't bleed into each other
-                        separator = np.full((design_shape[0], 2), np.nan)
+                        # Create a 2-pixel horizontal separator so they don't bleed into each other
+                        separator = np.full((2, design_shape[1]), np.nan)
 
-                        # Fuse them horizontally: [GT | Sep | Rec]
-                        paired_img = np.concatenate((img_gt, separator, img_rec), axis=1)
+                        # Fuse them vertically: GT on top, Rec on bottom
+                        paired_img = np.concatenate((img_gt, separator, img_rec), axis=0)
 
                         axes[j].imshow(paired_img)
-                        axes[j].set_title(f"Pair {j + 1} (GT | Rec)")
+                        axes[j].set_title(f"Pair {j + 1}\n(GT top, Rec bot)", fontsize=8)
                         axes[j].axis("off")
 
                     plt.tight_layout()
