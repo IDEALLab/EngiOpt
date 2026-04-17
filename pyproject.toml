@@ -194,6 +194,7 @@ order-by-type = false
 
 ###################################### FORMAT ########################################
 [tool.ruff.format]
+exclude = ["workshops/dcc26/**/*.ipynb"]
 # Like Black, use double quotes for strings.
 quote-style = "double"
 
@@ -279,6 +280,9 @@ module = [
     "seaborn",
     "matplotlib",
     "matplotlib.*",
+    "IPython",
+    "IPython.*",
+    "ipywidgets",
     "pandas",
     "cvxopt",
     "cvxopt.*",

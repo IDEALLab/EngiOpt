@@ -23,7 +23,7 @@ from torch.utils.data import DataLoader
 from torch.utils.data import TensorDataset
 
 try:
-    import ipywidgets as widgets  # type: ignore[import-untyped]
+    import ipywidgets as widgets
 except ImportError:
     widgets = None
 
@@ -139,9 +139,7 @@ def show_design_gallery(
         ax.imshow(d, cmap="gray_r", vmin=0, vmax=1)
         ax.axis("off")
         if scalar_keys:
-            cond_str = "\n".join(
-                f"{k}={float(train[k][int(idx)]):.2f}" for k in scalar_keys
-            )
+            cond_str = "\n".join(f"{k}={float(train[k][int(idx)]):.2f}" for k in scalar_keys)
             ax.set_title(cond_str, fontsize=8)
 
     for i in range(n, nrows * ncols):
@@ -202,7 +200,8 @@ def show_valid_vs_violated(
             n_valid = len(valid_violations)
             fig1.suptitle(
                 f"Valid config — {n_valid} violation(s)",
-                color="green" if n_valid == 0 else "red", fontsize=12,
+                color="green" if n_valid == 0 else "red",
+                fontsize=12,
             )
             plt.show()
             plt.close(fig1)
@@ -211,7 +210,8 @@ def show_valid_vs_violated(
             n_bad = len(violations)
             fig2.suptitle(
                 f"Bad config — {n_bad} violation(s)",
-                color="red" if n_bad > 0 else "green", fontsize=12,
+                color="red" if n_bad > 0 else "green",
+                fontsize=12,
             )
             plt.show()
             plt.close(fig2)
@@ -220,12 +220,12 @@ def show_valid_vs_violated(
         fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(10, 4))
         d = np.array(design)
         ax1.imshow(d, cmap=cmap, vmin=0, vmax=1)
-        ax1.set_title(f"Valid — {len(valid_violations)} violation(s)",
-                       color="green" if len(valid_violations) == 0 else "red")
+        ax1.set_title(
+            f"Valid — {len(valid_violations)} violation(s)", color="green" if len(valid_violations) == 0 else "red"
+        )
         ax1.axis("off")
         ax2.imshow(d, cmap=cmap, vmin=0, vmax=1)
-        ax2.set_title(f"Bad — {len(violations)} violation(s)",
-                       color="red" if len(violations) > 0 else "green")
+        ax2.set_title(f"Bad — {len(violations)} violation(s)", color="red" if len(violations) > 0 else "green")
         ax2.axis("off")
         fig.suptitle("Same design, different conditions", fontsize=13)
         plt.tight_layout()
@@ -304,10 +304,7 @@ def _render_filtered_gallery(
             ax = axes[i // ncols, i % ncols]
             ax.imshow(state.all_designs[idx], cmap="gray_r", vmin=0, vmax=1)
             ax.axis("off")
-            cond_str = "\n".join(
-                f"{key}={state.scalar_conds[key][idx]:.2f}"
-                for key in state.scalar_keys
-            )
+            cond_str = "\n".join(f"{key}={state.scalar_conds[key][idx]:.2f}" for key in state.scalar_keys)
             ax.set_title(cond_str, fontsize=8)
 
         for i in range(n_show, nrows * ncols):
@@ -392,10 +389,10 @@ class WorkshopGenerator(th.nn.Module):
         self.gen = cnn_generator
 
     def forward(self, z: th.Tensor, conds: th.Tensor) -> th.Tensor:
-        z_4d = z.unsqueeze(-1).unsqueeze(-1)      # (B, z_dim) -> (B, z_dim, 1, 1)
-        c_4d = conds.unsqueeze(-1).unsqueeze(-1)   # (B, n_c)  -> (B, n_c,  1, 1)
-        out = self.gen(z_4d, c_4d)                  # (B, 1, H, W)
-        return out.squeeze(1)                       # (B, H, W)
+        z_4d = z.unsqueeze(-1).unsqueeze(-1)  # (B, z_dim) -> (B, z_dim, 1, 1)
+        c_4d = conds.unsqueeze(-1).unsqueeze(-1)  # (B, n_c)  -> (B, n_c,  1, 1)
+        out = self.gen(z_4d, c_4d)  # (B, 1, H, W)
+        return out.squeeze(1)  # (B, H, W)
 
 
 @dataclass(slots=True)
@@ -548,7 +545,11 @@ def show_training_progression(
             axes[row, col].imshow(designs[col], cmap="gray_r", vmin=0, vmax=1)
             axes[row, col].axis("off")
         axes[row, 0].set_ylabel(
-            f"Epoch {epoch}", fontsize=11, rotation=0, labelpad=55, va="center",
+            f"Epoch {epoch}",
+            fontsize=11,
+            rotation=0,
+            labelpad=55,
+            va="center",
         )
 
     if baseline_designs is not None:
@@ -557,7 +558,11 @@ def show_training_progression(
             axes[row, col].imshow(baseline_designs[col], cmap="gray_r", vmin=0, vmax=1)
             axes[row, col].axis("off")
         axes[row, 0].set_ylabel(
-            "Ground\ntruth", fontsize=11, rotation=0, labelpad=55, va="center",
+            "Ground\ntruth",
+            fontsize=11,
+            rotation=0,
+            labelpad=55,
+            va="center",
         )
 
     fig.suptitle("How the generator learns over training", fontsize=14, y=1.02)
@@ -599,8 +604,11 @@ def show_gen_vs_baseline(
     if problem is not None:
         for i in range(n_show):
             # Scalar conditions only for title
-            scalars = {k: v for k, v in conditions_records[i].items()
-                       if not isinstance(v, (list, np.ndarray)) or np.asarray(v).size == 1}
+            scalars = {
+                k: v
+                for k, v in conditions_records[i].items()
+                if not isinstance(v, (list, np.ndarray)) or np.asarray(v).size == 1
+            }
             cond_str = "  |  ".join(f"{k}: {float(v):.3f}" for k, v in scalars.items())
 
             result_g = problem.render(gen_designs[i])
@@ -658,8 +666,7 @@ def show_objective_comparison(results) -> None:
     ax1.legend()
 
     colors = results["gen_feasible"].map({True: "#55A868", False: "#C44E52"})
-    ax2.scatter(results["base_obj"], results["gen_obj"], alpha=0.8, c=colors,
-                edgecolors="black", linewidths=0.5, s=60)
+    ax2.scatter(results["base_obj"], results["gen_obj"], alpha=0.8, c=colors, edgecolors="black", linewidths=0.5, s=60)
     lo = min(results["base_obj"].min(), results["gen_obj"].min()) * 0.9
     hi = max(results["base_obj"].max(), results["gen_obj"].max()) * 1.1
     ax2.plot([lo, hi], [lo, hi], "--", color="gray", linewidth=1, label="y = x")
@@ -679,21 +686,18 @@ def show_feasibility_bars(results) -> None:
     base_rate = results["base_feasible"].mean()
 
     fig, ax = plt.subplots(figsize=(5, 4))
-    bars = ax.bar(["Generated", "Baseline"], [gen_rate, base_rate],
-                  color=["#4C72B0", "#DD8452"], edgecolor="black")
+    bars = ax.bar(["Generated", "Baseline"], [gen_rate, base_rate], color=["#4C72B0", "#DD8452"], edgecolor="black")
     ax.set_ylim(0, 1.15)
     ax.set_ylabel("Feasible fraction")
     ax.set_title("Feasibility rate")
     for bar, val in zip(bars, [gen_rate, base_rate]):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.03,
-                f"{val:.0%}", ha="center", fontweight="bold")
+        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.03, f"{val:.0%}", ha="center", fontweight="bold")
     fig.tight_layout()
     plt.show()
     plt.close(fig)
 
 
-def show_design_comparison_grid(gen_designs, baseline_designs, results,
-                                n_show: int = 6, problem=None) -> None:
+def show_design_comparison_grid(gen_designs, baseline_designs, results, n_show: int = 6, problem=None) -> None:
     """Show generated vs baseline with feasibility annotations.
 
     Uses ``problem.render()`` if available, otherwise falls back to imshow.
@@ -709,8 +713,7 @@ def show_design_comparison_grid(gen_designs, baseline_designs, results,
             fig_g = result_g[0] if isinstance(result_g, tuple) else result_g
             if hasattr(fig_g, "savefig"):
                 color = "green" if results.iloc[i]["gen_feasible"] else "red"
-                fig_g.suptitle(f"Generated {i} — {feas}  (gap={gap:.1f})",
-                               fontsize=11, color=color, y=1.02)
+                fig_g.suptitle(f"Generated {i} — {feas}  (gap={gap:.1f})", fontsize=11, color=color, y=1.02)
                 plt.show()
                 plt.close(fig_g)
     else:
@@ -799,7 +802,8 @@ def show_residual_heatmaps(
     axes[2, 0].set_ylabel("|Residual|", fontsize=11, rotation=90, labelpad=10)
     fig.suptitle(
         "Pixel-level residuals: where do generated designs differ from baselines?",
-        fontsize=13, y=1.01,
+        fontsize=13,
+        y=1.01,
     )
     fig.tight_layout()
     plt.show()
@@ -835,16 +839,25 @@ def show_volfrac_analysis(results, volfrac_tol: float = 0.05) -> None:
 
     colors = results["gen_feasible"].map({True: "#55A868", False: "#C44E52"})
     ax1.scatter(
-        results["target_volfrac"], results["gen_volfrac"],
-        c=colors, edgecolors="black", linewidths=0.5, s=60, alpha=0.8,
+        results["target_volfrac"],
+        results["gen_volfrac"],
+        c=colors,
+        edgecolors="black",
+        linewidths=0.5,
+        s=60,
+        alpha=0.8,
     )
     lo = min(results["target_volfrac"].min(), results["gen_volfrac"].min()) - 0.05
     hi = max(results["target_volfrac"].max(), results["gen_volfrac"].max()) + 0.05
     xs = np.linspace(lo, hi, 100)
     ax1.plot(xs, xs, "--", color="gray", linewidth=1, label="Perfect match")
     ax1.fill_between(
-        xs, xs - volfrac_tol, xs + volfrac_tol,
-        alpha=0.12, color="green", label=f"Tolerance (\u00b1{volfrac_tol})",
+        xs,
+        xs - volfrac_tol,
+        xs + volfrac_tol,
+        alpha=0.12,
+        color="green",
+        label=f"Tolerance (\u00b1{volfrac_tol})",
     )
     ax1.set_xlabel("Target volume fraction")
     ax1.set_ylabel("Generated volume fraction")
@@ -885,9 +898,13 @@ def show_spatial_distribution_comparison(
     has_train = train_reference is not None
     n_img = 3 if has_train else 2
 
-    fig, axes = plt.subplots(1, n_img + 1, figsize=(4.2 * (n_img + 1), 4),
-                             gridspec_kw={"width_ratios": [1] * n_img + [1.3]},
-                             constrained_layout=True)
+    fig, axes = plt.subplots(
+        1,
+        n_img + 1,
+        figsize=(4.2 * (n_img + 1), 4),
+        gridspec_kw={"width_ratios": [1] * n_img + [1.3]},
+        constrained_layout=True,
+    )
 
     # ── Mean design images ───────────────────────────────────────────
     sets: list[tuple[str, np.ndarray, str]] = [
@@ -904,15 +921,13 @@ def show_spatial_distribution_comparison(
         im = ax.imshow(mean_img, cmap="gray_r", vmin=vmin, vmax=vmax)
         ax.set_title(f"Mean {label}\n(n={len(designs)})", fontsize=11)
         ax.axis("off")
-    fig.colorbar(im, ax=axes[:n_img].tolist(), shrink=0.75,
-                 label="Avg. material density", pad=0.04)
+    fig.colorbar(im, ax=axes[:n_img].tolist(), shrink=0.75, label="Avg. material density", pad=0.04)
 
     # ── Per-design volume fraction distributions ─────────────────────
     ax_vf = axes[n_img]
     for label, designs, color in sets:
         vfracs = designs.reshape(designs.shape[0], -1).mean(axis=1)
-        ax_vf.hist(vfracs, bins=25, alpha=0.5, density=True, label=label,
-                    color=color, edgecolor="white", linewidth=0.3)
+        ax_vf.hist(vfracs, bins=25, alpha=0.5, density=True, label=label, color=color, edgecolor="white", linewidth=0.3)
     ax_vf.set_xlabel("Volume fraction (per design)")
     ax_vf.set_ylabel("Density")
     ax_vf.set_title("Material-usage\ndistributions", fontsize=11)
@@ -920,7 +935,8 @@ def show_spatial_distribution_comparison(
 
     fig.suptitle(
         "Spatial distribution comparison \u2014 where does each set place material?",
-        fontsize=13, y=1.03,
+        fontsize=13,
+        y=1.03,
     )
     plt.show()
     plt.close(fig)
@@ -949,8 +965,14 @@ def show_mmd_comparison_bar(
     fig, ax = plt.subplots(figsize=(7, 4.5))
     bars = ax.bar(labels, values, color=colors, edgecolor="black", linewidth=0.5, width=0.55)
     for bar, v in zip(bars, values):
-        ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + max(abs(v) for v in values) * 0.02,
-                f"{v:.4f}", ha="center", fontsize=11, fontweight="bold")
+        ax.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height() + max(abs(v) for v in values) * 0.02,
+            f"{v:.4f}",
+            ha="center",
+            fontsize=11,
+            fontweight="bold",
+        )
     ax.set_ylabel("MMD (lower = more similar)")
     ax.set_title("MMD in context \u2014 where does the generator sit?", fontsize=13)
     ax.set_ylim(0, max(values) * 1.25)
@@ -973,7 +995,9 @@ def show_pairwise_distance_heatmap(
     dists = cdist(flat, flat, "euclidean")
 
     fig, (ax, ax_hist) = plt.subplots(
-        1, 2, figsize=(11, 5),
+        1,
+        2,
+        figsize=(11, 5),
         gridspec_kw={"width_ratios": [1.2, 1]},
     )
 
@@ -987,8 +1011,7 @@ def show_pairwise_distance_heatmap(
     triu_idx = np.triu_indices(len(designs), k=1)
     off_diag = dists[triu_idx]
     ax_hist.hist(off_diag, bins=25, edgecolor="white", color="#4C72B0", alpha=0.8)
-    ax_hist.axvline(off_diag.mean(), color="#C44E52", linewidth=2,
-                    linestyle="--", label=f"Mean = {off_diag.mean():.1f}")
+    ax_hist.axvline(off_diag.mean(), color="#C44E52", linewidth=2, linestyle="--", label=f"Mean = {off_diag.mean():.1f}")
     ax_hist.set_xlabel("Pairwise L2 distance")
     ax_hist.set_ylabel("Count")
     ax_hist.set_title("Distribution of pairwise distances", fontsize=11)
@@ -1019,14 +1042,32 @@ def show_embedding_scatter(
     proj = centered @ vt[:2].T
 
     ng, nb = len(g), len(b)
-    pg, pb, pt = proj[:ng], proj[ng:ng + nb], proj[ng + nb:]
+    pg, pb, pt = proj[:ng], proj[ng : ng + nb], proj[ng + nb :]
 
     fig, ax = plt.subplots(figsize=(8, 7))
     ax.scatter(pt[:, 0], pt[:, 1], alpha=0.15, s=15, c="#AAAAAA", label=f"Training ({len(t)})")
-    ax.scatter(pb[:, 0], pb[:, 1], alpha=0.7, s=50, c="#DD8452", edgecolors="black",
-               linewidths=0.5, label=f"Baseline ({nb})", marker="s")
-    ax.scatter(pg[:, 0], pg[:, 1], alpha=0.8, s=60, c="#4C72B0", edgecolors="black",
-               linewidths=0.5, label=f"Generated ({ng})", marker="o")
+    ax.scatter(
+        pb[:, 0],
+        pb[:, 1],
+        alpha=0.7,
+        s=50,
+        c="#DD8452",
+        edgecolors="black",
+        linewidths=0.5,
+        label=f"Baseline ({nb})",
+        marker="s",
+    )
+    ax.scatter(
+        pg[:, 0],
+        pg[:, 1],
+        alpha=0.8,
+        s=60,
+        c="#4C72B0",
+        edgecolors="black",
+        linewidths=0.5,
+        label=f"Generated ({ng})",
+        marker="o",
+    )
     ax.set_xlabel("PC 1")
     ax.set_ylabel("PC 2")
     ax.set_title("PCA projection \u2014 where do generated designs live in design space?", fontsize=12)
@@ -1052,8 +1093,7 @@ def show_optimization_trajectories(opt_data: list[dict]) -> None:
         base = d["base_obj"]
 
         ax.plot(steps, objs, "o-", color="#4C72B0", linewidth=2, markersize=4, label="Optimizer")
-        ax.axhline(base, color="#DD8452", linestyle="--", linewidth=1.5,
-                    label=f"Baseline = {base:.1f}")
+        ax.axhline(base, color="#DD8452", linestyle="--", linewidth=1.5, label=f"Baseline = {base:.1f}")
         ax.fill_between(steps, objs, base, alpha=0.12, color="#4C72B0")
 
         iog = objs[0] - base
@@ -1061,8 +1101,7 @@ def show_optimization_trajectories(opt_data: list[dict]) -> None:
         cog = sum(o - base for o in objs)
 
         ax.set_title(
-            f"Sample {d['sample_idx']}\n"
-            f"IOG={iog:.1f}   FOG={fog:.1f}   COG={cog:.1f}",
+            f"Sample {d['sample_idx']}\nIOG={iog:.1f}   FOG={fog:.1f}   COG={cog:.1f}",
             fontsize=10,
         )
         ax.set_xlabel("Optimization step")
@@ -1071,7 +1110,8 @@ def show_optimization_trajectories(opt_data: list[dict]) -> None:
 
     fig.suptitle(
         "Optimization from generated warmstarts \u2014 does the model give the optimizer a head start?",
-        fontsize=13, y=1.05,
+        fontsize=13,
+        y=1.05,
     )
     fig.tight_layout()
     plt.show()
@@ -1106,10 +1146,13 @@ def show_metric_summary_dashboard(summary_dict: dict) -> None:
         vals = [m[1] for m in metrics]
         bars = ax.barh(names, vals, color=color, edgecolor="black", linewidth=0.5)
         for bar, v in zip(bars, vals):
-            ax.text(bar.get_width() + max(abs(v) for v in vals) * 0.03,
-                    bar.get_y() + bar.get_height() / 2,
-                    f"{v:.4f}" if abs(v) < 1 else f"{v:.1f}",
-                    va="center", fontsize=9)
+            ax.text(
+                bar.get_width() + max(abs(v) for v in vals) * 0.03,
+                bar.get_y() + bar.get_height() / 2,
+                f"{v:.4f}" if abs(v) < 1 else f"{v:.1f}",
+                va="center",
+                fontsize=9,
+            )
         ax.set_title(cat_name, fontsize=11, fontweight="bold")
         ax.set_xlim(left=min(0, min(vals) * 1.2))
 
