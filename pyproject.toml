@@ -116,7 +116,6 @@ select = ["ALL"]
 exclude = [
   "workshops/dcc26/**/*.ipynb",
   "workshops/dcc26/utils/**/*.py",
-  "engiopt/workshops/dcc26/**/*.py",
 ]
 ignore = [
   "ANN",      # flake8-annotations (mypy's job)
@@ -223,7 +222,7 @@ docstring-code-line-length = "dynamic"
 ###################################### PYRIGHT ########################################
 [tool.pyright]
 include = ["engiopt/**"]
-exclude = ["**/node_modules", "**/__pycache__", "**/templates/**", "**/study*", "**/*.ipynb", "engiopt/workshops/dcc26/**"]
+exclude = ["**/node_modules", "**/__pycache__", "**/templates/**", "**/study*", "**/*.ipynb"]
 strict = []
 
 typeCheckingMode = "basic"
@@ -261,7 +260,6 @@ exclude = [
   ".*/templates/.*",
   "^engibench_studies/problems/airfoil/study_[^/]*/",
   "^docs/",
-  "^engiopt/workshops/dcc26/.*",
   "wandb/.*",
 ]
 [[tool.mypy.overrides]]

@@ -8,14 +8,27 @@ stay short and import a stable packaged module::
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 import json
 import os
 import random
 from typing import Any
 
+from IPython.display import display as ipy_display
 import matplotlib.pyplot as plt
 import numpy as np
+from scipy.spatial.distance import cdist
 import torch as th
+from torch.utils.data import DataLoader
+from torch.utils.data import TensorDataset
+
+try:
+    import ipywidgets as widgets  # type: ignore[import-untyped]
+except ImportError:
+    widgets = None
+
+MIN_SHAPE_DIMS = 2
+MIN_PAIRWISE_COUNT = 2
 
 # ---------------------------------------------------------------------------
 # Reproducibility
@@ -25,7 +38,6 @@ import torch as th
 def set_global_seed(seed: int) -> None:
     """Set seeds for reproducibility across numpy, python, and torch."""
     random.seed(seed)
-    np.random.seed(seed)
     th.manual_seed(seed)
     if th.cuda.is_available():
         th.cuda.manual_seed_all(seed)
@@ -48,16 +60,19 @@ def pick_device() -> th.device:
 
 
 def ensure_dir(path: str) -> str:
+    """Create a directory if needed and return the path."""
     os.makedirs(path, exist_ok=True)
     return path
 
 
 def save_json(data: Any, path: str) -> None:
+    """Serialize JSON-compatible data to disk."""
     with open(path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
 
 def load_json(path: str) -> Any:
+    """Load JSON data from disk."""
     with open(path, encoding="utf-8") as f:
         return json.load(f)
 
@@ -114,7 +129,7 @@ def show_design_gallery(
     ncols = min(4, n)
     nrows = (n + ncols - 1) // ncols
     design_shape = problem.design_space.shape
-    aspect = design_shape[1] / design_shape[0] if len(design_shape) >= 2 else 1.0
+    aspect = design_shape[1] / design_shape[0] if len(design_shape) >= MIN_SHAPE_DIMS else 1.0
     fig, axes = plt.subplots(nrows, ncols, figsize=(3.5 * ncols * aspect, 3.5 * nrows))
     axes = np.atleast_2d(axes)
 
@@ -163,7 +178,14 @@ def show_condition_distributions(dataset, problem) -> None:
     plt.close(fig)
 
 
-def show_valid_vs_violated(design, config, violations, valid_violations, problem=None, cmap="gray_r") -> None:
+def show_valid_vs_violated(
+    design,
+    violations,
+    valid_violations,
+    *,
+    problem=None,
+    cmap: str = "gray_r",
+) -> None:
     """Side-by-side rendering: valid config vs violated config.
 
     Uses ``problem.render()`` if provided, otherwise falls back to imshow.
@@ -211,30 +233,15 @@ def show_valid_vs_violated(design, config, violations, valid_violations, problem
         plt.close(fig)
 
 
-def interactive_condition_explorer(dataset, problem):
-    """Interactive slider widget to explore designs by scalar condition values.
+def _build_scalar_condition_sliders(
+    scalar_keys: list[str],
+    scalar_conds: dict[str, np.ndarray],
+) -> dict[str, Any]:
+    """Create one range slider per scalar condition."""
+    if widgets is None:
+        return {}
 
-    Falls back to a static gallery if ipywidgets is unavailable or if
-    the problem has no scalar conditions.
-    """
-    train = dataset["train"]
-    scalar_keys, _ = _split_condition_keys(train, problem)
-    all_designs = np.array(train["optimal_design"])
-    n_total = len(all_designs)
-
-    try:
-        import ipywidgets as widgets
-        from IPython.display import display as ipy_display
-    except ImportError:
-        print("ipywidgets not available — showing static gallery instead.")
-        show_design_gallery(dataset, problem)
-        return
-
-    # Build scalar condition arrays
-    scalar_conds = {k: np.array([float(v) for v in train[k]]) for k in scalar_keys}
-
-    # Build sliders for scalar conditions
-    sliders = {}
+    sliders: dict[str, Any] = {}
     for key in scalar_keys:
         vals = scalar_conds[key]
         lo, hi = float(np.min(vals)), float(np.max(vals))
@@ -249,64 +256,118 @@ def interactive_condition_explorer(dataset, problem):
             layout=widgets.Layout(width="500px"),
             style={"description_width": "130px"},
         )
+    return sliders
 
+
+@dataclass(slots=True)
+class FilteredGalleryState:
+    """Bundle gallery state so the rendering callback stays compact."""
+
+    all_designs: np.ndarray
+    scalar_keys: list[str]
+    scalar_conds: dict[str, np.ndarray]
+    aspect: float
+    n_total: int
+
+
+def _render_filtered_gallery(
+    output,
+    state: FilteredGalleryState,
+    slider_values: dict[str, tuple[float, float]],
+) -> None:
+    """Render the gallery subset that matches the current slider values."""
+    mask = np.ones(state.n_total, dtype=bool)
+    for key in state.scalar_keys:
+        lo, hi = slider_values[key]
+        mask &= (state.scalar_conds[key] >= lo) & (state.scalar_conds[key] <= hi)
+
+    matching_ids = np.where(mask)[0]
+    with output:
+        output.clear_output(wait=True)
+        if len(matching_ids) == 0:
+            print("No designs match these conditions. Widen the sliders.")
+            return
+
+        n_show = min(8, len(matching_ids))
+        rng = np.random.default_rng(42)
+        show_ids = rng.choice(matching_ids, size=n_show, replace=False)
+        ncols = min(4, n_show)
+        nrows = (n_show + ncols - 1) // ncols
+        fig, axes = plt.subplots(
+            nrows,
+            ncols,
+            figsize=(3.5 * ncols * state.aspect, 3.5 * nrows),
+        )
+        axes = np.atleast_2d(axes)
+
+        for i, idx in enumerate(show_ids):
+            ax = axes[i // ncols, i % ncols]
+            ax.imshow(state.all_designs[idx], cmap="gray_r", vmin=0, vmax=1)
+            ax.axis("off")
+            cond_str = "\n".join(
+                f"{key}={state.scalar_conds[key][idx]:.2f}"
+                for key in state.scalar_keys
+            )
+            ax.set_title(cond_str, fontsize=8)
+
+        for i in range(n_show, nrows * ncols):
+            axes[i // ncols, i % ncols].axis("off")
+
+        fig.suptitle(
+            f"Matching designs: {len(matching_ids)}/{state.n_total}",
+            fontsize=12,
+        )
+        fig.tight_layout()
+        plt.show()
+        plt.close(fig)
+
+
+def interactive_condition_explorer(dataset, problem) -> None:
+    """Interactive slider widget to explore designs by scalar condition values.
+
+    Falls back to a static gallery if ipywidgets is unavailable or if
+    the problem has no scalar conditions.
+    """
+    train = dataset["train"]
+    scalar_keys, _ = _split_condition_keys(train, problem)
+    all_designs = np.array(train["optimal_design"])
+    n_total = len(all_designs)
+
+    if widgets is None:
+        print("ipywidgets not available — showing static gallery instead.")
+        show_design_gallery(dataset, problem)
+        return
+
+    # Build scalar condition arrays
+    scalar_conds = {k: np.array([float(v) for v in train[k]]) for k in scalar_keys}
+    sliders = _build_scalar_condition_sliders(scalar_keys, scalar_conds)
     output = widgets.Output()
 
     design_shape = problem.design_space.shape
-    aspect = design_shape[1] / design_shape[0] if len(design_shape) >= 2 else 1.0
-
-    def _update_gallery(**kwargs):
-        mask = np.ones(n_total, dtype=bool)
-        for key in scalar_keys:
-            lo, hi = kwargs[key]
-            mask &= (scalar_conds[key] >= lo) & (scalar_conds[key] <= hi)
-
-        matching_ids = np.where(mask)[0]
-
-        with output:
-            output.clear_output(wait=True)
-            if len(matching_ids) == 0:
-                print("No designs match these conditions. Widen the sliders.")
-                return
-
-            n_show = min(8, len(matching_ids))
-            rng = np.random.default_rng(42)
-            show_ids = rng.choice(matching_ids, size=n_show, replace=False)
-
-            ncols = min(4, n_show)
-            nrows = (n_show + ncols - 1) // ncols
-            fig, axes = plt.subplots(nrows, ncols, figsize=(3.5 * ncols * aspect, 3.5 * nrows))
-            axes = np.atleast_2d(axes)
-
-            for i, idx in enumerate(show_ids):
-                ax = axes[i // ncols, i % ncols]
-                ax.imshow(all_designs[idx], cmap="gray_r", vmin=0, vmax=1)
-                ax.axis("off")
-                cond_str = "\n".join(
-                    f"{k}={scalar_conds[k][idx]:.2f}" for k in scalar_keys
-                )
-                ax.set_title(cond_str, fontsize=8)
-
-            for i in range(n_show, nrows * ncols):
-                axes[i // ncols, i % ncols].axis("off")
-
-            fig.suptitle(f"Matching designs: {len(matching_ids)}/{n_total}", fontsize=12)
-            fig.tight_layout()
-            plt.show()
-            plt.close(fig)
+    aspect = design_shape[1] / design_shape[0] if len(design_shape) >= MIN_SHAPE_DIMS else 1.0
+    state = FilteredGalleryState(
+        all_designs=all_designs,
+        scalar_keys=scalar_keys,
+        scalar_conds=scalar_conds,
+        aspect=aspect,
+        n_total=n_total,
+    )
 
     if scalar_keys:
         title = widgets.HTML("<h3>Explore the dataset — drag sliders to filter by condition</h3>")
         slider_box = widgets.VBox(list(sliders.values()))
 
-        def _on_slider_change(change):
-            _update_gallery(**{k: s.value for k, s in sliders.items()})
+        def _current_slider_values() -> dict[str, tuple[float, float]]:
+            return {key: slider.value for key, slider in sliders.items()}
+
+        def _on_slider_change(_change) -> None:
+            _render_filtered_gallery(output, state, _current_slider_values())
 
         for s in sliders.values():
             s.observe(_on_slider_change, names="value")
 
         ipy_display(title, slider_box, output)
-        _update_gallery(**{k: s.value for k, s in sliders.items()})
+        _render_filtered_gallery(output, state, _current_slider_values())
     else:
         # No scalar conditions (e.g., PowerElectronics)
         show_design_gallery(dataset, problem)
@@ -337,19 +398,25 @@ class WorkshopGenerator(th.nn.Module):
         return out.squeeze(1)                       # (B, H, W)
 
 
+@dataclass(slots=True)
+class TrainingConfig:
+    """Training hyperparameters for the workshop generator."""
+
+    latent_dim: int
+    epochs: int = 8
+    batch_size: int = 64
+    lr: float = 2e-4
+    device: th.device | str | None = None
+    snapshot_at_epochs: list[int] | None = None
+    verbose: bool = True
+
+
 def train_supervised_generator(
     model,
     train_conditions: np.ndarray,
     train_targets: np.ndarray,
-    *,
-    latent_dim: int,
-    epochs: int = 8,
-    batch_size: int = 64,
-    lr: float = 2e-4,
-    device=None,
+    config: TrainingConfig,
     snapshot_conditions: np.ndarray | None = None,
-    snapshot_at_epochs: list[int] | None = None,
-    verbose: bool = True,
 ) -> dict:
     """Train a conditional generator with supervised MSE loss.
 
@@ -360,37 +427,32 @@ def train_supervised_generator(
         model: Generator network. Forward signature: model(noise, conditions).
         train_conditions: (N, n_conds) float32 array.
         train_targets: (N, *design_shape) float32 array, scaled to [-1, 1].
-        latent_dim: Dimensionality of the noise vector.
-        epochs: Number of training epochs.
-        batch_size: Mini-batch size.
-        lr: Adam learning rate.
-        device: Torch device.
+        config: Training hyperparameters.
         snapshot_conditions: If provided, generate designs from these conditions
-            at epochs listed in *snapshot_at_epochs*.
-        snapshot_at_epochs: Epoch numbers (1-indexed) at which to capture snapshots.
-        verbose: Print per-epoch progress.
+            at epochs listed in ``config.snapshot_at_epochs``.
 
     Returns:
         Dict with keys ``losses`` (list[float]) and ``snapshots``
         (list of (epoch, np.ndarray) pairs).
     """
-    from torch.utils.data import DataLoader, TensorDataset
-
+    device = config.device
     if device is None:
         device = th.device("cpu")
     device = th.device(device) if isinstance(device, str) else device
     model = model.to(device)
     model.train()
 
-    optimizer = th.optim.Adam(model.parameters(), lr=lr)
+    optimizer = th.optim.Adam(model.parameters(), lr=config.lr)
     criterion = th.nn.MSELoss()
 
     conds_t = th.tensor(train_conditions, dtype=th.float32, device=device)
     targets_t = th.tensor(train_targets, dtype=th.float32, device=device)
-    dl = DataLoader(TensorDataset(conds_t, targets_t), batch_size=batch_size, shuffle=True)
+    dl = DataLoader(
+        TensorDataset(conds_t, targets_t),
+        batch_size=config.batch_size,
+        shuffle=True,
+    )
 
-    if snapshot_at_epochs is None:
-        snapshot_at_epochs = []
     snap_conds_t = None
     if snapshot_conditions is not None:
         snap_conds_t = th.tensor(snapshot_conditions, dtype=th.float32, device=device)
@@ -398,11 +460,13 @@ def train_supervised_generator(
     losses: list[float] = []
     snapshots: list[tuple[int, np.ndarray]] = []
 
-    for epoch in range(1, epochs + 1):
+    snapshot_epochs = config.snapshot_at_epochs or []
+
+    for epoch in range(1, config.epochs + 1):
         model.train()
         epoch_loss = 0.0
         for batch_conds, batch_targets in dl:
-            z = th.randn(batch_conds.shape[0], latent_dim, device=device)
+            z = th.randn(batch_conds.shape[0], config.latent_dim, device=device)
             fake = model(z, batch_conds)
             loss = criterion(fake.flatten(1), batch_targets.flatten(1))
             optimizer.zero_grad()
@@ -411,13 +475,13 @@ def train_supervised_generator(
             epoch_loss += loss.item()
         avg = epoch_loss / len(dl)
         losses.append(avg)
-        if verbose:
-            print(f"  Epoch {epoch:3d}/{epochs}  |  Loss: {avg:.6f}")
+        if config.verbose:
+            print(f"  Epoch {epoch:3d}/{config.epochs}  |  Loss: {avg:.6f}")
 
-        if epoch in snapshot_at_epochs and snap_conds_t is not None:
+        if epoch in snapshot_epochs and snap_conds_t is not None:
             model.eval()
             with th.no_grad():
-                z = th.randn(len(snap_conds_t), latent_dim, device=device)
+                z = th.randn(len(snap_conds_t), config.latent_dim, device=device)
                 snap = model(z, snap_conds_t)
                 snap_np = ((snap.cpu().numpy() + 1.0) / 2.0).clip(0, 1)
             snapshots.append((epoch, snap_np))
@@ -514,7 +578,7 @@ def show_training_curve(train_losses: list[float], save_path: str | None = None)
     ax.set_xlabel("Epoch", fontsize=12)
     ax.set_ylabel("MSE Loss", fontsize=12)
     ax.set_title("Generator Training Loss", fontsize=14)
-    ax.grid(True, alpha=0.3)
+    ax.grid(visible=True, alpha=0.3)
     fig.tight_layout()
     if save_path:
         fig.savefig(save_path, dpi=120)
@@ -526,7 +590,6 @@ def show_gen_vs_baseline(
     gen_designs: np.ndarray,
     baseline_designs: np.ndarray,
     conditions_records: list[dict],
-    condition_keys: list[str],
     n_show: int = 8,
     problem=None,
 ) -> None:
@@ -561,7 +624,12 @@ def show_gen_vs_baseline(
         for i in range(n_show):
             axes[0, i].imshow(gen_designs[i], cmap="gray", vmin=0, vmax=1)
             axes[0, i].axis("off")
-            cond_str = "\n".join(f"{k}: {conditions_records[i][k]:.3f}" for k in condition_keys)
+            scalars = {
+                key: value
+                for key, value in conditions_records[i].items()
+                if not isinstance(value, (list, np.ndarray)) or np.asarray(value).size == 1
+            }
+            cond_str = "\n".join(f"{key}: {float(value):.3f}" for key, value in scalars.items())
             axes[0, i].set_title(cond_str, fontsize=8)
             axes[1, i].imshow(baseline_designs[i], cmap="gray", vmin=0, vmax=1)
             axes[1, i].axis("off")
@@ -674,13 +742,11 @@ def mean_pairwise_l2(designs: np.ndarray) -> float:
     """Average L2 distance between all pairs. Measures intra-set diversity."""
     flat = designs.reshape(designs.shape[0], -1)
     n = flat.shape[0]
-    if n < 2:
+    if n < MIN_PAIRWISE_COUNT:
         return 0.0
-    dists = []
-    for i in range(n):
-        for j in range(i + 1, n):
-            dists.append(float(np.linalg.norm(flat[i] - flat[j])))
-    return float(np.mean(dists))
+    pairwise = cdist(flat, flat, metric="euclidean")
+    upper_triangle = pairwise[np.triu_indices(n, k=1)]
+    return float(np.mean(upper_triangle))
 
 
 def mean_nn_distance_to_reference(designs: np.ndarray, reference: np.ndarray) -> float:
@@ -824,9 +890,12 @@ def show_spatial_distribution_comparison(
                              constrained_layout=True)
 
     # ── Mean design images ───────────────────────────────────────────
-    sets = [("Generated", gen_designs, "#4C72B0"),
-            ("Baseline", baseline_designs, "#DD8452")]
+    sets: list[tuple[str, np.ndarray, str]] = [
+        ("Generated", gen_designs, "#4C72B0"),
+        ("Baseline", baseline_designs, "#DD8452"),
+    ]
     if has_train:
+        assert train_reference is not None
         sets.append(("Training", train_reference, "#55A868"))
 
     vmin, vmax = 0, 1
@@ -900,8 +969,6 @@ def show_pairwise_distance_heatmap(
     equally (good diversity).  Cool/dark blocks reveal clusters of
     near-identical designs (partial mode collapse).
     """
-    from scipy.spatial.distance import cdist
-
     flat = designs.reshape(designs.shape[0], -1)
     dists = cdist(flat, flat, "euclidean")
 
@@ -948,8 +1015,8 @@ def show_embedding_scatter(
     combined = np.vstack([g, b, t])
     mean = combined.mean(axis=0)
     centered = combined - mean
-    _, _, Vt = np.linalg.svd(centered, full_matrices=False)
-    proj = centered @ Vt[:2].T
+    _, _, vt = np.linalg.svd(centered, full_matrices=False)
+    proj = centered @ vt[:2].T
 
     ng, nb = len(g), len(b)
     pg, pb, pt = proj[:ng], proj[ng:ng + nb], proj[ng + nb:]
