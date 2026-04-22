@@ -94,6 +94,7 @@ You can still force legacy or hybrid behavior when needed:
 ```
 
 All HF-backed checkpoint packages contain the model files together with `run_config.json` and `metadata.json`, so evaluation does not depend on live WandB run config state.
+When W&B tracking is active, the HF package metadata also records the originating W&B run identity, and the W&B run summary records the HF repo, the seed-based convenience path, the exact uploaded HF revision, and an immutable run-specific HF package path.
 
 For reproducible debugging runs, you can additionally enable strict deterministic mode:
 ```
@@ -123,6 +124,10 @@ In `auto` mode, EngiOpt tries to resolve checkpoints in this order:
 1. Hugging Face package for the model family, problem, and seed
 2. Legacy WandB model artifact
 3. Explicit local checkpoint package directory if you pass `--local-model-dir`
+
+For new HF-backed runs, EngiOpt maintains both:
+- a seed-based convenience path such as `beams2d/seed_1`
+- an immutable run-specific path such as `beams2d/seed_1/run_<wandb_run_id>`
 
 You can force legacy WandB loading for historical runs:
 ```

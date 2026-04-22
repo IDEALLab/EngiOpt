@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 from huggingface_hub import HfApi
 from huggingface_hub import snapshot_download
+
 import wandb
 
 CheckpointBackend = Literal["hf", "wandb", "both", "none"]
@@ -44,6 +45,13 @@ def build_hf_package_path(problem_id: str, seed: int, extra_parts: list[str] | N
     return "/".join(parts)
 
 
+def build_hf_run_package_path(package_path: str, wandb_run_id: str | None) -> str | None:
+    """Return an immutable run-specific package path when a W&B run id is available."""
+    if not wandb_run_id:
+        return None
+    return f"{package_path}/run_{_sanitize_path_component(wandb_run_id)}"
+
+
 def save_checkpoint_package(  # noqa: PLR0913
     *,
     checkpoint_backend: CheckpointBackend,
@@ -65,7 +73,9 @@ def save_checkpoint_package(  # noqa: PLR0913
         "checkpoint_backend": checkpoint_backend,
         "hf_repo_id": None,
         "hf_package_path": None,
+        "hf_run_package_path": None,
         "hf_revision": None,
+        "hf_run_revision": None,
     }
     metadata_payload = _build_metadata(
         problem_id=problem_id,
@@ -76,10 +86,32 @@ def save_checkpoint_package(  # noqa: PLR0913
         primary_files=primary_files,
         metadata=metadata,
     )
+    metadata_payload.update(_build_wandb_run_metadata())
 
     if checkpoint_backend in {"hf", "both"}:
         repo_id = build_hf_repo_id(hf_entity, hf_repo_prefix, algo)
         package_path = build_hf_package_path(problem_id, seed, extra_path_parts)
+        info["hf_repo_id"] = repo_id
+        info["hf_package_path"] = package_path
+        metadata_payload["hf_repo_id"] = repo_id
+        metadata_payload["hf_package_path"] = package_path
+
+        run_package_path = build_hf_run_package_path(package_path, metadata_payload.get("wandb_run_id"))
+        info["hf_run_package_path"] = run_package_path
+        if run_package_path is not None:
+            metadata_payload["hf_run_package_path"] = run_package_path
+            run_revision = _upload_package_to_hf(
+                repo_id=repo_id,
+                hf_private=hf_private,
+                package_path=run_package_path,
+                checkpoint_files=checkpoint_files,
+                run_config=run_config,
+                metadata=metadata_payload,
+                algo=algo,
+            )
+            info["hf_run_revision"] = run_revision
+            metadata_payload["hf_run_revision"] = run_revision
+
         revision = _upload_package_to_hf(
             repo_id=repo_id,
             hf_private=hf_private,
@@ -89,11 +121,7 @@ def save_checkpoint_package(  # noqa: PLR0913
             metadata=metadata_payload,
             algo=algo,
         )
-        info["hf_repo_id"] = repo_id
-        info["hf_package_path"] = package_path
         info["hf_revision"] = revision
-        metadata_payload["hf_repo_id"] = repo_id
-        metadata_payload["hf_package_path"] = package_path
         metadata_payload["hf_revision"] = revision
 
     if checkpoint_backend in {"wandb", "both"} and wandb_artifacts and wandb.run is not None:
@@ -420,6 +448,27 @@ def _build_metadata(  # noqa: PLR0913
     return payload
 
 
+def _build_wandb_run_metadata() -> dict[str, Any]:
+    """Return W&B run identity fields for checkpoint metadata when tracking is active."""
+    if wandb.run is None:
+        return {}
+
+    run = wandb.run
+    entity = getattr(run, "entity", None)
+    project = getattr(run, "project", None)
+    run_id = getattr(run, "id", None)
+    run_url = None
+    if entity and project and run_id:
+        run_url = f"https://wandb.ai/{entity}/{project}/runs/{run_id}"
+
+    return {
+        "wandb_entity": entity,
+        "wandb_project": project,
+        "wandb_run_id": run_id,
+        "wandb_run_url": run_url,
+    }
+
+
 def _ensure_hf_repo_readme(api: HfApi, repo_id: str, algo: str) -> None:
     files = api.list_repo_files(repo_id=repo_id, repo_type="model")
     if "README.md" in files:
@@ -455,6 +504,10 @@ def _log_checkpoint_summary_to_wandb(metadata: dict[str, Any], info: dict[str, A
     if info["hf_repo_id"] is not None:
         wandb.summary["hf_repo_id"] = info["hf_repo_id"]
         wandb.summary["hf_package_path"] = info["hf_package_path"]
+        wandb.summary["hf_revision"] = info["hf_revision"]
+    if info["hf_run_package_path"] is not None:
+        wandb.summary["hf_run_package_path"] = info["hf_run_package_path"]
+        wandb.summary["hf_run_revision"] = info["hf_run_revision"]
     wandb.summary["checkpoint_primary_files"] = metadata["primary_files"]
 
 
