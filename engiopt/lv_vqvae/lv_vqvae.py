@@ -856,10 +856,28 @@ class VQVAETransformer(nn.Module):
         out[out < v[..., [-1]]] = -float("inf")
         return out
 
+    def top_p_logits(self, logits: th.Tensor, top_p: float) -> th.Tensor:
+        """Nucleus sampling: Zero out all logits outside the top-p cumulative probability mass."""
+        sorted_logits, sorted_indices = th.sort(logits, descending=True)
+        cumulative_probs = th.cumsum(f.softmax(sorted_logits, dim=-1), dim=-1)
+
+        # Remove tokens with cumulative probability above the threshold
+        sorted_indices_to_remove = cumulative_probs > top_p
+
+        # Shift the mask to the right to keep the very first token that crosses the threshold
+        sorted_indices_to_remove[..., 1:] = sorted_indices_to_remove[..., :-1].clone()
+        sorted_indices_to_remove[..., 0] = 0
+
+        # Scatter the mask back to the original unsorted logits shape
+        indices_to_remove = sorted_indices_to_remove.scatter(dim=1, index=sorted_indices, src=sorted_indices_to_remove)
+
+        out = logits.clone()
+        out[indices_to_remove] = -float("inf")
+        return out
 
     @th.no_grad()
-    def sample(
-        self, x: th.Tensor, c: th.Tensor, steps: int, temperature: float = 1.0, top_k: int | None = None
+    def sample(  # noqa: PLR0913
+        self, x: th.Tensor, c: th.Tensor, steps: int, temperature: float = 1.0, top_k: int | None = None, top_p: float | None = None
     ) -> th.Tensor:
         """Autoregressively sample from the model given initial context x and conditional c."""
         x = th.cat((c, x), dim=1)
@@ -889,6 +907,9 @@ class VQVAETransformer(nn.Module):
                     warnings.warn("Warning: No finite logits found for sampling", stacklevel=2)
                     # Make all valid logits equal (uniform distribution over image space)
                     logits[:, self.image_offset:] = 0.0
+
+            if top_p is not None:
+                logits = self.top_p_logits(logits, top_p)
 
             probs = f.softmax(logits, dim=-1)
             ix = th.multinomial(probs, num_samples=1)  # Use multinomial sampling for variety and to mitigate image collapse
@@ -1247,8 +1268,13 @@ if __name__ == "__main__":
         else:
             c = th.ones(n_designs, 1, dtype=th.int64, device=device) * transformer.sos_token
 
+        # Use optimal Nucleus Sampling parameters
         latent_imgs = transformer.sample(
-            x=th.empty(n_designs, 0, dtype=th.int64, device=device), c=c, steps=(latent_size**2)
+            x=th.empty(n_designs, 0, dtype=th.int64, device=device),
+            c=c,
+            steps=latent_size**2,
+            temperature=0.8,
+            top_p=0.95
         )
         gen_imgs = transformer.z_to_image(latent_imgs)
 

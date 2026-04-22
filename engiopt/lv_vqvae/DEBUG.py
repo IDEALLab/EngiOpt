@@ -1,0 +1,350 @@
+"""Evaluation and Diagnostics for the LV-VQVAE.
+
+Stage 1 is a VQVAE-style discrete autoencoder; no discriminator, no perceptual loss.
+Stage 2 is a Transformer trained on the discrete latent tokens.
+"""  # noqa: N999
+
+from __future__ import annotations
+
+import dataclasses
+import os
+
+from engibench.utils.all_problems import BUILTIN_PROBLEMS
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+import torch as th
+import tyro
+import wandb
+
+from engiopt import metrics
+from engiopt.dataset_sample_conditions import sample_conditions
+from engiopt.lv_vqvae.lv_vqvae import VQVAE
+from engiopt.lv_vqvae.lv_vqvae import VQVAETransformer
+from engiopt.transforms import drop_constant
+from engiopt.transforms import normalize
+from engiopt.transforms import resize_to
+
+
+@dataclasses.dataclass
+class Args:
+    """Command-line arguments for a single-seed LV-VQVAE 2D evaluation."""
+
+    problem_id: str = "beams2d"
+    """Problem identifier."""
+    seed: int = 1
+    """Random seed to run."""
+    wandb_project: str = "engiopt"
+    """Wandb project name."""
+    wandb_entity: str | None = None
+    """Wandb entity name."""
+    n_samples: int = 50
+    """Number of generated samples per seed."""
+    sigma: float = 10.0
+    """Kernel bandwidth for MMD and DPP metrics."""
+    output_csv: str = "lv_vqvae_{problem_id}_metrics.csv"
+    """Output CSV path template; may include {problem_id}."""
+
+
+def run_pipeline_diagnostics(vqvae, model, test_designs, test_conds, run_config, active_mask):  # noqa: PLR0913
+    """Walks a batch of data through the individual modules to log exact tensor shapes."""
+    print("\n" + "="*60)
+    print(" 🛠️ PIPELINE TENSOR DIAGNOSTICS")
+    print("="*60)
+
+    b_size = 2 # Use a small batch for diagnostics
+    x = test_designs[:b_size]
+    c = test_conds[:b_size]
+    use_vq = run_config.get("use_vq", True)
+
+    print("\n--- STAGE 1: LV-VQVAE DATA FLOW ---")
+    print(f"0. Input Images:          {list(x.shape)}")
+
+    # 1. Encoder
+    enc = vqvae.encoder(x)
+    print(f"1. Encoder Output:        {list(enc.shape)}")
+
+    # 2. Quant Conv (Dimensionality Bottleneck)
+    qc = vqvae.quant_conv(enc)
+    print(f"2. Quant Conv Output:     {list(qc.shape)}")
+
+    # 3. LV Pruning Mask
+    qc_pruned = vqvae.apply_pruning(qc, model.active_mask, model.frozen_mean)
+    active_dims = active_mask.sum().item() if active_mask is not None else run_config["latent_dim"]
+    total_dims = run_config["latent_dim"]
+    print(f"3. Pruned Latents:        {list(qc_pruned.shape)}")
+    print(f"   -> Active Dimensions:  {active_dims} / {total_dims} ({(active_dims/total_dims)*100:.1f}% used)")
+
+    # 4. Codebook (if enabled)
+    if use_vq:
+        vq_out, indices, _, _, _ = vqvae.codebook(qc_pruned)
+        vq_out = vqvae.apply_pruning(vq_out, model.active_mask, model.frozen_mean)
+        print(f"4. Codebook Vectors:      {list(vq_out.shape)}")
+        print(f"   -> Codebook Indices:   {list(indices.shape)} (Vocab Size: {run_config['num_codebook_vectors']})")
+    else:
+        vq_out = qc_pruned
+        print("4. Codebook Vectors:      [BYPASSED - use_vq=False]")
+
+    # 5. Decoder
+    post_qc = vqvae.post_quant_conv(vq_out)
+    dec = vqvae.decoder(post_qc)
+    print(f"5. Post-Quant Conv:       {list(post_qc.shape)}")
+    print(f"6. Decoded Images:        {list(dec.shape)}")
+
+    print("\n--- STAGE 2: TRANSFORMER DATA FLOW ---")
+    print(f"0. Input Conditions:      {list(c.shape)}")
+
+    if run_config["conditional"]:
+        c_toks = model.encode_to_z(x=c, is_c=True)[1]
+        print(f"1. CVQVAE Cond Tokens:    {list(c_toks.shape)} (Prepended as sequence context)")
+    else:
+        c_toks = th.ones(b_size, 1, dtype=th.int64, device=x.device) * model.sos_token
+        print(f"1. SOS Dummy Tokens:      {list(c_toks.shape)}")
+
+    # Calculate generation lengths
+    img_seq_len = run_config["latent_size"] ** 2
+    total_seq_len = c_toks.shape[1] + img_seq_len
+
+    print(f"2. Target Sequence Size:  {img_seq_len} tokens ({run_config['latent_size']}x{run_config['latent_size']} grid)")
+    print(f"3. Total Context Window:  {total_seq_len} tokens (Condition + Image)")
+    print(f"4. Transformer Vocab:     {model.transformer.config.vocab_size} tokens (Shifted for conditions)")
+
+    print("="*60 + "\n")
+
+
+if __name__ == "__main__":
+    args = tyro.cli(Args)
+
+    seed = args.seed
+    problem = BUILTIN_PROBLEMS[args.problem_id]()
+    problem.reset(seed=seed)
+
+    # Reproducibility
+    th.manual_seed(seed)
+    rng = np.random.default_rng(seed)
+    th.backends.cudnn.deterministic = True
+
+    if th.backends.mps.is_available():
+        device = th.device("mps")
+    elif th.cuda.is_available():
+        device = th.device("cuda")
+    else:
+        device = th.device("cpu")
+
+    ### Set Up Transformer ###
+
+    # Restores the pytorch model from wandb
+    if args.wandb_entity is not None:
+        artifact_path_cvqvae = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_lv_vqvae_lv_cvqvae:seed_{seed}"
+        artifact_path_vqvae = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_lv_vqvae_lv_vqvae:seed_{seed}"
+        artifact_path_transformer = (
+            f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_lv_vqvae_transformer:seed_{seed}"
+        )
+    else:
+        artifact_path_cvqvae = f"{args.wandb_project}/{args.problem_id}_lv_vqvae_lv_cvqvae:seed_{seed}"
+        artifact_path_vqvae = f"{args.wandb_project}/{args.problem_id}_lv_vqvae_lv_vqvae:seed_{seed}"
+        artifact_path_transformer = f"{args.wandb_project}/{args.problem_id}_lv_vqvae_transformer:seed_{seed}"
+
+    api = wandb.Api()
+    artifact_cvqvae = api.artifact(artifact_path_cvqvae, type="model")
+    artifact_vqvae = api.artifact(artifact_path_vqvae, type="model")
+    artifact_transformer = api.artifact(artifact_path_transformer, type="model")
+
+    class RunRetrievalError(ValueError):
+        def __init__(self):
+            super().__init__("Failed to retrieve the run")
+
+    run = artifact_transformer.logged_by()
+    if run is None:
+        raise RunRetrievalError
+    run = api.run(f"{run.entity}/{run.project}/{run.id}")
+
+    artifact_dir_cvqvae = artifact_cvqvae.download()
+    artifact_dir_vqvae = artifact_vqvae.download()
+    artifact_dir_transformer = artifact_transformer.download()
+
+    ckpt_path_cvqvae = os.path.join(artifact_dir_cvqvae, "lv_cvqvae.pth")
+    ckpt_path_vqvae = os.path.join(artifact_dir_vqvae, "lv_vqvae.pth")
+    ckpt_path_transformer = os.path.join(artifact_dir_transformer, "transformer.pth")
+    ckpt_cvqvae = th.load(ckpt_path_cvqvae, map_location=th.device(device), weights_only=False)
+    ckpt_vqvae = th.load(ckpt_path_vqvae, map_location=th.device(device), weights_only=False)
+
+    # Extract the nested lv_state dictionary and pruning attributes
+    lv_state = ckpt_vqvae.get("lv_state", {})
+    active_mask = lv_state.get("active_mask", None)
+    frozen_mean = lv_state.get("frozen_mean", None)
+
+    ckpt_transformer = th.load(ckpt_path_transformer, map_location=th.device(device), weights_only=False)
+
+    vqvae = VQVAE(
+        device=device,
+        is_c=False,
+        use_vq=run.config.get("use_vq", True),
+        encoder_channels=run.config["encoder_channels"],
+        encoder_start_resolution=run.config["image_size"],
+        encoder_attn_resolutions=run.config["encoder_attn_resolutions"],
+        encoder_num_res_blocks=run.config["encoder_num_res_blocks"],
+        decoder_channels=run.config["decoder_channels"],
+        decoder_start_resolution=run.config["latent_size"],
+        decoder_num_res_blocks=run.config["decoder_num_res_blocks"],
+        image_channels=run.config["image_channels"],
+        latent_dim=run.config["latent_dim"],
+        num_codebook_vectors=run.config["num_codebook_vectors"],
+    )
+    vqvae.load_state_dict(ckpt_vqvae["vqvae"])
+    vqvae.eval()
+    vqvae.to(device)
+
+    cvqvae = VQVAE(
+        device=device,
+        is_c=True,
+        cond_feature_map_dim=run.config["cond_feature_map_dim"],
+        cond_dim=run.config["cond_dim"],
+        cond_hidden_dim=run.config["cond_hidden_dim"],
+        cond_latent_dim=run.config["cond_latent_dim"],
+        cond_codebook_vectors=run.config["cond_codebook_vectors"],
+    )
+    cvqvae.load_state_dict(ckpt_cvqvae["cvqvae"])
+    cvqvae.eval()
+    cvqvae.to(device)
+
+    model = VQVAETransformer(
+        conditional=run.config["conditional"],
+        vqvae=vqvae,
+        cvqvae=cvqvae,
+        image_size=run.config["image_size"],
+        decoder_channels=run.config["decoder_channels"],
+        cond_feature_map_dim=run.config["cond_feature_map_dim"],
+        num_codebook_vectors=run.config["num_codebook_vectors"],
+        n_layer=run.config["n_layer"],
+        n_head=run.config["n_head"],
+        n_embd=run.config["n_embd"],
+        dropout=run.config["dropout"],
+    )
+    model.load_state_dict(ckpt_transformer["transformer"])
+    model.eval()
+    model.to(device)
+
+    # Assign both state variables with correct dtypes so the Transformer can pass them down to VQVAE methods
+    if active_mask is not None and frozen_mean is not None:
+        model.active_mask = active_mask.to(device=device, dtype=th.bool)
+        model.frozen_mean = frozen_mean.to(device=device, dtype=th.float32)
+
+    ### Set up testing conditions ###
+    _, sampled_conditions, sampled_designs_np, _ = sample_conditions(
+        problem=problem, n_samples=args.n_samples, device=device, seed=seed
+    )
+
+    # Clean up conditions based on model training settings and convert back to tensor
+    sampled_conditions_new = sampled_conditions.select(range(len(sampled_conditions)))
+    conditions = sampled_conditions_new.column_names
+
+    # Drop constant condition columns if enabled
+    if run.config["drop_constant_conditions"]:
+        sampled_conditions_new, conditions = drop_constant(sampled_conditions_new, sampled_conditions_new.column_names)
+
+    # Normalize condition columns if enabled
+    if run.config["normalize_conditions"]:
+        sampled_conditions_new, mean, std = normalize(sampled_conditions_new, conditions)
+
+    # Convert to tensor
+    conditions_tensor = th.stack([th.as_tensor(sampled_conditions_new[c][:]).float() for c in conditions], dim=1).to(device)
+    sampled_designs_tensor = th.as_tensor(sampled_designs_np, dtype=th.float32, device=device)
+
+    if sampled_designs_tensor.dim() == 3:  # noqa: PLR2004
+        sampled_designs_tensor = sampled_designs_tensor.unsqueeze(1)
+
+    resized_test_designs = resize_to(
+        data=sampled_designs_tensor,
+        h=run.config["image_size"],
+        w=run.config["image_size"]
+    )
+
+    # ==========================================================================
+    # RUN DIAGNOSTICS BEFORE EVALUATION
+    # ==========================================================================
+    run_pipeline_diagnostics(
+        vqvae=vqvae,
+        model=model,
+        test_designs=resized_test_designs,
+        test_conds=conditions_tensor,
+        run_config=run.config,
+        active_mask=active_mask
+    )
+
+    # Set the start-of-sequence tokens for the transformer using the CVQVAE to discretize the conditions if enabled
+    if run.config["conditional"]:
+        c = model.encode_to_z(x=conditions_tensor, is_c=True)[1]
+    else:
+        c = th.ones(args.n_samples, 1, dtype=th.int64, device=device) * model.sos_token
+
+    # Generate a batch of designs
+    print("Generating autoregressive designs for evaluation metrics...")
+    latent_designs = model.sample(
+        x=th.empty(args.n_samples, 0, dtype=th.int64, device=device), c=c, steps=(run.config["latent_size"] ** 2)
+    )
+    gen_designs = resize_to(
+        data=model.z_to_image(latent_designs), h=problem.design_space.shape[0], w=problem.design_space.shape[1]
+    )
+    gen_designs_np = gen_designs.detach().cpu().numpy()
+    gen_designs_np = gen_designs_np.reshape(args.n_samples, *problem.design_space.shape)
+
+    # Clip to boundaries for running THIS IS PROBLEM DEPENDENT
+    gen_designs_np = np.clip(gen_designs_np, 1e-3, 1)
+
+    # Compute metrics
+    metrics_dict = metrics.metrics(
+        problem,
+        gen_designs_np,
+        sampled_designs_np,
+        sampled_conditions,
+        sigma=args.sigma,
+    )
+
+    metrics_dict.update(
+        {
+            "seed": seed,
+            "problem_id": args.problem_id,
+            "model_id": "lv_vqvae",
+            "n_samples": args.n_samples,
+            "sigma": args.sigma,
+        }
+    )
+
+    # Append result row to CSV
+    os.makedirs("evals", exist_ok=True)
+    metrics_df = pd.DataFrame([metrics_dict])
+    out_path = os.path.join("evals", args.output_csv.format(problem_id=args.problem_id))
+    write_header = not os.path.exists(out_path)
+    metrics_df.to_csv(out_path, mode="a", header=write_header, index=False)
+
+    # --------------------------------------------------------------------------
+    # Plot and Save Test vs. Generated Visual Comparisons
+    # --------------------------------------------------------------------------
+    num_vis = min(8, args.n_samples) # How many pairs to plot
+    fig, axes = plt.subplots(num_vis, 2, figsize=(6, 2 * num_vis))
+    for i in range(num_vis):
+        ax_true = axes[i, 0] if num_vis > 1 else axes[0]
+        ax_gen = axes[i, 1] if num_vis > 1 else axes[1]
+
+        # Squeeze in case the shape is (1, H, W) to make it (H, W) for imshow
+        img_true = sampled_designs_np[i].squeeze()
+        img_gen = gen_designs_np[i].squeeze()
+
+        ax_true.imshow(img_true, cmap="gray_r", vmin=0, vmax=1)
+        ax_true.axis("off")
+        if i == 0:
+            ax_true.set_title("Ground Truth (Test)")
+
+        ax_gen.imshow(img_gen, cmap="gray_r", vmin=0, vmax=1)
+        ax_gen.axis("off")
+        if i == 0:
+            ax_gen.set_title("Generated (LV-VQVAE)")
+
+    plt.tight_layout()
+    img_out_path = os.path.join("evals", f"{args.problem_id}_seed_{seed}_lv_vqvae_comparison.png")
+    plt.savefig(img_out_path, dpi=300, bbox_inches="tight")
+    plt.close()
+
+    print(f"Saved visual comparison to {img_out_path}")
+    print(f"Seed {seed} done; appended to {out_path}")
