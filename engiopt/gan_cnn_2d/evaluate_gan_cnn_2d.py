@@ -12,9 +12,10 @@ import torch as th
 import tyro
 
 from engiopt import metrics
+from engiopt.checkpoint_store import ModelSource
+from engiopt.checkpoint_store import resolve_named_checkpoint
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.gan_cnn_2d.gan_cnn_2d import Generator
-import wandb
 
 
 @dataclasses.dataclass
@@ -29,6 +30,14 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name (if any)."""
+    model_source: ModelSource = "auto"
+    """Where to load the checkpoint package from."""
+    hf_entity: str = "IDEALLab"
+    """HF org/user where checkpoints are stored."""
+    hf_repo_prefix: str = "engiopt"
+    """HF repo prefix used for model-family repositories."""
+    local_model_dir: str | None = None
+    """Optional local checkpoint package directory."""
     n_samples: int = 50
     """Number of generated samples per seed."""
     sigma: float = 10.0
@@ -66,33 +75,30 @@ if __name__ == "__main__":
 
     ### Set Up Generator ###
 
-    # Restores the pytorch model from wandb
-    if args.wandb_entity is not None:
-        artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_gan_cnn_2d_generator:seed_{seed}"
-    else:
-        artifact_path = f"{args.wandb_project}/{args.problem_id}_gan_cnn_2d_generator:seed_{seed}"
+    resolved = resolve_named_checkpoint(
+        model_source=args.model_source,
+        problem_id=args.problem_id,
+        algo="gan_cnn_2d",
+        seed=seed,
+        hf_entity=args.hf_entity,
+        hf_repo_prefix=args.hf_repo_prefix,
+        required_files=["generator.pth"],
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_artifact_names={"generator.pth": f"{args.problem_id}_gan_cnn_2d_generator"},
+        local_model_dir=args.local_model_dir,
+    )
+    run_config = resolved.run_config
 
-    api = wandb.Api()
-    artifact = api.artifact(artifact_path, type="model")
-
-    class RunRetrievalError(ValueError):
-        def __init__(self):
-            super().__init__("Failed to retrieve the run")
-
-    run = artifact.logged_by()
-    if run is None or not hasattr(run, "config"):
-        raise RunRetrievalError
-    artifact_dir = artifact.download()
-
-    ckpt_path = os.path.join(artifact_dir, "generator.pth")
+    ckpt_path = resolved.files["generator.pth"]
     ckpt = th.load(ckpt_path, map_location=th.device(device))
-    model = Generator(latent_dim=run.config["latent_dim"], design_shape=problem.design_space.shape)
+    model = Generator(latent_dim=run_config["latent_dim"], design_shape=problem.design_space.shape)
     model.load_state_dict(ckpt["generator"])
     model.eval()  # Set to evaluation mode
     model.to(device)
 
     # Sample noise as generator input
-    z = th.randn((args.n_samples, run.config["latent_dim"], 1, 1), device=device, dtype=th.float)
+    z = th.randn((args.n_samples, run_config["latent_dim"], 1, 1), device=device, dtype=th.float)
 
     # Generate a batch of designs
     gen_designs = model(z)

@@ -15,9 +15,10 @@ import torch as th
 import tyro
 
 from engiopt import metrics
+from engiopt.checkpoint_store import ModelSource
+from engiopt.checkpoint_store import resolve_named_checkpoint
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.diffusion_1d.diffusion_1d import prepare_data
-import wandb
 
 
 @dataclasses.dataclass
@@ -32,6 +33,14 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
+    model_source: ModelSource = "auto"
+    """Where to load the checkpoint package from."""
+    hf_entity: str = "IDEALLab"
+    """HF org/user where checkpoints are stored."""
+    hf_repo_prefix: str = "engiopt"
+    """HF repo prefix used for model-family repositories."""
+    local_model_dir: str | None = None
+    """Optional local checkpoint package directory."""
     n_samples: int = 10
     """Number of generated samples per seed."""
     sigma: float = 10.0
@@ -83,31 +92,29 @@ if __name__ == "__main__":
     )
 
     ### Load Diffusion Model ###
-    if args.wandb_entity is not None:
-        artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_diffusion_1d_model:seed_{seed}"
-    else:
-        artifact_path = f"{args.wandb_project}/{args.problem_id}_diffusion_1d_model:seed_{seed}"
+    resolved = resolve_named_checkpoint(
+        model_source=args.model_source,
+        problem_id=args.problem_id,
+        algo="diffusion_1d",
+        seed=seed,
+        hf_entity=args.hf_entity,
+        hf_repo_prefix=args.hf_repo_prefix,
+        required_files=["model.pth"],
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_artifact_names={"model.pth": f"{args.problem_id}_diffusion_1d_model"},
+        local_model_dir=args.local_model_dir,
+    )
+    run_config = resolved.run_config
 
-    api = wandb.Api()
-    artifact = api.artifact(artifact_path, type="model")
-
-    class RunRetrievalError(ValueError):
-        def __init__(self):
-            super().__init__("Failed to retrieve the run")
-
-    run = artifact.logged_by()
-    if run is None or not hasattr(run, "config"):
-        raise RunRetrievalError
-
-    artifact_dir = artifact.download()
-    ckpt_path = os.path.join(artifact_dir, "model.pth")
+    ckpt_path = resolved.files["model.pth"]
     ckpt = th.load(ckpt_path, map_location=device)
 
     _, design_normalizer = prepare_data(problem, padding_size, device)
 
     model = Unet1D(
-        dim=run.config["unet_dim"],  # Used for the sinusoidal positional embeddings
-        channels=run.config["n_channels"],  # Number of channels in the input
+        dim=run_config["unet_dim"],  # Used for the sinusoidal positional embeddings
+        channels=run_config["n_channels"],  # Number of channels in the input
     ).to(device)
 
     diffusion = GaussianDiffusion1D(

@@ -10,9 +10,10 @@ import numpy as np
 import pandas as pd
 import torch as th
 import tyro
-import wandb
 
 from engiopt import metrics
+from engiopt.checkpoint_store import ModelSource
+from engiopt.checkpoint_store import resolve_named_checkpoint
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.transforms import drop_constant
 from engiopt.transforms import normalize
@@ -33,6 +34,14 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
+    model_source: ModelSource = "auto"
+    """Where to load the checkpoint package from."""
+    hf_entity: str = "IDEALLab"
+    """HF organization or user for checkpoint storage."""
+    hf_repo_prefix: str = "engiopt"
+    """HF repo prefix used to build per-family model repos."""
+    local_model_dir: str | None = None
+    """Optional local checkpoint package directory."""
     n_samples: int = 50
     """Number of generated samples per seed."""
     sigma: float = 10.0
@@ -62,57 +71,67 @@ if __name__ == "__main__":
 
     ### Set Up Transformer ###
 
-    # Restores the pytorch model from wandb
-    if args.wandb_entity is not None:
-        artifact_path_cvqgan = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_vqgan_cvqgan:seed_{seed}"
-        artifact_path_vqgan = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_vqgan_vqgan:seed_{seed}"
-        artifact_path_transformer = (
-            f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_vqgan_transformer:seed_{seed}"
+    resolved = resolve_named_checkpoint(
+        model_source=args.model_source,
+        problem_id=args.problem_id,
+        algo="vqgan",
+        seed=seed,
+        hf_entity=args.hf_entity,
+        hf_repo_prefix=args.hf_repo_prefix,
+        required_files=["vqgan.pth", "transformer.pth"],
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_artifact_names={
+            "vqgan.pth": f"{args.problem_id}_vqgan_vqgan",
+            "transformer.pth": f"{args.problem_id}_vqgan_transformer",
+        },
+        wandb_config_artifact_name=f"{args.problem_id}_vqgan_transformer",
+        local_model_dir=args.local_model_dir,
+    )
+    run_config = resolved.run_config
+
+    ckpt_path_cvqgan = os.path.join(resolved.root_dir, "cvqgan.pth")
+    if run_config["conditional"] and not os.path.exists(ckpt_path_cvqgan):
+        cvqgan_resolved = resolve_named_checkpoint(
+            model_source="wandb" if args.model_source == "wandb" else "auto",
+            problem_id=args.problem_id,
+            algo="vqgan",
+            seed=seed,
+            hf_entity=args.hf_entity,
+            hf_repo_prefix=args.hf_repo_prefix,
+            required_files=["cvqgan.pth"],
+            wandb_project=args.wandb_project,
+            wandb_entity=args.wandb_entity,
+            wandb_artifact_names={"cvqgan.pth": f"{args.problem_id}_vqgan_cvqgan"},
+            wandb_config_artifact_name=f"{args.problem_id}_vqgan_transformer",
+            local_model_dir=args.local_model_dir,
         )
-    else:
-        artifact_path_cvqgan = f"{args.wandb_project}/{args.problem_id}_vqgan_cvqgan:seed_{seed}"
-        artifact_path_vqgan = f"{args.wandb_project}/{args.problem_id}_vqgan_vqgan:seed_{seed}"
-        artifact_path_transformer = f"{args.wandb_project}/{args.problem_id}_vqgan_transformer:seed_{seed}"
+        ckpt_path_cvqgan = cvqgan_resolved.files["cvqgan.pth"]
 
-    api = wandb.Api()
-    artifact_cvqgan = api.artifact(artifact_path_cvqgan, type="model")
-    artifact_vqgan = api.artifact(artifact_path_vqgan, type="model")
-    artifact_transformer = api.artifact(artifact_path_transformer, type="model")
-
-    class RunRetrievalError(ValueError):
-        def __init__(self):
-            super().__init__("Failed to retrieve the run")
-
-    run = artifact_transformer.logged_by()
-    if run is None:
-        raise RunRetrievalError
-    run = api.run(f"{run.entity}/{run.project}/{run.id}")
-
-    artifact_dir_cvqgan = artifact_cvqgan.download()
-    artifact_dir_vqgan = artifact_vqgan.download()
-    artifact_dir_transformer = artifact_transformer.download()
-
-    ckpt_path_cvqgan = os.path.join(artifact_dir_cvqgan, "cvqgan.pth")
-    ckpt_path_vqgan = os.path.join(artifact_dir_vqgan, "vqgan.pth")
-    ckpt_path_transformer = os.path.join(artifact_dir_transformer, "transformer.pth")
-    ckpt_cvqgan = th.load(ckpt_path_cvqgan, map_location=th.device(device), weights_only=False)
+    ckpt_path_vqgan = resolved.files["vqgan.pth"]
+    ckpt_path_transformer = resolved.files["transformer.pth"]
+    ckpt_cvqgan = None
+    if os.path.exists(ckpt_path_cvqgan):
+        ckpt_cvqgan = th.load(ckpt_path_cvqgan, map_location=th.device(device), weights_only=False)
+    elif run_config["conditional"]:
+        raise FileNotFoundError("Conditional VQGAN evaluation requires cvqgan.pth, but no checkpoint was found.")
     ckpt_vqgan = th.load(ckpt_path_vqgan, map_location=th.device(device), weights_only=False)
     ckpt_transformer = th.load(ckpt_path_transformer, map_location=th.device(device), weights_only=False)
 
     vqgan = VQGAN(
         device=device,
         is_c=False,
-        encoder_channels=run.config["encoder_channels"],
-        encoder_start_resolution=run.config["image_size"],
-        encoder_attn_resolutions=run.config["encoder_attn_resolutions"],
-        encoder_num_res_blocks=run.config["encoder_num_res_blocks"],
-        decoder_channels=run.config["decoder_channels"],
-        decoder_start_resolution=run.config["latent_size"],
-        decoder_attn_resolutions=run.config["decoder_attn_resolutions"],
-        decoder_num_res_blocks=run.config["decoder_num_res_blocks"],
-        image_channels=run.config["image_channels"],
-        latent_dim=run.config["latent_dim"],
-        num_codebook_vectors=run.config["num_codebook_vectors"],
+        encoder_channels=run_config["encoder_channels"],
+        encoder_start_resolution=run_config["image_size"],
+        encoder_attn_resolutions=run_config["encoder_attn_resolutions"],
+        encoder_num_res_blocks=run_config["encoder_num_res_blocks"],
+        decoder_channels=run_config["decoder_channels"],
+        decoder_start_resolution=run_config["latent_size"],
+        decoder_attn_resolutions=run_config["decoder_attn_resolutions"],
+        decoder_num_res_blocks=run_config["decoder_num_res_blocks"],
+        image_channels=run_config["image_channels"],
+        latent_dim=run_config["latent_dim"],
+        num_codebook_vectors=run_config["num_codebook_vectors"],
     )
     vqgan.load_state_dict(ckpt_vqgan["vqgan"])
     vqgan.eval()  # Set to evaluation mode
@@ -121,35 +140,36 @@ if __name__ == "__main__":
     cvqgan = VQGAN(
         device=device,
         is_c=True,
-        cond_feature_map_dim=run.config["cond_feature_map_dim"],
-        cond_dim=run.config["cond_dim"],
-        cond_hidden_dim=run.config["cond_hidden_dim"],
-        cond_latent_dim=run.config["cond_latent_dim"],
-        cond_codebook_vectors=run.config["cond_codebook_vectors"],
+        cond_feature_map_dim=run_config["cond_feature_map_dim"],
+        cond_dim=run_config["cond_dim"],
+        cond_hidden_dim=run_config["cond_hidden_dim"],
+        cond_latent_dim=run_config["cond_latent_dim"],
+        cond_codebook_vectors=run_config["cond_codebook_vectors"],
     )
-    cvqgan.load_state_dict(ckpt_cvqgan["cvqgan"])
+    if ckpt_cvqgan is not None:
+        cvqgan.load_state_dict(ckpt_cvqgan["cvqgan"])
     cvqgan.eval()  # Set to evaluation mode
     cvqgan.to(device)
 
     model = VQGANTransformer(
-        conditional=run.config["conditional"],
+        conditional=run_config["conditional"],
         vqgan=vqgan,
         cvqgan=cvqgan,
-        image_size=run.config["image_size"],
-        decoder_channels=run.config["decoder_channels"],
-        cond_feature_map_dim=run.config["cond_feature_map_dim"],
-        num_codebook_vectors=run.config["num_codebook_vectors"],
-        n_layer=run.config["n_layer"],
-        n_head=run.config["n_head"],
-        n_embd=run.config["n_embd"],
-        dropout=run.config["dropout"],
+        image_size=run_config["image_size"],
+        decoder_channels=run_config["decoder_channels"],
+        cond_feature_map_dim=run_config["cond_feature_map_dim"],
+        num_codebook_vectors=run_config["num_codebook_vectors"],
+        n_layer=run_config["n_layer"],
+        n_head=run_config["n_head"],
+        n_embd=run_config["n_embd"],
+        dropout=run_config["dropout"],
     )
     model.load_state_dict(ckpt_transformer["transformer"])
     model.eval()  # Set to evaluation mode
     model.to(device)
 
     ### Set up testing conditions ###
-    _, sampled_conditions, sampled_designs_np, _ = sample_conditions(
+    _, sampled_conditions, sampled_designs_np, _sampled_designs_tensor = sample_conditions(
         problem=problem, n_samples=args.n_samples, device=device, seed=seed
     )
 
@@ -158,25 +178,25 @@ if __name__ == "__main__":
     conditions = sampled_conditions_new.column_names
 
     # Drop constant condition columns if enabled
-    if run.config["drop_constant_conditions"]:
+    if run_config["drop_constant_conditions"]:
         sampled_conditions_new, conditions = drop_constant(sampled_conditions_new, sampled_conditions_new.column_names)
 
     # Normalize condition columns if enabled
-    if run.config["normalize_conditions"]:
+    if run_config["normalize_conditions"]:
         sampled_conditions_new, mean, std = normalize(sampled_conditions_new, conditions)
 
     # Convert to tensor
     conditions_tensor = th.stack([th.as_tensor(sampled_conditions_new[c][:]).float() for c in conditions], dim=1).to(device)
 
     # Set the start-of-sequence tokens for the transformer using the CVQGAN to discretize the conditions if enabled
-    if run.config["conditional"]:
+    if run_config["conditional"]:
         c = model.encode_to_z(x=conditions_tensor, is_c=True)[1]
     else:
         c = th.ones(args.n_samples, 1, dtype=th.int64, device=device) * model.sos_token
 
     # Generate a batch of designs
     latent_designs = model.sample(
-        x=th.empty(args.n_samples, 0, dtype=th.int64, device=device), c=c, steps=(run.config["latent_size"] ** 2)
+        x=th.empty(args.n_samples, 0, dtype=th.int64, device=device), c=c, steps=(run_config["latent_size"] ** 2)
     )
     gen_designs = resize_to(
         data=model.z_to_image(latent_designs), h=problem.design_space.shape[0], w=problem.design_space.shape[1]

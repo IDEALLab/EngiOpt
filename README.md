@@ -39,7 +39,7 @@ As much as we can, we follow the [CleanRL](https://github.com/vwxyzjn/cleanrl) p
 [pixel_cnn_pp_2d](engiopt/pixel_cnn_pp_2d) | Inverse Design | 2D | ✅ | PixelCNN++ Autoregressive Model
 
 ## Dashboards
-The integration with WandB allows us to access live dashboards of our runs (on the cluster or not). We also upload the trained models there. You can access some of our runs at https://wandb.ai/engibench/engiopt.
+The integration with WandB allows us to access live dashboards of our runs (on the cluster or not). New checkpoint packages are stored on the Hugging Face Hub by default, while WandB keeps experiment tracking, metadata, and links back to the canonical checkpoint location. Historical WandB model artifacts remain supported for backward compatibility. You can access some of our runs at https://wandb.ai/engibench/engiopt.
 <img src="imgs/wandb_dashboard.png" alt="WandB dashboards"/>
 
 
@@ -66,6 +66,11 @@ First, if you want to use weights and biases, you need to set the `WANDB_API_KEY
 wandb login
 ```
 
+If you want to save or load checkpoints from Hugging Face Hub, make sure your environment is authenticated there as well:
+```
+huggingface-cli login
+```
+
 ### Inverse design
 Usually, we provide two scripts per algorithm: one to train the model, and one to evaluate it.
 
@@ -76,6 +81,19 @@ python engiopt/cgan_cnn_2d/cgan_cnn_2d.py --problem-id "beams2d" --track --wandb
 ```
 
 This will run a CGAN 2D using CNN model on the beams2d problem. `--track` will track the run on wandb, `--wandb-entity None` will use the default wandb entity, `--save-model` will save the model, `--n-epochs 200` will run for 200 epochs, and `--seed 1` will set the random seed.
+
+By default, `--save-model` now stores a self-contained checkpoint package on the Hugging Face Hub. The default backend is:
+```
+--checkpoint-backend hf
+```
+You can still force legacy or hybrid behavior when needed:
+```
+--checkpoint-backend wandb
+--checkpoint-backend both
+--checkpoint-backend none
+```
+
+All HF-backed checkpoint packages contain the model files together with `run_config.json` and `metadata.json`, so evaluation does not depend on live WandB run config state.
 
 For reproducible debugging runs, you can additionally enable strict deterministic mode:
 ```
@@ -95,7 +113,26 @@ Then you can restore a trained model and evaluate it:
 ```
 python engiopt/cgan_cnn_2d/evaluate_cgan_cnn_2d.py --problem-id "beams2d" --wandb-entity None --seed 1 --n-samples 10
 ```
-This will generate 10 designs from the trained model and run some [metrics](https://github.com/IDEALLab/EngiOpt/blob/main/engiopt/metrics.py) on them. This is what we used to generate the results in the paper. This by default will pull the model from wandb. It is possible to restore a model from a local file but is not currently supported.
+This will generate 10 designs from the trained model and run some [metrics](https://github.com/IDEALLab/EngiOpt/blob/main/engiopt/metrics.py) on them. This is what we used to generate the results in the paper.
+
+Evaluation now defaults to:
+```
+--model-source auto
+```
+In `auto` mode, EngiOpt tries to resolve checkpoints in this order:
+1. Hugging Face package for the model family, problem, and seed
+2. Legacy WandB model artifact
+3. Explicit local checkpoint package directory if you pass `--local-model-dir`
+
+You can force legacy WandB loading for historical runs:
+```
+python engiopt/cgan_cnn_2d/evaluate_cgan_cnn_2d.py --problem-id "beams2d" --seed 1 --model-source wandb
+```
+
+You can also point evaluation at a local package directory:
+```
+python engiopt/cgan_cnn_2d/evaluate_cgan_cnn_2d.py --problem-id "beams2d" --seed 1 --model-source local --local-model-dir /path/to/package
+```
 
 ### Surrogate model
 
@@ -106,6 +143,13 @@ The current surrogate model comprises several steps:
 - evaluation.
 
 See this [notebook](https://github.com/IDEALLab/EngiOpt/blob/main/engiopt/surrogate_model/case_study_pe_notebook.ipynb) for an example.
+
+Surrogate-model optimization paths now use the same checkpoint abstraction. For example, the power-electronics optimizer can consume:
+* legacy WandB artifact refs
+* HF package refs such as `hf://IDEALLab/engiopt-mlp-tabular-only/power_electronics/DcGain/seed_42`
+* local checkpoint package directories
+
+For migration guidance on moving historical checkpoint subsets from WandB to the IDEALLab HF organization later, see [docs/checkpoint_migration_playbook.md](docs/checkpoint_migration_playbook.md).
 
 
 
