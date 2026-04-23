@@ -18,13 +18,13 @@ import torch as th
 from torch import nn
 import torch.nn.functional as f
 import tyro
-import wandb
 
 from engiopt.checkpoint_store import CheckpointBackend
 from engiopt.checkpoint_store import save_checkpoint_package
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
+import wandb
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -658,7 +658,10 @@ if __name__ == "__main__":
                     problem_id=args.problem_id,
                     algo=args.algo,
                     seed=args.seed,
-                    checkpoint_files={"bezier_generator.pth": "bezier_generator.pth", "bezier_discriminator.pth": "bezier_discriminator.pth"},
+                    checkpoint_files={
+                        "bezier_generator.pth": "bezier_generator.pth",
+                        "bezier_discriminator.pth": "bezier_discriminator.pth",
+                    },
                     run_config=vars(args),
                     primary_files=["bezier_generator.pth"],
                     wandb_artifacts={

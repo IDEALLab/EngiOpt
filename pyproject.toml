@@ -295,6 +295,8 @@ module = [
     "plotly.*",
     "einops",
     "einops.*",
+    "huggingface_hub",
+    "huggingface_hub.*",
     "torchvision.*",
     "requests",
 ]

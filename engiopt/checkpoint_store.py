@@ -353,7 +353,9 @@ def _resolve_wandb_reference(
     )
 
 
-def _load_package_from_directory(*, root_dir: str, required_files: list[str], source: Literal["hf", "local"]) -> ResolvedCheckpoint:
+def _load_package_from_directory(
+    *, root_dir: str, required_files: list[str], source: Literal["hf", "local"]
+) -> ResolvedCheckpoint:
     run_config_path = os.path.join(root_dir, "run_config.json")
     metadata_path = os.path.join(root_dir, "metadata.json")
     if not os.path.exists(run_config_path):
@@ -404,10 +406,7 @@ def _parse_hf_reference(model_ref: str) -> tuple[str, str]:
     first_sep = normalized.find("/")
     second_sep = normalized.find("/", first_sep + 1)
     if first_sep == -1 or second_sep == -1:
-        raise ValueError(
-            "HF model references must look like hf://<entity>/<repo>/<package_path>, "
-            f"got {model_ref}"
-        )
+        raise ValueError(f"HF model references must look like hf://<entity>/<repo>/<package_path>, got {model_ref}")
     repo_id = normalized[:second_sep]
     package_path = normalized[second_sep + 1 :]
     return repo_id, package_path
