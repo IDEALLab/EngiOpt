@@ -228,6 +228,7 @@ if __name__ == "__main__":
             n_samples=args.validation_batch_size,
             device=device,
             seed=args.seed + 123,
+            split="val",
         )
         validation_conditions_tensor = validation_conditions_tensor.reshape(
             args.validation_batch_size, 1, encoder_hid_dim

@@ -10,7 +10,11 @@ import torch as th
 
 
 def sample_conditions(
-    problem: Problem, n_samples: int, device: th.device, seed: int
+    problem: Problem,
+    n_samples: int,
+    device: th.device,
+    seed: int,
+    split: str = "test",
 ) -> tuple[th.Tensor, Dataset, np.ndarray, np.ndarray]:
     """Samples conditions and designs from the dataset and prepares tensors for the generator.
 
@@ -19,6 +23,7 @@ def sample_conditions(
     n_samples (int): Number of samples to draw.
     device (th.device): The device (e.g., 'cpu', 'mps', 'cuda') to place the tensors on.
     seed (int): Random seed for reproducibility.
+    split (str): Dataset split to sample from. Must be one of "train", "val", or "test".
 
     Returns:
     conditions_tensor: A PyTorch tensor of sampled conditions, reshaped for the generator.
@@ -26,14 +31,17 @@ def sample_conditions(
     sampled_designs_np: A NumPy array of sampled optimal designs.
     selected_indices: The indices of the sampled conditions and designs.
     """
-    ### Set up testing conditions ###
+    if split not in {"train", "val", "test"}:
+        raise ValueError(f"Invalid split '{split}'. Expected one of: train, val, test")
+
+    # Set up held-out conditions.
     rng = np.random.default_rng(seed)
 
     # Extract the conditions
-    dataset = problem.dataset["test"]
+    dataset = problem.dataset[split]
     conditions_ds = dataset.select_columns(problem.conditions_keys)
 
-    # Sample conditions and test_ds designs at random indices
+    # Sample conditions and reference designs at random indices
     selected_indices = rng.choice(len(dataset), n_samples, replace=True)
     sampled_conditions = conditions_ds.select(selected_indices)
     sampled_designs_np = np.array(dataset["optimal_design"])[selected_indices]
