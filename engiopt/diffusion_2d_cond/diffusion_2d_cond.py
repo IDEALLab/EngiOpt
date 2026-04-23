@@ -89,6 +89,8 @@ class Args:
     """Compute validation metrics every N epochs."""
     early_stopping_patience: int = 25
     """Stop training if no validation improvement is seen after this many validation checks."""
+    min_epoch_for_best_selection: int = 80
+    """Minimum epoch (1-based) before best-epoch updates and early stopping are enabled."""
 
 
 def beta_schedule(
@@ -525,29 +527,44 @@ if __name__ == "__main__":
                 )
             model.train()
 
-            is_best = best_epoch_tracker.update(epoch, validation_metric_value)
-            if args.early_stopping_patience > 0:
-                if is_best:
-                    validation_checks_without_improvement = 0
-                else:
-                    validation_checks_without_improvement += 1
-                    if validation_checks_without_improvement >= args.early_stopping_patience:
-                        print(
-                            f"Early stopping after {args.early_stopping_patience} validation checks without improvement"
-                        )
-                        stop_training = True
-            if args.track:
-                wandb.log(
-                    {
-                        "validation/mmd": validation_metric_value,
-                        "validation/is_best": is_best,
-                        "validation/best_mmd": validation_metric_value,
-                    }
+            is_best = False
+            if epoch + 1 >= args.min_epoch_for_best_selection:
+                is_best = best_epoch_tracker.update(epoch, validation_metric_value)
+                if args.early_stopping_patience > 0:
+                    if is_best:
+                        validation_checks_without_improvement = 0
+                    else:
+                        validation_checks_without_improvement += 1
+                        if validation_checks_without_improvement >= args.early_stopping_patience:
+                            print(
+                                f"Early stopping after {args.early_stopping_patience} validation checks without improvement"
+                            )
+                            stop_training = True
+                if args.track:
+                    wandb.log(
+                        {
+                            "validation/mmd": validation_metric_value,
+                            "validation/is_best": is_best,
+                            "validation/best_mmd": validation_metric_value,
+                        }
+                    )
+                print(
+                    f"Epoch {epoch+1} validation: mmd={validation_metric_value:.6f} "
+                    f"{'[BEST]' if is_best else ''}"
                 )
-            print(
-                f"Epoch {epoch+1} validation: mmd={validation_metric_value:.6f} "
-                f"{'[BEST]' if is_best else ''}"
-            )
+            else:
+                if args.track:
+                    wandb.log(
+                        {
+                            "validation/mmd": validation_metric_value,
+                            "validation/is_best": False,
+                            "validation/prewarm": 1,
+                        }
+                    )
+                print(
+                    f"Epoch {epoch+1} validation: mmd={validation_metric_value:.6f} "
+                    f"[PREWARM until epoch {args.min_epoch_for_best_selection}]"
+                )
             if stop_training:
                 break
 
