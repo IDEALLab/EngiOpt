@@ -95,6 +95,8 @@ class Args:
     """Batch size used for validation metric computation."""
     validation_sigma: float = 1.0
     """Bandwidth parameter used for MMD calculation."""
+    validation_log_precision: int = 10
+    """Number of decimal places used when printing validation MMD values."""
     validation_interval_epochs: int = 10
     """How often to compute validation metrics (epochs)."""
     early_stopping_patience: int = 25
@@ -396,11 +398,12 @@ if __name__ == "__main__":
                         {
                             "validation/mmd": validation_metric_value,
                             "validation/is_best": is_best,
-                            "validation/best_mmd": validation_metric_value,
+                            "validation/epoch": epoch + 1,
+                            "validation/checkpoint": (epoch + 1) // args.validation_interval_epochs,
                         }
                     )
                 print(
-                    f"Epoch {epoch+1} validation: mmd={validation_metric_value:.6f} "
+                    f"Epoch {epoch+1} validation: mmd={validation_metric_value:.{args.validation_log_precision}f} "
                     f"{'[BEST]' if is_best else ''}"
                 )
             else:
@@ -410,10 +413,12 @@ if __name__ == "__main__":
                             "validation/mmd": validation_metric_value,
                             "validation/is_best": False,
                             "validation/prewarm": 1,
+                            "validation/epoch": epoch + 1,
+                            "validation/checkpoint": (epoch + 1) // args.validation_interval_epochs,
                         }
                     )
                 print(
-                    f"Epoch {epoch+1} validation: mmd={validation_metric_value:.6f} "
+                    f"Epoch {epoch+1} validation: mmd={validation_metric_value:.{args.validation_log_precision}f} "
                     f"[PREWARM until epoch {args.min_epoch_for_best_selection}]"
                 )
             if stop_training:
@@ -490,7 +495,7 @@ if __name__ == "__main__":
             if best_checkpoint_path and best_checkpoint_path.exists():
                 print(
                     f"Loading best model from epoch {best_epoch_tracker.best_epoch+1} "
-                    f"(MMD: {best_epoch_tracker.best_metric_value:.6f})"
+                    f"(MMD: {best_epoch_tracker.best_metric_value:.{args.validation_log_precision}f})"
                 )
                 checkpoint_data = th.load(best_checkpoint_path, map_location=device)
                 model.load_state_dict(checkpoint_data["model"])
