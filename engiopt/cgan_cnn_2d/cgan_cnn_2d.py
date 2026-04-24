@@ -337,6 +337,7 @@ if __name__ == "__main__":
             checkpoint_dir=args.checkpoint_dir,
             metric_name="mmd",
             maximize=False,
+            min_epoch_for_best_selection=args.min_epoch_for_best_selection,
         )
 
     @th.no_grad()

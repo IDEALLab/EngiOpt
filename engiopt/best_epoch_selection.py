@@ -18,6 +18,7 @@ class BestEpochTracker:
         checkpoint_dir: Path | str,
         metric_name: str = "mmd",
         maximize: bool = False,
+        min_epoch_for_best_selection: int = 1,
     ):
         """Initialize tracker.
 
@@ -25,10 +26,12 @@ class BestEpochTracker:
             checkpoint_dir: Directory where checkpoints are saved.
             metric_name: Name of the metric to track (e.g., "mmd", "dpp").
             maximize: If True, higher is better. If False, lower is better.
+            min_epoch_for_best_selection: Earliest 1-based epoch allowed to update the best checkpoint.
         """
         self.checkpoint_dir = Path(checkpoint_dir)
         self.metric_name = metric_name
         self.maximize = maximize
+        self.min_epoch_for_best_selection = min_epoch_for_best_selection
         self.best_metric_value: float | None = None
         self.best_epoch: int | None = None
         self.metrics_history: dict[int, float] = {}
@@ -47,6 +50,10 @@ class BestEpochTracker:
             bool: True if this is the best metric value so far.
         """
         self.metrics_history[epoch] = metric_value
+
+        if epoch + 1 < self.min_epoch_for_best_selection:
+            self._save_metrics()
+            return False
 
         is_best = False
         if self.best_metric_value is None:

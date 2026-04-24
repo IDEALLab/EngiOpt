@@ -240,6 +240,7 @@ if __name__ == "__main__":
             checkpoint_dir=args.checkpoint_dir,
             metric_name="mmd",
             maximize=False,
+            min_epoch_for_best_selection=args.min_epoch_for_best_selection,
         )
 
     last_loss: float | None = None
@@ -482,7 +483,10 @@ if __name__ == "__main__":
     # Load best model before final save
     if args.enable_best_epoch_selection and best_epoch_tracker is not None:
         if best_epoch_tracker.best_epoch is not None:
-            best_checkpoint_path = best_epoch_tracker.get_best_checkpoint_path("epoch_{epoch:04d}.pth")
+            best_checkpoint_path = (
+                best_epoch_tracker.checkpoint_dir
+                / f"epoch_{best_epoch_tracker.best_epoch + 1:04d}.pth"
+            )
             if best_checkpoint_path and best_checkpoint_path.exists():
                 print(
                     f"Loading best model from epoch {best_epoch_tracker.best_epoch+1} "
