@@ -243,6 +243,7 @@ if __name__ == "__main__":
             metric_name="mmd",
             maximize=False,
             min_epoch_for_best_selection=args.min_epoch_for_best_selection,
+            top_k=5,
         )
 
     last_loss: float | None = None
@@ -505,6 +506,11 @@ if __name__ == "__main__":
                 print("Warning: best checkpoint not found, using final model")
         else:
             print("Warning: no validation metrics recorded, using final model")
+        
+        # Print top-5 summary
+        best_epoch_tracker.print_top_k_summary(label="🎯 Top-5 Validation Checkpoints (Best MMD)")
+    else:
+        print("Warning: no validation metrics recorded, using final model")
 
     if args.save_model and last_loss is not None:
         checkpoint = {
