@@ -271,7 +271,7 @@ if __name__ == "__main__":
     if args.track:
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args), save_code=True, name=run_name)
         wandb.define_metric("validation/epoch")
-        wandb.define_metric("validation/*", step_metric="validation/epoch")
+        wandb.define_metric("validation/mmd", step_metric="validation/epoch")
 
     # Seeding
     th.manual_seed(args.seed)
@@ -550,9 +550,7 @@ if __name__ == "__main__":
                     wandb.log(
                         {
                             "validation/mmd": validation_metric_value,
-                            "validation/is_best": is_best,
                             "validation/epoch": epoch + 1,
-                            "validation/checkpoint": (epoch + 1) // args.validation_interval_epochs,
                         }
                     )
                 print(
@@ -564,10 +562,7 @@ if __name__ == "__main__":
                     wandb.log(
                         {
                             "validation/mmd": validation_metric_value,
-                            "validation/is_best": False,
-                            "validation/prewarm": 1,
                             "validation/epoch": epoch + 1,
-                            "validation/checkpoint": (epoch + 1) // args.validation_interval_epochs,
                         }
                     )
                 print(
@@ -677,7 +672,7 @@ if __name__ == "__main__":
                             plt.close()
                             
                             wandb.log({
-                                f"top_5/rank_{rank}_epoch_{epoch + 1}": wandb.Image(
+                                f"top_5/rank_{rank}": wandb.Image(
                                     img_fname,
                                     caption=f"Rank {rank}: Epoch {epoch + 1}, MMD={mmd_value:.{args.validation_log_precision}f}"
                                 )
