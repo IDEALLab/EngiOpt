@@ -522,7 +522,7 @@ if __name__ == "__main__":
                 gen_designs_np = gen_designs.detach().cpu().numpy().reshape(
                     gen_designs.shape[0], *design_shape
                 )
-                gen_designs_np = np.clip(gen_designs_np, 0.0, 1.0)
+                gen_designs_np = np.clip(gen_designs_np, 1e-3, 1.0)
 
                 validation_metric_value = float(
                     metrics.mmd(
