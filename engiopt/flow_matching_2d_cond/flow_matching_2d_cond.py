@@ -176,6 +176,8 @@ if __name__ == "__main__":
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
     if args.track:
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args), save_code=True, name=run_name)
+        wandb.define_metric("validation/epoch")
+        wandb.define_metric("validation/*", step_metric="validation/epoch")
 
     th.manual_seed(args.seed)
     np.random.seed(args.seed)
@@ -509,6 +511,53 @@ if __name__ == "__main__":
         
         # Print top-5 summary
         best_epoch_tracker.print_top_k_summary(label="🎯 Top-5 Validation Checkpoints (Best MMD)")
+        
+        # Log top-5 design visualizations to W&B
+        if args.track:
+            top_k_epochs = best_epoch_tracker.get_top_k_epochs()
+            print(f"\nLogging top-5 design visualizations to W&B...")
+            for rank, item in enumerate(top_k_epochs, 1):
+                epoch = item["epoch"]
+                mmd_value = item["metric_value"]
+                checkpoint_path = best_epoch_tracker.checkpoint_dir / f"epoch_{epoch + 1:04d}.pth"
+                
+                if checkpoint_path.exists():
+                    try:
+                        checkpoint_data = th.load(checkpoint_path, map_location=device)
+                        model.load_state_dict(checkpoint_data["model"])
+                        
+                        with th.no_grad():
+                            preview_designs = generate_samples(
+                                model=model,
+                                design_shape=design_shape,
+                                encoder_hidden_states=sample_preview_conditions(conds_min, conds_max, 25, device),
+                                integration_steps=args.integration_steps,
+                                num_train_timesteps=args.num_train_timesteps,
+                                device=device,
+                                method=args.method,
+                                atol=args.atol,
+                                rtol=args.rtol,
+                            )
+                        
+                        img_fname = f"images/top5_rank_{rank}_epoch_{epoch + 1:04d}.png"
+                        save_design_grid(
+                            designs=preview_designs,
+                            hidden_states=sample_preview_conditions(conds_min, conds_max, 25, device),
+                            problem=problem,
+                            img_fname=img_fname,
+                            clip_min=args.clip_min,
+                            clip_max=args.clip_max,
+                        )
+                        wandb.log({
+                            f"top_5/rank_{rank}_epoch_{epoch + 1}": wandb.Image(
+                                img_fname,
+                                caption=f"Rank {rank}: Epoch {epoch + 1}, MMD={mmd_value:.{args.validation_log_precision}f}"
+                            )
+                        })
+                        print(f"  ✓ Logged rank {rank} (epoch {epoch + 1})")
+                    except Exception as e:
+                        print(f"  ✗ Failed to log rank {rank}: {e}")
+            print("Top-5 visualizations logged.")
     else:
         print("Warning: no validation metrics recorded, using final model")
 

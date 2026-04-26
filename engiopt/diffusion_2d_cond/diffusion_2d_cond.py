@@ -270,6 +270,8 @@ if __name__ == "__main__":
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
     if args.track:
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args), save_code=True, name=run_name)
+        wandb.define_metric("validation/epoch")
+        wandb.define_metric("validation/*", step_metric="validation/epoch")
 
     # Seeding
     th.manual_seed(args.seed)
@@ -640,6 +642,50 @@ if __name__ == "__main__":
             
             # Print top-5 summary
             best_epoch_tracker.print_top_k_summary(label="🎯 Top-5 Validation Checkpoints (Best MMD)")
+            
+            # Log top-5 design visualizations to W&B
+            if args.track:
+                top_k_epochs = best_epoch_tracker.get_top_k_epochs()
+                print("Logging top-5 design visualizations to W&B...")
+                for rank, item in enumerate(top_k_epochs, 1):
+                    epoch = item["epoch"]
+                    mmd_value = item["metric_value"]
+                    checkpoint_path = best_epoch_tracker.checkpoint_dir / f"epoch_{epoch + 1:04d}.pth"
+                    
+                    if checkpoint_path.exists():
+                        try:
+                            checkpoint_data = th.load(checkpoint_path, map_location=device)
+                            model.load_state_dict(checkpoint_data["model"])
+                            designs, hidden_states = sample_designs(model, 25)
+                            
+                            fig, axes = plt.subplots(5, 5, figsize=(12, 12))
+                            axes = axes.flatten()
+                            
+                            for j, tensor in enumerate(designs):
+                                img = tensor.cpu().numpy()
+                                dc = hidden_states[j, 0, :].cpu()
+                                axes[j].imshow(img[0])
+                                title = [(problem.conditions_keys[i], f"{dc[i]:.2f}") for i in range(len(problem.conditions_keys))]
+                                title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
+                                axes[j].title.set_text(title_string)
+                                axes[j].set_xticks([])
+                                axes[j].set_yticks([])
+                            
+                            plt.tight_layout()
+                            img_fname = f"images/top5_rank_{rank}_epoch_{epoch + 1:04d}.png"
+                            plt.savefig(img_fname)
+                            plt.close()
+                            
+                            wandb.log({
+                                f"top_5/rank_{rank}_epoch_{epoch + 1}": wandb.Image(
+                                    img_fname,
+                                    caption=f"Rank {rank}: Epoch {epoch + 1}, MMD={mmd_value:.{args.validation_log_precision}f}"
+                                )
+                            })
+                            print(f"  ✓ Logged rank {rank} (epoch {epoch + 1})")
+                        except (OSError, RuntimeError, ValueError):
+                            print(f"  ✗ Failed to log rank {rank}")
+                print("Top-5 visualizations logged.")
 
         ckpt_model = {
             "epoch": epoch,
