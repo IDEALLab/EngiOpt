@@ -80,6 +80,27 @@ class EvaluationContext:
     checkpoint_source: str
 
 
+def build_design_grid(designs_np: np.ndarray, rows: int = 5, cols: int = 5) -> np.ndarray:
+    """Build a simple tiled image grid from a batch of 2D designs."""
+    if designs_np.ndim == 4 and designs_np.shape[1] == 1:
+        designs_np = designs_np[:, 0]
+
+    if designs_np.ndim != 3:
+        raise ValueError(f"Expected designs with shape (n, h, w), got {designs_np.shape}")
+
+    n_tiles = rows * cols
+    n_samples, h, w = designs_np.shape
+    n_use = min(n_tiles, n_samples)
+
+    grid = np.zeros((rows * h, cols * w), dtype=np.float32)
+    for idx in range(n_use):
+        r = idx // cols
+        c = idx % cols
+        grid[r * h : (r + 1) * h, c * w : (c + 1) * w] = designs_np[idx]
+
+    return grid
+
+
 def select_device(device_arg: str) -> th.device:
     """Return the best available torch device."""
     if device_arg != "auto":
@@ -159,7 +180,7 @@ def evaluate_checkpoint(
     sampled_conditions,
     sampled_designs_np: np.ndarray,
     context: EvaluationContext,
-) -> dict[str, Any]:
+) -> tuple[dict[str, Any], np.ndarray]:
     """Evaluate a single diffusion checkpoint on a fixed condition sample."""
     phase_start = time.perf_counter()
     ckpt = th.load(str(checkpoint_path), map_location=context.device)
@@ -238,7 +259,7 @@ def evaluate_checkpoint(
             "noise_schedule": ckpt.get("model_config", {}).get("noise_schedule", run_config["noise_schedule"]),
         }
     )
-    return metrics_dict
+    return metrics_dict, gen_designs_np
 
 
 if __name__ == "__main__":
@@ -257,6 +278,8 @@ if __name__ == "__main__":
     device = select_device(args.device)
 
     out_path = args.output_csv.format(problem_id=args.problem_id)
+    final_generated_designs_np: np.ndarray | None = None
+    final_reference_designs_np: np.ndarray | None = None
 
     if args.checkpoint_path is not None:
         conditions_tensor, sampled_conditions, sampled_designs_np, _ = sample_conditions(
@@ -267,7 +290,7 @@ if __name__ == "__main__":
         )
         conditions_tensor = conditions_tensor.unsqueeze(1)
 
-        metrics_dict = evaluate_checkpoint(
+        metrics_dict, final_generated_designs_np = evaluate_checkpoint(
             checkpoint_path=args.checkpoint_path,
             conditions_tensor=conditions_tensor,
             sampled_conditions=sampled_conditions,
@@ -289,6 +312,7 @@ if __name__ == "__main__":
                 "sigma": args.sigma,
             }
         )
+        final_reference_designs_np = sampled_designs_np
         write_metrics_csv([metrics_dict], out_path, append_output=args.append_output)
         checkpoint_source = "local_checkpoint"
 
@@ -307,7 +331,7 @@ if __name__ == "__main__":
 
         candidate_rows: list[dict[str, Any]] = []
         for candidate in candidates:
-            candidate_metrics = evaluate_checkpoint(
+            candidate_metrics, _ = evaluate_checkpoint(
                 checkpoint_path=candidate["checkpoint_path"],
                 conditions_tensor=selection_conditions_tensor,
                 sampled_conditions=selection_sampled_conditions,
@@ -353,7 +377,7 @@ if __name__ == "__main__":
         )
         test_conditions_tensor = test_conditions_tensor.unsqueeze(1)
 
-        metrics_dict = evaluate_checkpoint(
+        metrics_dict, final_generated_designs_np = evaluate_checkpoint(
             checkpoint_path=selected_checkpoint_path,
             conditions_tensor=test_conditions_tensor,
             sampled_conditions=test_sampled_conditions,
@@ -383,6 +407,7 @@ if __name__ == "__main__":
                 "selected_validation_mmd": float(selected_candidate["selection_candidate_mmd"]),
             }
         )
+        final_reference_designs_np = test_sampled_designs_np
         write_metrics_csv([metrics_dict], out_path, append_output=args.append_output)
         checkpoint_source = "selected_top_k_checkpoint"
 
@@ -480,6 +505,8 @@ if __name__ == "__main__":
                 "generation_samples_per_sec": generation_samples_per_sec,
             }
         )
+        final_generated_designs_np = gen_designs_np
+        final_reference_designs_np = sampled_designs_np
         write_metrics_csv([metrics_dict], out_path, append_output=args.append_output)
 
     generation_runtime_sec = float(metrics_dict["generation_runtime_sec"])
@@ -545,6 +572,21 @@ if __name__ == "__main__":
                 "eval/runtime/generation_samples_per_sec": generation_samples_per_sec,
             }
         )
+        if final_generated_designs_np is not None and final_reference_designs_np is not None:
+            gen_grid = build_design_grid(final_generated_designs_np)
+            ref_grid = build_design_grid(final_reference_designs_np)
+            run.log(
+                {
+                    "eval/designs_generated_grid": wandb.Image(
+                        gen_grid,
+                        caption="Generated designs (same batch used for final table metrics)",
+                    ),
+                    "eval/designs_reference_grid": wandb.Image(
+                        ref_grid,
+                        caption="Reference test designs (same batch used for final table metrics)",
+                    ),
+                }
+            )
         run.finish()
 
     print(
