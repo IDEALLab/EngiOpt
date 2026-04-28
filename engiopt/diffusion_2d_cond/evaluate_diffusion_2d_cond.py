@@ -320,54 +320,6 @@ if __name__ == "__main__":
         checkpoint_dir = Path(args.checkpoint_dir)
         candidates = load_top_k_candidates(checkpoint_dir, args.top_k)
 
-        selection_conditions_tensor, selection_sampled_conditions, selection_sampled_designs_np, _ = sample_conditions(
-            problem=problem,
-            n_samples=args.selection_batch_size,
-            device=device,
-            seed=seed + args.selection_seed_offset,
-            split="val",
-        )
-        selection_conditions_tensor = selection_conditions_tensor.unsqueeze(1)
-
-        candidate_rows: list[dict[str, Any]] = []
-        for candidate in candidates:
-            candidate_metrics, _ = evaluate_checkpoint(
-                checkpoint_path=candidate["checkpoint_path"],
-                conditions_tensor=selection_conditions_tensor,
-                sampled_conditions=selection_sampled_conditions,
-                sampled_designs_np=selection_sampled_designs_np,
-                context=EvaluationContext(
-                    problem=problem,
-                    device=device,
-                    args=args,
-                    generation_seed=seed + 1000,
-                    checkpoint_source="local_checkpoint",
-                ),
-            )
-            candidate_metrics.update(
-                {
-                    "seed": seed,
-                    "problem_id": args.problem_id,
-                    "model_id": "diffusion_2d_cond",
-                    "phase": "validation_selection",
-                    "selection_candidate_epoch": candidate["epoch"] + 1,
-                    "selection_candidate_mmd": candidate["metric_value"],
-                }
-            )
-            candidate_rows.append(candidate_metrics)
-
-        candidate_rows.sort(key=lambda row: (row["cog"], row["fog"]))
-        selected_candidate = candidate_rows[0]
-        selected_checkpoint_path = selected_candidate["checkpoint_path"]
-
-        print("Selection results (sorted by validation COG, then FOG):")
-        for rank, row in enumerate(candidate_rows, 1):
-            print(
-                f"  {rank}. epoch {int(row['selection_candidate_epoch'])}: cog={row['cog']:.6f}, "
-                f"fog={row['fog']:.6f}, mmd={row['selection_candidate_mmd']:.6f}"
-            )
-        print(f"Selected checkpoint: {selected_checkpoint_path}")
-
         test_conditions_tensor, test_sampled_conditions, test_sampled_designs_np, _ = sample_conditions(
             problem=problem,
             n_samples=args.n_samples,
@@ -377,39 +329,54 @@ if __name__ == "__main__":
         )
         test_conditions_tensor = test_conditions_tensor.unsqueeze(1)
 
-        metrics_dict, final_generated_designs_np = evaluate_checkpoint(
-            checkpoint_path=selected_checkpoint_path,
-            conditions_tensor=test_conditions_tensor,
-            sampled_conditions=test_sampled_conditions,
-            sampled_designs_np=test_sampled_designs_np,
-            context=EvaluationContext(
-                problem=problem,
-                device=device,
-                args=args,
-                generation_seed=seed + 2000,
-                checkpoint_source="selected_top_k_checkpoint",
-            ),
-        )
-        metrics_dict.update(
-            {
-                "seed": seed,
-                "problem_id": args.problem_id,
-                "model_id": "diffusion_2d_cond",
-                "n_samples": args.n_samples,
-                "sigma": args.sigma,
-                "checkpoint_dir": str(checkpoint_dir),
-                "selection_mode": "top_k_cog_fog",
-                "selection_top_k": args.top_k,
-                "selection_candidate_count": len(candidate_rows),
-                "selected_validation_epoch": int(selected_candidate["selection_candidate_epoch"]),
-                "selected_validation_cog": float(selected_candidate["cog"]),
-                "selected_validation_fog": float(selected_candidate["fog"]),
-                "selected_validation_mmd": float(selected_candidate["selection_candidate_mmd"]),
-            }
-        )
-        final_reference_designs_np = test_sampled_designs_np
-        write_metrics_csv([metrics_dict], out_path, append_output=args.append_output)
+        candidate_rows: list[dict[str, Any]] = []
+        test_design_tables: list[dict[str, Any]] = []
+        for rank, candidate in enumerate(candidates, 1):
+            candidate_metrics, candidate_generated_designs_np = evaluate_checkpoint(
+                checkpoint_path=candidate["checkpoint_path"],
+                conditions_tensor=test_conditions_tensor,
+                sampled_conditions=test_sampled_conditions,
+                sampled_designs_np=test_sampled_designs_np,
+                context=EvaluationContext(
+                    problem=problem,
+                    device=device,
+                    args=args,
+                    generation_seed=seed + 2000 + rank,
+                    checkpoint_source="selected_top_k_checkpoint",
+                ),
+            )
+            candidate_metrics.update(
+                {
+                    "seed": seed,
+                    "problem_id": args.problem_id,
+                    "model_id": "diffusion_2d_cond",
+                    "phase": "test_top_k",
+                    "checkpoint_dir": str(checkpoint_dir),
+                    "selection_mode": "top_k_mmd_test_eval",
+                    "selection_top_k": args.top_k,
+                    "selection_rank": rank,
+                    "selection_candidate_epoch": candidate["epoch"] + 1,
+                    "selection_candidate_mmd": candidate["metric_value"],
+                }
+            )
+            candidate_rows.append(candidate_metrics)
+            test_design_tables.append(
+                {
+                    "rank": rank,
+                    "epoch": int(candidate["epoch"] + 1),
+                    "validation_mmd": float(candidate["metric_value"]),
+                    "test_cog": float(candidate_metrics["cog"]),
+                    "test_fog": float(candidate_metrics["fog"]),
+                    "test_mmd": float(candidate_metrics["mmd"]),
+                    "checkpoint_path": str(candidate["checkpoint_path"]),
+                    "design_grid": build_design_grid(candidate_generated_designs_np),
+                }
+            )
+
+        write_metrics_csv(candidate_rows, out_path, append_output=args.append_output)
         checkpoint_source = "selected_top_k_checkpoint"
+        final_generated_designs_np = candidate_generated_designs_np
+        final_reference_designs_np = test_sampled_designs_np
 
     else:
         conditions_tensor, sampled_conditions, sampled_designs_np, _ = sample_conditions(
@@ -528,18 +495,20 @@ if __name__ == "__main__":
         if args.checkpoint_dir is not None and args.select_best_of_top_k and args.checkpoint_path is None:
             run.log(
                 {
-                    "selection/validation_table": wandb.Table(
-                        columns=["rank", "epoch", "mmd", "cog", "fog", "checkpoint_path"],
+                    "selection/test_table": wandb.Table(
+                        columns=["rank", "epoch", "validation_mmd", "test_cog", "test_fog", "test_mmd", "checkpoint_path", "design_grid"],
                         data=[
                             [
-                                rank,
-                                int(row["selection_candidate_epoch"]),
-                                float(row["selection_candidate_mmd"]),
-                                float(row["cog"]),
-                                float(row["fog"]),
-                                str(row["checkpoint_path"]),
+                                row["rank"],
+                                row["epoch"],
+                                row["validation_mmd"],
+                                row["test_cog"],
+                                row["test_fog"],
+                                row["test_mmd"],
+                                row["checkpoint_path"],
+                                wandb.Image(row["design_grid"], caption=f"Rank {row['rank']}: Epoch {row['epoch']}, val MMD={row['validation_mmd']:.{args.validation_log_precision}f}, test MMD={row['test_mmd']:.{args.validation_log_precision}f}"),
                             ]
-                            for rank, row in enumerate(candidate_rows, 1)
+                            for row in test_design_tables
                         ],
                     )
                 }
