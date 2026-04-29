@@ -264,6 +264,7 @@ if __name__ == "__main__":
                 flow_np = flow_designs.detach().cpu().numpy().reshape(args.n_samples, *design_shape)
                 flow_np = np.clip(flow_np, args.clip_min, args.clip_max)
                 save_design_raster(flow_np, problem_output_dir / f"rank_{rank}.png")
+                save_design_raster(flow_np, problem_output_dir / f"flow_matching_2d_cond_rank_{rank}.png")
                 if rank == 1:
                     flow_rank_1_np = flow_np
                 flow_top_k_metadata.append(
@@ -447,26 +448,29 @@ if __name__ == "__main__":
         for problem_id in problems:
             problem_dir = output_root / problem_id
             flow_steps = metadata.get("problems", {}).get(problem_id, {}).get("flow_integration_steps", 50)
-            run.log(
-                {
-                    f"qualitative/{problem_id}/reference": wandb.Image(str(problem_dir / "reference.png")),
-                    f"qualitative/{problem_id}/reference_raster": wandb.Image(str(problem_dir / "reference_raster.png")),
-                    f"qualitative/{problem_id}/flow_matching_2d_cond": wandb.Image(
-                        str(problem_dir / "flow_matching_2d_cond.png")
-                    ),
-                    f"qualitative/{problem_id}/flow_matching_2d_cond_raster_{args.flow_method}_steps{flow_steps}": wandb.Image(
-                        str(problem_dir / "flow_matching_2d_cond_raster.png")
-                    ),
-                    f"qualitative/{problem_id}/diffusion_2d_cond": wandb.Image(str(problem_dir / "diffusion_2d_cond.png")),
-                    f"qualitative/{problem_id}/diffusion_2d_cond_raster": wandb.Image(
-                        str(problem_dir / "diffusion_2d_cond_raster.png")
-                    ),
-                    f"qualitative/{problem_id}/cgan_cnn_2d": wandb.Image(str(problem_dir / "cgan_cnn_2d.png")),
-                    f"qualitative/{problem_id}/cgan_cnn_2d_raster": wandb.Image(
-                        str(problem_dir / "cgan_cnn_2d_raster.png")
-                    ),
-                }
-            )
+            log_dict = {
+                f"qualitative/{problem_id}/reference": wandb.Image(str(problem_dir / "reference.png")),
+                f"qualitative/{problem_id}/reference_raster": wandb.Image(str(problem_dir / "reference_raster.png")),
+                f"qualitative/{problem_id}/flow_matching_2d_cond": wandb.Image(
+                    str(problem_dir / "flow_matching_2d_cond.png")
+                ),
+                f"qualitative/{problem_id}/flow_matching_2d_cond_raster_{args.flow_method}_steps{flow_steps}": wandb.Image(
+                    str(problem_dir / "flow_matching_2d_cond_raster.png")
+                ),
+                f"qualitative/{problem_id}/diffusion_2d_cond": wandb.Image(str(problem_dir / "diffusion_2d_cond.png")),
+                f"qualitative/{problem_id}/diffusion_2d_cond_raster": wandb.Image(
+                    str(problem_dir / "diffusion_2d_cond_raster.png")
+                ),
+                f"qualitative/{problem_id}/cgan_cnn_2d": wandb.Image(str(problem_dir / "cgan_cnn_2d.png")),
+                f"qualitative/{problem_id}/cgan_cnn_2d_raster": wandb.Image(
+                    str(problem_dir / "cgan_cnn_2d_raster.png")
+                ),
+            }
+            for rank in range(1, 6):
+                rank_test_path = problem_dir / f"flow_matching_2d_cond_rank_{rank}.png"
+                if rank_test_path.exists():
+                    log_dict[f"qualitative/{problem_id}/flow_matching_2d_cond_rank_{rank}_{args.flow_method}_steps{flow_steps}"] = wandb.Image(str(rank_test_path))
+            run.log(log_dict)
         artifact = wandb.Artifact(f"qualitative_bundle_seed{args.seed}", type="qualitative-bundle")
         artifact.add_dir(str(output_root))
         run.log_artifact(artifact)
