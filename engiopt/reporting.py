@@ -64,18 +64,26 @@ def summarize_metrics(
     if not metric_list:
         raise ValueError("No requested metrics found in raw results")
 
+    group_cols = [col for col in ("problem_id", "model_id", "integration_steps") if col in raw_df.columns]
+    if not group_cols:
+        raise ValueError("No grouping columns found in raw results")
+
     long_df = (
         raw_df.melt(
-            id_vars=[col for col in ("problem_id", "model_id", "seed", "source_file") if col in raw_df.columns],
+            id_vars=[
+                col
+                for col in ("problem_id", "model_id", "integration_steps", "seed", "source_file")
+                if col in raw_df.columns
+            ],
             value_vars=metric_list,
             var_name="metric",
             value_name="value",
         )
-        .groupby(["problem_id", "model_id", "metric"], as_index=False)
+        .groupby(group_cols + ["metric"], as_index=False)
         .agg(mean=("value", "mean"), std=("value", "std"), n_seeds=("value", "count"))
     )
 
-    wide_df = long_df.pivot(index=["problem_id", "model_id"], columns="metric", values=["mean", "std"])
+    wide_df = long_df.pivot(index=group_cols, columns="metric", values=["mean", "std"])
     wide_df.columns = [f"{metric}_{stat}" for stat, metric in wide_df.columns]
     wide_df = wide_df.reset_index()
     return long_df, wide_df
@@ -121,13 +129,19 @@ def upload_report_to_wandb(
     for row in summary_long_df.itertuples(index=False):
         problem_id = str(getattr(row, "problem_id"))
         model_id = str(getattr(row, "model_id"))
+        integration_steps = getattr(row, "integration_steps", None)
+        step_suffix = (
+            f"/steps{int(integration_steps)}"
+            if integration_steps is not None and pd.notna(integration_steps)
+            else ""
+        )
         metric = str(getattr(row, "metric"))
         mean = getattr(row, "mean")
         std = getattr(row, "std")
         if pd.notna(mean):
-            scalar_payload[f"evaluation/{problem_id}/{model_id}/{metric}_mean"] = float(mean)
+            scalar_payload[f"evaluation/{problem_id}/{model_id}{step_suffix}/{metric}_mean"] = float(mean)
         if pd.notna(std):
-            scalar_payload[f"evaluation/{problem_id}/{model_id}/{metric}_std"] = float(std)
+            scalar_payload[f"evaluation/{problem_id}/{model_id}{step_suffix}/{metric}_std"] = float(std)
     if scalar_payload:
         run.log(scalar_payload)
 
