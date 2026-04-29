@@ -23,6 +23,7 @@ from engiopt import metrics
 from engiopt.best_epoch_selection import BestEpochTracker
 from engiopt.dataset_sample_conditions import sample_conditions
 import wandb
+import subprocess
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -308,8 +309,30 @@ if __name__ == "__main__":
         only_cross_attention=True,
     )
 
-    model.to(device)
-    adversarial_loss.to(device)
+    # Lightweight GPU diagnostics and guarded device transfer to capture failures.
+    print("DEBUG: selected device:", device)
+    try:
+        print("DEBUG: CUDA_VISIBLE_DEVICES=", os.environ.get("CUDA_VISIBLE_DEVICES"))
+        print("DEBUG: torch.cuda.is_available()=", th.cuda.is_available())
+        print("DEBUG: torch.cuda.device_count()=", th.cuda.device_count())
+        print("DEBUG: nvidia-smi output:")
+        try:
+            subprocess.run(["nvidia-smi"], check=False)
+        except Exception as _:
+            print("DEBUG: nvidia-smi not available or failed to run")
+
+        model.to(device)
+        adversarial_loss.to(device)
+    except Exception as e:
+        print("ERROR: exception during model.to(device):", repr(e))
+        print("ERROR: re-checking CUDA availability:")
+        print("ERROR: torch.cuda.is_available()=", th.cuda.is_available())
+        print("ERROR: torch.cuda.device_count()=", th.cuda.device_count())
+        try:
+            subprocess.run(["nvidia-smi"], check=False)
+        except Exception:
+            pass
+        raise
 
     # Configure data loader
     training_ds = problem.dataset.with_format("torch", device=device)["train"]

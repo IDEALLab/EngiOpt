@@ -226,7 +226,7 @@ def metrics(
 
     # Compute the average Initial Optimality Gap (IOG), Cumulative Optimality Gap (COG), and Final Optimality Gap (FOG)
     average_iog: float = float(np.mean(iog_list))  # Average of initial optimality gaps
-    average_cog: float = float(np.mean(cog_list))  # Average of cumulative optimality gaps
+    average_cog: float = float(np.median(cog_list))  # Median of cumulative optimality gaps
     average_fog: float = float(np.mean(fog_list))  # Average of final optimality gaps
     average_viol: float = float(np.mean(viol_list))  # Average of violation ratios
 
@@ -256,35 +256,6 @@ def metrics(
         "viol": average_viol,
         "binarization": float(np.mean(binarization_list)),
         "connectivity": float(np.mean(connectivity_list)),
-        "generation_runtime_sec": gen_time,
-        "generation_samples_per_sec": gen_speed,
-    }
-
-
-def mmd_only(
-    problem: Problem,
-    gen_designs: npt.NDArray,
-    dataset_designs: npt.NDArray,
-    sigma: float = 1.0,
-    gen_time: float = 0.0,
-    gen_speed: float = 0.0,
-) -> dict[str, Any]:
-    """Compute only MMD between generated and reference designs.
-
-    This avoids expensive simulation/optimization-based metrics and is intended
-    for low-cost evaluation runs.
-    """
-    flattened_ds_designs: list[npt.NDArray] = []
-    for design in dataset_designs:
-        if isinstance(problem.design_space, spaces.Dict):
-            flattened = spaces.flatten(problem.design_space, design)
-            flattened_ds_designs.append(np.array(flattened))
-        else:
-            flattened_ds_designs.append(design)
-    flattened_ds_designs_array: npt.NDArray = np.array(flattened_ds_designs)
-
-    return {
-        "mmd": float(mmd(gen_designs, flattened_ds_designs_array, sigma=sigma)),
         "generation_runtime_sec": gen_time,
         "generation_samples_per_sec": gen_speed,
     }

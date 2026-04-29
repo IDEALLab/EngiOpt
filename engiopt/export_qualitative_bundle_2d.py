@@ -25,6 +25,8 @@ from engiopt.flow_matching_2d_cond.core import build_model
 from engiopt.flow_matching_2d_cond.core import generate_samples
 from engiopt.flow_matching_2d_cond.core import load_local_checkpoint
 from engiopt.flow_matching_2d_cond.evaluate_flow_matching_2d_cond import checkpoint_config
+from engiopt.flow_matching_2d_cond.evaluate_flow_matching_2d_cond import build_design_grid
+from engiopt.flow_matching_2d_cond.evaluate_flow_matching_2d_cond import load_top_k_candidates
 from engiopt.flow_matching_2d_cond.evaluate_flow_matching_2d_cond import load_artifact_checkpoint
 from engiopt.flow_matching_2d_cond.evaluate_flow_matching_2d_cond import select_device
 
@@ -41,8 +43,8 @@ class Args:
     """Seed used when sampling test conditions. Defaults to seed."""
     sample_index: int = 0
     """Index within sampled conditions to export."""
-    n_samples: int = 8
-    """Number of sampled conditions to draw before selecting sample_index."""
+    n_samples: int = 3
+    """Number of sampled conditions to draw before building the 3x1 raster."""
     wandb_project: str = "engiopt"
     """W&B project name used for artifact lookup."""
     wandb_entity: str | None = None
@@ -53,6 +55,12 @@ class Args:
     """Optional local diffusion checkpoint path pattern; supports {problem_id} and {seed}."""
     cgan_checkpoint_path: str | None = None
     """Optional local cGAN checkpoint path pattern; supports {problem_id} and {seed}."""
+    checkpoint_dir: str | None = None
+    """Optional directory with epoch checkpoints and validation_metrics.json for top-k export."""
+    select_best_of_top_k: bool = True
+    """If True and checkpoint_dir is set, export all shortlisted top-k checkpoints."""
+    top_k: int = 5
+    """Number of shortlisted checkpoints to export when select_best_of_top_k is enabled."""
     flow_integration_steps: int | None = None
     """Optional override for flow-matching integration steps."""
     device: str = "auto"
@@ -67,6 +75,8 @@ class Args:
     """Log output image files to W&B."""
     run_name: str | None = None
     """Optional W&B run name override."""
+    flow_method: str = "euler"
+    """Integration method used for flow-matching: euler, midpoint, rk4, etc."""
 
 
 def parse_problem_list(value: str) -> list[str]:
@@ -161,6 +171,13 @@ def to_jsonable_dict(values: dict[str, Any]) -> dict[str, Any]:
     return converted
 
 
+def save_design_raster(designs_np: np.ndarray, output_path: Path) -> None:
+    """Save a tiled raster of designs using 3x1 layout (3 rows, 1 col for compact visualization)."""
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    grid = build_design_grid(designs_np, rows=3, cols=1)
+    plt.imsave(output_path, grid, cmap="gray", vmin=0.0, vmax=1.0)
+
+
 if __name__ == "__main__":
     args = tyro.cli(Args)
     start_time = time.perf_counter()
@@ -181,6 +198,9 @@ if __name__ == "__main__":
         "condition_seed": condition_seed,
         "sample_index": args.sample_index,
         "n_samples": args.n_samples,
+        "checkpoint_dir": args.checkpoint_dir,
+        "select_best_of_top_k": args.select_best_of_top_k,
+        "top_k": args.top_k,
         "problems": {},
     }
 
@@ -199,49 +219,110 @@ if __name__ == "__main__":
             seed=condition_seed,
         )
         sample_idx = max(0, min(args.sample_index, args.n_samples - 1))
+        problem_output_dir = output_root / problem_id
 
-        # Flow matching generation
-        flow_ckpt_path = resolve_optional_pattern(args.flow_checkpoint_path, problem_id, args.seed)
-        if flow_ckpt_path is not None:
-            flow_checkpoint = load_local_checkpoint(flow_ckpt_path, device)
-            flow_run_config: dict[str, Any] = dict(flow_checkpoint.get("args", {}))
-        else:
-            flow_checkpoint, flow_run_config = load_artifact_checkpoint(
-                problem_id=problem_id,
-                seed=args.seed,
-                wandb_project=args.wandb_project,
-                wandb_entity=args.wandb_entity,
-                device=device,
-            )
-        flow_layers_per_block = int(
-            checkpoint_config(flow_checkpoint, "layers_per_block", flow_run_config.get("layers_per_block", 2))
-        )
-        flow_num_train_timesteps = int(
-            checkpoint_config(flow_checkpoint, "num_train_timesteps", flow_run_config.get("num_train_timesteps", 1000))
-        )
-        flow_integration_steps = args.flow_integration_steps
-        if flow_integration_steps is None:
-            flow_integration_steps = int(
-                checkpoint_config(flow_checkpoint, "integration_steps", flow_run_config.get("integration_steps", 50))
-            )
-        flow_model = build_model(
-            design_shape=design_shape,
-            encoder_hid_dim=len(problem.conditions_keys),
-            layers_per_block=flow_layers_per_block,
-        ).to(device)
-        flow_model.load_state_dict(flow_checkpoint["model"])
-        flow_model.eval()
         flow_conditions = conditions_tensor.unsqueeze(1)
-        flow_designs = generate_samples(
-            model=flow_model,
-            design_shape=design_shape,
-            encoder_hidden_states=flow_conditions,
-            integration_steps=flow_integration_steps,
-            num_train_timesteps=flow_num_train_timesteps,
-            device=device,
-        ).squeeze(1)
-        flow_np = flow_designs.detach().cpu().numpy().reshape(args.n_samples, *design_shape)
-        flow_np = np.clip(flow_np, args.clip_min, args.clip_max)
+        flow_top_k_metadata: list[dict[str, Any]] = []
+        flow_integration_steps: int | None = None
+        flow_num_train_timesteps: int | None = None
+        if args.checkpoint_dir is not None and args.select_best_of_top_k:
+            checkpoint_dir = Path(args.checkpoint_dir)
+            candidates = load_top_k_candidates(checkpoint_dir, args.top_k)
+            flow_np: np.ndarray | None = None
+            flow_rank_1_np: np.ndarray | None = None
+            for rank, candidate in enumerate(candidates, 1):
+                flow_checkpoint = load_local_checkpoint(str(candidate["checkpoint_path"]), device)
+                flow_run_config_top_k: dict[str, Any] = dict(flow_checkpoint.get("args", {}))
+                flow_layers_per_block = int(
+                    checkpoint_config(flow_checkpoint, "layers_per_block", flow_run_config_top_k.get("layers_per_block", 2))
+                )
+                flow_num_train_timesteps = int(
+                    checkpoint_config(
+                        flow_checkpoint, "num_train_timesteps", flow_run_config_top_k.get("num_train_timesteps", 1000)
+                    )
+                )
+                flow_integration_steps = args.flow_integration_steps
+                if flow_integration_steps is None:
+                    flow_integration_steps = int(
+                        checkpoint_config(flow_checkpoint, "integration_steps", flow_run_config_top_k.get("integration_steps", 50))
+                    )
+                flow_model = build_model(
+                    design_shape=design_shape,
+                    encoder_hid_dim=len(problem.conditions_keys),
+                    layers_per_block=flow_layers_per_block,
+                ).to(device)
+                flow_model.load_state_dict(flow_checkpoint["model"])
+                flow_model.eval()
+                flow_designs = generate_samples(
+                    model=flow_model,
+                    design_shape=design_shape,
+                    encoder_hidden_states=flow_conditions,
+                    integration_steps=flow_integration_steps,
+                    num_train_timesteps=flow_num_train_timesteps,
+                    device=device,
+                ).squeeze(1)
+                flow_np = flow_designs.detach().cpu().numpy().reshape(args.n_samples, *design_shape)
+                flow_np = np.clip(flow_np, args.clip_min, args.clip_max)
+                save_design_raster(flow_np, problem_output_dir / f"rank_{rank}.png")
+                if rank == 1:
+                    flow_rank_1_np = flow_np
+                flow_top_k_metadata.append(
+                    {
+                        "rank": rank,
+                        "epoch": int(candidate["epoch"] + 1),
+                        "validation_mmd": float(candidate["metric_value"]),
+                        "checkpoint_path": str(candidate["checkpoint_path"]),
+                        "flow_integration_steps": int(flow_integration_steps),
+                        "flow_num_train_timesteps": int(flow_num_train_timesteps),
+                    }
+                )
+            assert flow_rank_1_np is not None
+            flow_integration_steps = int(flow_top_k_metadata[0]["flow_integration_steps"])
+            flow_num_train_timesteps = int(flow_top_k_metadata[0]["flow_num_train_timesteps"])
+            flow_np = flow_rank_1_np
+            save_design_raster(flow_np, problem_output_dir / "flow_matching_2d_cond.png")
+        else:
+            # Flow matching generation
+            flow_ckpt_path = resolve_optional_pattern(args.flow_checkpoint_path, problem_id, args.seed)
+            if flow_ckpt_path is not None:
+                flow_checkpoint = load_local_checkpoint(flow_ckpt_path, device)
+                flow_run_config: dict[str, Any] = dict(flow_checkpoint.get("args", {}))
+            else:
+                flow_checkpoint, flow_run_config = load_artifact_checkpoint(
+                    problem_id=problem_id,
+                    seed=args.seed,
+                    wandb_project=args.wandb_project,
+                    wandb_entity=args.wandb_entity,
+                    device=device,
+                )
+            flow_layers_per_block = int(
+                checkpoint_config(flow_checkpoint, "layers_per_block", flow_run_config.get("layers_per_block", 2))
+            )
+            flow_num_train_timesteps = int(
+                checkpoint_config(flow_checkpoint, "num_train_timesteps", flow_run_config.get("num_train_timesteps", 1000))
+            )
+            flow_integration_steps = args.flow_integration_steps
+            if flow_integration_steps is None:
+                flow_integration_steps = int(
+                    checkpoint_config(flow_checkpoint, "integration_steps", flow_run_config.get("integration_steps", 50))
+                )
+            flow_model = build_model(
+                design_shape=design_shape,
+                encoder_hid_dim=len(problem.conditions_keys),
+                layers_per_block=flow_layers_per_block,
+            ).to(device)
+            flow_model.load_state_dict(flow_checkpoint["model"])
+            flow_model.eval()
+            flow_designs = generate_samples(
+                model=flow_model,
+                design_shape=design_shape,
+                encoder_hidden_states=flow_conditions,
+                integration_steps=flow_integration_steps,
+                num_train_timesteps=flow_num_train_timesteps,
+                device=device,
+            ).squeeze(1)
+            flow_np = flow_designs.detach().cpu().numpy().reshape(args.n_samples, *design_shape)
+            flow_np = np.clip(flow_np, args.clip_min, args.clip_max)
 
         # Diffusion generation
         diffusion_ckpt_path = resolve_optional_pattern(args.diffusion_checkpoint_path, problem_id, args.seed)
@@ -317,27 +398,37 @@ if __name__ == "__main__":
         cgan_np = cgan_designs.detach().cpu().numpy().reshape(args.n_samples, *design_shape)
         cgan_np = np.clip(cgan_np, args.clip_min, args.clip_max)
 
-        problem_output_dir = output_root / problem_id
         reference = np.clip(sampled_designs_np[sample_idx], args.clip_min, args.clip_max)
         flow_image = flow_np[sample_idx]
         diffusion_image = diffusion_np[sample_idx]
         cgan_image = cgan_np[sample_idx]
 
         save_grayscale_image(reference, problem_output_dir / "reference.png")
+        save_design_raster(sampled_designs_np, problem_output_dir / "reference_raster.png")
         save_grayscale_image(flow_image, problem_output_dir / "flow_matching_2d_cond.png")
+        save_design_raster(flow_np, problem_output_dir / "flow_matching_2d_cond_raster.png")
         save_grayscale_image(diffusion_image, problem_output_dir / "diffusion_2d_cond.png")
+        save_design_raster(diffusion_np, problem_output_dir / "diffusion_2d_cond_raster.png")
         save_grayscale_image(cgan_image, problem_output_dir / "cgan_cnn_2d.png")
+        save_design_raster(cgan_np, problem_output_dir / "cgan_cnn_2d_raster.png")
 
-        metadata["problems"][problem_id] = {
-            "selected_dataset_index": int(sampled_indices[sample_idx]),
-            "sample_index": int(sample_idx),
-            "conditions": to_jsonable_dict(sampled_conditions[sample_idx]),
-            "flow_integration_steps": flow_integration_steps,
-            "flow_num_train_timesteps": flow_num_train_timesteps,
-            "diffusion_timesteps": diffusion_timesteps,
-            "diffusion_noise_schedule": diffusion_noise_schedule,
-            "cgan_latent_dim": int(cgan_config["latent_dim"]),
-        }
+        problem_metadata = metadata["problems"].setdefault(problem_id, {})
+        problem_metadata.update(
+            {
+                "selected_dataset_index": int(sampled_indices[sample_idx]),
+                "sample_index": int(sample_idx),
+                "conditions": to_jsonable_dict(sampled_conditions[sample_idx]),
+                "flow_integration_steps": flow_integration_steps,
+                "flow_num_train_timesteps": flow_num_train_timesteps,
+                "diffusion_timesteps": diffusion_timesteps,
+                "diffusion_noise_schedule": diffusion_noise_schedule,
+                "cgan_latent_dim": int(cgan_config["latent_dim"]),
+            }
+        )
+        if flow_top_k_metadata:
+            problem_metadata["flow_selection_mode"] = "top_k"
+            problem_metadata["flow_selection_top_k"] = args.top_k
+            problem_metadata["flow_selected_checkpoints"] = flow_top_k_metadata
 
     metadata_path = output_root / "metadata.json"
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
@@ -355,14 +446,25 @@ if __name__ == "__main__":
             raise RuntimeError("Failed to initialize Weights & Biases run")
         for problem_id in problems:
             problem_dir = output_root / problem_id
+            flow_steps = metadata.get("problems", {}).get(problem_id, {}).get("flow_integration_steps", 50)
             run.log(
                 {
                     f"qualitative/{problem_id}/reference": wandb.Image(str(problem_dir / "reference.png")),
-                    f"qualitative/{problem_id}/flow_matching": wandb.Image(
+                    f"qualitative/{problem_id}/reference_raster": wandb.Image(str(problem_dir / "reference_raster.png")),
+                    f"qualitative/{problem_id}/flow_matching_2d_cond": wandb.Image(
                         str(problem_dir / "flow_matching_2d_cond.png")
                     ),
-                    f"qualitative/{problem_id}/diffusion": wandb.Image(str(problem_dir / "diffusion_2d_cond.png")),
-                    f"qualitative/{problem_id}/cgan": wandb.Image(str(problem_dir / "cgan_cnn_2d.png")),
+                    f"qualitative/{problem_id}/flow_matching_2d_cond_raster_{args.flow_method}_steps{flow_steps}": wandb.Image(
+                        str(problem_dir / "flow_matching_2d_cond_raster.png")
+                    ),
+                    f"qualitative/{problem_id}/diffusion_2d_cond": wandb.Image(str(problem_dir / "diffusion_2d_cond.png")),
+                    f"qualitative/{problem_id}/diffusion_2d_cond_raster": wandb.Image(
+                        str(problem_dir / "diffusion_2d_cond_raster.png")
+                    ),
+                    f"qualitative/{problem_id}/cgan_cnn_2d": wandb.Image(str(problem_dir / "cgan_cnn_2d.png")),
+                    f"qualitative/{problem_id}/cgan_cnn_2d_raster": wandb.Image(
+                        str(problem_dir / "cgan_cnn_2d_raster.png")
+                    ),
                 }
             )
         artifact = wandb.Artifact(f"qualitative_bundle_seed{args.seed}", type="qualitative-bundle")
