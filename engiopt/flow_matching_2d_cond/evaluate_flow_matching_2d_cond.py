@@ -45,6 +45,8 @@ class Args:
     """Number of generated samples per seed."""
     sigma: float = 10.0
     """Kernel bandwidth for MMD and DPP metrics."""
+    validation_log_precision: int = 10
+    """Decimal precision when formatting validation/test numeric values in image captions."""
     output_csv: str = "flow_matching_2d_cond_{problem_id}_metrics.csv"
     """Output CSV path template; may include {problem_id}."""
     append_output: bool = True

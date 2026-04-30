@@ -65,6 +65,8 @@ class Args:
     """Minimum value used when clipping generated designs."""
     clip_max: float = 1.0
     """Maximum value used when clipping generated designs."""
+    validation_log_precision: int = 10
+    """Decimal precision when formatting validation/test numeric values in image captions."""
 
 
 @dataclasses.dataclass
