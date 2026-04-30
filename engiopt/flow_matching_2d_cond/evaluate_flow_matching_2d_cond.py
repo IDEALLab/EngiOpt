@@ -379,6 +379,11 @@ if __name__ == "__main__":
         checkpoint_source = "selected_top_k_checkpoint"
         final_generated_designs_np = candidate_generated_designs_np
         final_reference_designs_np = test_sampled_designs_np
+        # Ensure metrics_dict exists for downstream logging (use last evaluated candidate)
+        if candidate_rows:
+            metrics_dict = candidate_rows[-1]
+        else:
+            metrics_dict = {}
 
     else:
         conditions_tensor, sampled_conditions, sampled_designs_np, _ = sample_conditions(
