@@ -1,8 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=engiopt-test-pipeline
-#SBATCH --account=YOUR_ACCOUNT
-#SBATCH --partition=YOUR_PARTITION
+#SBATCH --partition=cuda13pr.24h
 #SBATCH --time=24:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem-per-cpu=7G
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --array=0-1
@@ -11,6 +13,8 @@
 
 # Quick test: flow-matching euler 16 & 32 steps for 1 seed, both problems
 # Shorter training (50 epochs) for faster validation of pipeline
+
+set -euo pipefail
 
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
     SCRIPT_DIR="$SLURM_SUBMIT_DIR"
@@ -26,6 +30,7 @@ load_flow_secrets
 configure_flow_caches
 
 # Test configs: euler with 16 and 32 steps
+declare -a PROBLEMS=(beams2d heatconduction2d)
 declare -a STEPS=(16 32)
 
 FLOW_INTEGRATION_STEPS=${STEPS[$SLURM_ARRAY_TASK_ID]}
@@ -53,56 +58,48 @@ mkdir -p logs "$RESULTS_ROOT" "$QUALITATIVE_ROOT" "$REPORT_DIR" "$CSV_SHARD_DIR"
 echo "[$(date)] ========== PHASE 1: TRAINING (Flow-Matching only, 50 epochs) =========="
 
 echo "[$(date)] Training Flow-Matching for both problems..."
-python -m engiopt.flow_matching_2d_cond.flow_matching_2d_cond \
-  --seed "$SEED" \
-  --num-epochs 50 \
+for PROBLEM_ID in "${PROBLEMS[@]}"; do
+  CHECKPOINT_DIR="$RESULTS_ROOT/checkpoints/flow_matching/$PROBLEM_ID"
+  mkdir -p "$CHECKPOINT_DIR"
+  python -m engiopt.flow_matching_2d_cond.flow_matching_2d_cond \
+    --problem-id "$PROBLEM_ID" \
+    --seed "$SEED" \
+    --n-epochs 50 \
   --batch-size 32 \
-  --learning-rate 1e-3 \
-  --eval-every 5 \
-  --problems beams2d,heatconduction2d
+    --lr 1e-3 \
+    --checkpoint-dir "$CHECKPOINT_DIR" \
+    --checkpoint-interval-epochs 5 \
+    --validation-interval-epochs 5 \
+    --track
+done
 
 echo "[$(date)] ========== Training complete =========="
 
 # ============================================================================
-# 2. MMD-BASED CHECKPOINT SELECTION (flow-matching per solver config)
+# 2. CHECKPOINTS ARE SELECTED DURING EVALUATION
 # ============================================================================
-echo "[$(date)] ========== PHASE 2: MMD EVALUATION (per solver config) =========="
-
-# Test configs: euler with 16 and 32 steps
-declare -a TEST_STEPS=(16 32)
-
-for STEP in "${TEST_STEPS[@]}"; do
-  echo "[$(date)] MMD selection for $FLOW_METHOD with $STEP steps..."
-  
-  python -m engiopt.flow_matching_2d_cond.evaluate_flow_matching_2d_cond \
-    --checkpoint-dir "$RESULTS_ROOT/checkpoints/flow_matching" \
-    --seed "$SEED" \
-    --top-k 5 \
-    --problems beams2d,heatconduction2d \
-    --flow-method "$FLOW_METHOD" \
-    --flow-integration-steps "$STEP" \
-    --output-rankings "rankings_${FLOW_METHOD}_steps${STEP}.json"
-done
-
-echo "[$(date)] MMD evaluation complete for test solver configs."
+echo "[$(date)] ========== PHASE 2: TOP-K CHECKPOINTS WILL BE SELECTED IN EVALUATION =========="
 
 # ============================================================================
-# 3. EVALUATION: Flow-matching euler only on test set
+# 3. EVALUATION: Flow-matching Euler on test set
 # ============================================================================
 echo "[$(date)] ========== PHASE 3: TEST EVALUATION =========="
 
-# Flow-matching test configs only
-echo "[$(date)] Evaluating Flow-Matching: $FLOW_METHOD steps=$FLOW_INTEGRATION_STEPS"
+for PROBLEM_ID in "${PROBLEMS[@]}"; do
+  CHECKPOINT_DIR="$RESULTS_ROOT/checkpoints/flow_matching/$PROBLEM_ID"
+  for STEP in "${STEPS[@]}"; do
+    echo "[$(date)] Evaluating Flow-Matching: $PROBLEM_ID $FLOW_METHOD steps=$STEP"
 
-python -m engiopt.report_metrics \
-  --problems beams2d,heatconduction2d \
-  --seed "$SEED" \
-  --split test \
-  --checkpoint-dir "$RESULTS_ROOT/checkpoints/flow_matching" \
-  --flow-method "$FLOW_METHOD" \
-  --flow-integration-steps "$FLOW_INTEGRATION_STEPS" \
-  --output-dir "$CSV_SHARD_DIR" \
-  --run-name "test_flow_${FLOW_METHOD}_steps${FLOW_INTEGRATION_STEPS}_seed${SEED}"
+    python -m engiopt.flow_matching_2d_cond.evaluate_flow_matching_2d_cond \
+      --checkpoint-dir "$CHECKPOINT_DIR" \
+      --problem-id "$PROBLEM_ID" \
+      --seed "$SEED" \
+      --method "$FLOW_METHOD" \
+      --integration-steps "$STEP" \
+      --output-csv "$CSV_SHARD_DIR/test_${PROBLEM_ID}_${FLOW_METHOD}_steps${STEP}_metrics.csv" \
+      --track
+  done
+done
 
 echo "[$(date)] Test evaluation complete."
 
@@ -116,39 +113,37 @@ if [[ -n "${WANDB_ENTITY:-}" ]]; then
   WANDB_ARGS+=(--wandb-entity "$WANDB_ENTITY")
 fi
 
-# Flow-matching test configs using solver-specific top-5 rankings
-declare -a TEST_STEPS=(16 32)
+for PROBLEM_ID in "${PROBLEMS[@]}"; do
+  CHECKPOINT_DIR="$RESULTS_ROOT/checkpoints/flow_matching/$PROBLEM_ID"
+  for STEP in "${STEPS[@]}"; do
+    echo "[$(date)] Exporting Flow-Matching qualitative: $PROBLEM_ID $FLOW_METHOD steps=$STEP"
 
-for STEP in "${TEST_STEPS[@]}"; do
-  echo "[$(date)] Exporting Flow-Matching qualitative: $FLOW_METHOD steps=$STEP"
-  
-  BUNDLE_NAME="test_flow_${FLOW_METHOD}_steps${STEP}_seed${SEED}"
-  RANKINGS_FILE="rankings_${FLOW_METHOD}_steps${STEP}.json"
-  
-  python -m engiopt.export_qualitative_bundle_2d \
-    --problems beams2d,heatconduction2d \
-    --seed "$SEED" \
-    --checkpoint-dir "$RESULTS_ROOT/checkpoints/flow_matching" \
-    --select-best-of-top-k \
-    --top-k-rankings "$RANKINGS_FILE" \
-    --flow-method "$FLOW_METHOD" \
-    --flow-integration-steps "$STEP" \
-    "${WANDB_ARGS[@]}" \
-    --output-dir "$QUALITATIVE_ROOT/$BUNDLE_NAME" \
-    --upload-wandb
+    BUNDLE_NAME="test_${PROBLEM_ID}_flow_${FLOW_METHOD}_steps${STEP}_seed${SEED}"
+
+    python -m engiopt.export_qualitative_bundle_2d \
+      --problems "$PROBLEM_ID" \
+      --seed "$SEED" \
+      --checkpoint-dir "$CHECKPOINT_DIR" \
+      --select-best-of-top-k \
+      --top-k 5 \
+      --flow-method "$FLOW_METHOD" \
+      --flow-integration-steps "$STEP" \
+      --track \
+      "${WANDB_ARGS[@]}" \
+      --output-dir "$QUALITATIVE_ROOT/$BUNDLE_NAME"
+  done
 done
 
 echo "[$(date)] Qualitative export complete."
 
 # ============================================================================
-# 5. REPORT: Flow-matching only (euler 16 & 32)
+# 5. REPORT: Aggregate all test shards
 # ============================================================================
 echo "[$(date)] ========== PHASE 5: TEST REPORT =========="
 
 python -m engiopt.report_metrics \
   --shard-dir "$CSV_SHARD_DIR" \
   --output-dir "$REPORT_DIR" \
-  --problem-id beams2d,heatconduction2d \
   "${WANDB_ARGS[@]}" \
   --upload-wandb \
   --run-name "test_report_euler_seed${SEED}" \

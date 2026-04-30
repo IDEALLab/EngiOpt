@@ -1,8 +1,10 @@
 #!/bin/bash
 #SBATCH --job-name=engiopt-full-pipeline
-#SBATCH --account=YOUR_ACCOUNT
-#SBATCH --partition=YOUR_PARTITION
+#SBATCH --partition=cuda13pr.24h
 #SBATCH --time=600:00:00
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=8
+#SBATCH --mem-per-cpu=7G
 #SBATCH --nodes=1
 #SBATCH --gpus-per-node=1
 #SBATCH --array=0-9
@@ -12,6 +14,8 @@
 # Full pipeline: 10 seeds
 # Each seed trains: flow-matching (9 solver configs), diffusion, cGAN for both problems
 # Then evaluates all and generates master report table per seed
+
+set -euo pipefail
 
 if [[ -n "${SLURM_SUBMIT_DIR:-}" ]]; then
     SCRIPT_DIR="$SLURM_SUBMIT_DIR"
@@ -26,8 +30,15 @@ activate_flow_venv
 load_flow_secrets
 configure_flow_caches
 
+WANDB_PROJECT_VALUE="${WANDB_PROJECT:-engiopt}"
+WANDB_ENTITY_ARGS=()
+if [[ -n "${WANDB_ENTITY:-}" ]]; then
+  WANDB_ENTITY_ARGS+=(--wandb-entity "$WANDB_ENTITY")
+fi
+
 # Seeds
 declare -a SEEDS=(1 2 3 4 5 6 7 8 9 10)
+declare -a PROBLEMS=(beams2d heatconduction2d)
 
 SEED=${SEEDS[$SLURM_ARRAY_TASK_ID]}
 
@@ -51,35 +62,59 @@ mkdir -p logs "$RESULTS_ROOT" "$QUALITATIVE_ROOT" "$REPORT_DIR" "$CSV_SHARD_DIR"
 # ============================================================================
 echo "[$(date)] ========== PHASE 1: TRAINING =========="
 
-# Flow-matching
-echo "[$(date)] Training Flow-Matching for both problems..."
-python -m engiopt.flow_matching_2d_cond.flow_matching_2d_cond \
-  --seed "$SEED" \
-  --num-epochs 200 \
-  --batch-size 32 \
-  --learning-rate 1e-3 \
-  --eval-every 5 \
-  --problems beams2d,heatconduction2d
+for PROBLEM_ID in "${PROBLEMS[@]}"; do
+  FLOW_CHECKPOINT_DIR="$RESULTS_ROOT/checkpoints/flow_matching/$PROBLEM_ID"
+  DIFFUSION_CHECKPOINT_DIR="$RESULTS_ROOT/checkpoints/diffusion/$PROBLEM_ID"
+  CGAN_CHECKPOINT_DIR="$RESULTS_ROOT/checkpoints/cgan/$PROBLEM_ID"
+  mkdir -p "$FLOW_CHECKPOINT_DIR" "$DIFFUSION_CHECKPOINT_DIR" "$CGAN_CHECKPOINT_DIR"
 
-# Diffusion
-echo "[$(date)] Training Diffusion for both problems..."
-python -m engiopt.diffusion_2d_cond.diffusion_2d_cond \
-  --seed "$SEED" \
-  --num-epochs 200 \
-  --batch-size 32 \
-  --learning-rate 1e-3 \
-  --eval-every 5 \
-  --problems beams2d,heatconduction2d
+  echo "[$(date)] Training Flow-Matching for $PROBLEM_ID..."
+  python -m engiopt.flow_matching_2d_cond.flow_matching_2d_cond \
+    --problem-id "$PROBLEM_ID" \
+    --seed "$SEED" \
+    --n-epochs 200 \
+    --batch-size 32 \
+    --lr 1e-3 \
+    --validation-interval-epochs 5 \
+    --checkpoint-interval-epochs 5 \
+    --checkpoint-dir "$FLOW_CHECKPOINT_DIR" \
+    --track \
+    --wandb-project "$WANDB_PROJECT_VALUE" \
+    "${WANDB_ENTITY_ARGS[@]}"
 
-# cGAN
-echo "[$(date)] Training cGAN for both problems..."
-python -m engiopt.cgan_cnn_2d.cgan_cnn_2d \
-  --seed "$SEED" \
-  --num-epochs 200 \
-  --batch-size 32 \
-  --learning-rate 1e-3 \
-  --eval-every 5 \
-  --problems beams2d,heatconduction2d
+  echo "[$(date)] Training Diffusion for $PROBLEM_ID..."
+  python -m engiopt.diffusion_2d_cond.diffusion_2d_cond \
+    --problem-id "$PROBLEM_ID" \
+    --seed "$SEED" \
+    --n-epochs 200 \
+    --batch-size 32 \
+    --lr 1e-3 \
+    --validation-interval-epochs 5 \
+    --checkpoint-interval-epochs 5 \
+    --checkpoint-dir "$DIFFUSION_CHECKPOINT_DIR" \
+    --save-model \
+    --checkpoint-path "$DIFFUSION_CHECKPOINT_DIR/model.pth" \
+    --track \
+    --wandb-project "$WANDB_PROJECT_VALUE" \
+    "${WANDB_ENTITY_ARGS[@]}"
+
+  echo "[$(date)] Training cGAN for $PROBLEM_ID..."
+  python -m engiopt.cgan_2d.cgan_2d \
+    --problem-id "$PROBLEM_ID" \
+    --seed "$SEED" \
+    --n-epochs 200 \
+    --batch-size 32 \
+    --lr-gen 1e-4 \
+    --lr-disc 4e-4 \
+    --checkpoint-interval-epochs 5 \
+    --checkpoint-dir "$CGAN_CHECKPOINT_DIR" \
+    --save-model \
+    --generator-checkpoint-path "$CGAN_CHECKPOINT_DIR/generator.pth" \
+    --discriminator-checkpoint-path "$CGAN_CHECKPOINT_DIR/discriminator.pth" \
+    --track \
+    --wandb-project "$WANDB_PROJECT_VALUE" \
+    "${WANDB_ENTITY_ARGS[@]}"
+done
 
 echo "[$(date)] ========== Training complete =========="
 
@@ -92,20 +127,26 @@ declare -a SOLVERS=(euler euler euler midpoint midpoint midpoint rk4 rk4 rk4)
 declare -a STEPS=(16 32 48 8 16 24 4 8 12)
 
 # Evaluate top-5 checkpoints for EACH solver configuration
-for i in "${!SOLVERS[@]}"; do
-  FLOW_METHOD=${SOLVERS[$i]}
-  FLOW_INTEGRATION_STEPS=${STEPS[$i]}
-  
-  echo "[$(date)] MMD selection for $FLOW_METHOD with $FLOW_INTEGRATION_STEPS steps..."
-  
-  python -m engiopt.flow_matching_2d_cond.evaluate_flow_matching_2d_cond \
-    --checkpoint-dir "$RESULTS_ROOT/checkpoints/flow_matching" \
-    --seed "$SEED" \
-    --top-k 5 \
-    --problems beams2d,heatconduction2d \
-    --flow-method "$FLOW_METHOD" \
-    --flow-integration-steps "$FLOW_INTEGRATION_STEPS" \
-    --output-rankings "rankings_${FLOW_METHOD}_steps${FLOW_INTEGRATION_STEPS}.json"
+for PROBLEM_ID in "${PROBLEMS[@]}"; do
+  FLOW_CHECKPOINT_DIR="$RESULTS_ROOT/checkpoints/flow_matching/$PROBLEM_ID"
+  for i in "${!SOLVERS[@]}"; do
+    FLOW_METHOD=${SOLVERS[$i]}
+    FLOW_INTEGRATION_STEPS=${STEPS[$i]}
+
+    echo "[$(date)] MMD selection for $PROBLEM_ID $FLOW_METHOD with $FLOW_INTEGRATION_STEPS steps..."
+
+    python -m engiopt.flow_matching_2d_cond.evaluate_flow_matching_2d_cond \
+      --checkpoint-dir "$FLOW_CHECKPOINT_DIR" \
+      --problem-id "$PROBLEM_ID" \
+      --seed "$SEED" \
+      --top-k 5 \
+      --method "$FLOW_METHOD" \
+      --integration-steps "$FLOW_INTEGRATION_STEPS" \
+      --output-csv "$CSV_SHARD_DIR/flow_${PROBLEM_ID}_${FLOW_METHOD}_steps${FLOW_INTEGRATION_STEPS}_metrics.csv" \
+      --track \
+      --wandb-project "$WANDB_PROJECT_VALUE" \
+      "${WANDB_ENTITY_ARGS[@]}"
+  done
 done
 
 echo "[$(date)] MMD evaluation complete for all solver configs."
@@ -115,46 +156,48 @@ echo "[$(date)] MMD evaluation complete for all solver configs."
 # ============================================================================
 echo "[$(date)] ========== PHASE 3: TEST EVALUATION =========="
 
-declare -a SOLVERS=(euler euler euler midpoint midpoint midpoint rk4 rk4 rk4)
-declare -a STEPS=(16 32 48 8 16 24 4 8 12)
+for PROBLEM_ID in "${PROBLEMS[@]}"; do
+  FLOW_CHECKPOINT_DIR="$RESULTS_ROOT/checkpoints/flow_matching/$PROBLEM_ID"
+  DIFFUSION_CHECKPOINT_DIR="$RESULTS_ROOT/checkpoints/diffusion/$PROBLEM_ID"
+  CGAN_CHECKPOINT_PATH="$RESULTS_ROOT/checkpoints/cgan/$PROBLEM_ID/generator.pth"
 
-# Flow-matching with all solver configs
-for i in "${!SOLVERS[@]}"; do
-  FLOW_METHOD=${SOLVERS[$i]}
-  FLOW_INTEGRATION_STEPS=${STEPS[$i]}
-  
-  echo "[$(date)] Evaluating Flow-Matching: $FLOW_METHOD steps=$FLOW_INTEGRATION_STEPS"
-  
-  python -m engiopt.report_metrics \
-    --problems beams2d,heatconduction2d \
+  for i in "${!SOLVERS[@]}"; do
+    FLOW_METHOD=${SOLVERS[$i]}
+    FLOW_INTEGRATION_STEPS=${STEPS[$i]}
+
+    echo "[$(date)] Evaluating Flow-Matching: $PROBLEM_ID $FLOW_METHOD steps=$FLOW_INTEGRATION_STEPS"
+
+    python -m engiopt.flow_matching_2d_cond.evaluate_flow_matching_2d_cond \
+      --checkpoint-dir "$FLOW_CHECKPOINT_DIR" \
+      --problem-id "$PROBLEM_ID" \
+      --seed "$SEED" \
+      --method "$FLOW_METHOD" \
+      --integration-steps "$FLOW_INTEGRATION_STEPS" \
+      --output-csv "$CSV_SHARD_DIR/${PROBLEM_ID}_flow_${FLOW_METHOD}_steps${FLOW_INTEGRATION_STEPS}_metrics.csv" \
+      --track \
+      --wandb-project "$WANDB_PROJECT_VALUE" \
+      "${WANDB_ENTITY_ARGS[@]}"
+  done
+
+  echo "[$(date)] Evaluating Diffusion for $PROBLEM_ID..."
+  python -m engiopt.diffusion_2d_cond.evaluate_diffusion_2d_cond \
+    --problem-id "$PROBLEM_ID" \
     --seed "$SEED" \
-    --split test \
-    --checkpoint-dir "$RESULTS_ROOT/checkpoints/flow_matching" \
-    --flow-method "$FLOW_METHOD" \
-    --flow-integration-steps "$FLOW_INTEGRATION_STEPS" \
-    --output-dir "$CSV_SHARD_DIR" \
-    --run-name "flow_${FLOW_METHOD}_steps${FLOW_INTEGRATION_STEPS}_seed${SEED}"
+    --checkpoint-dir "$DIFFUSION_CHECKPOINT_DIR" \
+    --select-best-of-top-k \
+    --top-k 5 \
+    --output-csv "$CSV_SHARD_DIR/${PROBLEM_ID}_diffusion_metrics.csv" \
+    --track \
+    --wandb-project "$WANDB_PROJECT_VALUE" \
+    "${WANDB_ENTITY_ARGS[@]}"
+
+  echo "[$(date)] Evaluating cGAN for $PROBLEM_ID..."
+  python -m engiopt.cgan_2d.evaluate_cgan_2d \
+    --problem-id "$PROBLEM_ID" \
+    --seed "$SEED" \
+    --checkpoint-path "$CGAN_CHECKPOINT_PATH" \
+    --output-csv "$CSV_SHARD_DIR/${PROBLEM_ID}_cgan_metrics.csv"
 done
-
-# Diffusion
-echo "[$(date)] Evaluating Diffusion..."
-python -m engiopt.report_metrics \
-  --problems beams2d,heatconduction2d \
-  --seed "$SEED" \
-  --split test \
-  --checkpoint-dir "$RESULTS_ROOT/checkpoints/diffusion" \
-  --output-dir "$CSV_SHARD_DIR" \
-  --run-name "diffusion_seed${SEED}"
-
-# cGAN
-echo "[$(date)] Evaluating cGAN..."
-python -m engiopt.report_metrics \
-  --problems beams2d,heatconduction2d \
-  --seed "$SEED" \
-  --split test \
-  --checkpoint-dir "$RESULTS_ROOT/checkpoints/cgan" \
-  --output-dir "$CSV_SHARD_DIR" \
-  --run-name "cgan_seed${SEED}"
 
 echo "[$(date)] Test evaluation complete."
 
@@ -169,48 +212,50 @@ if [[ -n "${WANDB_ENTITY:-}" ]]; then
 fi
 
 # Flow-matching with all solver configs using solver-specific top-5 rankings
-for i in "${!SOLVERS[@]}"; do
-  FLOW_METHOD=${SOLVERS[$i]}
-  FLOW_INTEGRATION_STEPS=${STEPS[$i]}
-  
-  echo "[$(date)] Exporting Flow-Matching qualitative: $FLOW_METHOD steps=$FLOW_INTEGRATION_STEPS"
-  
-  BUNDLE_NAME="flow_${FLOW_METHOD}_steps${FLOW_INTEGRATION_STEPS}_seed${SEED}"
-  RANKINGS_FILE="rankings_${FLOW_METHOD}_steps${FLOW_INTEGRATION_STEPS}.json"
-  
+for PROBLEM_ID in "${PROBLEMS[@]}"; do
+  FLOW_CHECKPOINT_DIR="$RESULTS_ROOT/checkpoints/flow_matching/$PROBLEM_ID"
+  DIFFUSION_CHECKPOINT_DIR="$RESULTS_ROOT/checkpoints/diffusion/$PROBLEM_ID"
+  CGAN_CHECKPOINT_PATH="$RESULTS_ROOT/checkpoints/cgan/$PROBLEM_ID/generator.pth"
+
+  for i in "${!SOLVERS[@]}"; do
+    FLOW_METHOD=${SOLVERS[$i]}
+    FLOW_INTEGRATION_STEPS=${STEPS[$i]}
+
+    echo "[$(date)] Exporting Flow-Matching qualitative: $PROBLEM_ID $FLOW_METHOD steps=$FLOW_INTEGRATION_STEPS"
+
+    BUNDLE_NAME="${PROBLEM_ID}_flow_${FLOW_METHOD}_steps${FLOW_INTEGRATION_STEPS}_seed${SEED}"
+
+    python -m engiopt.export_qualitative_bundle_2d \
+      --problems "$PROBLEM_ID" \
+      --seed "$SEED" \
+      --checkpoint-dir "$FLOW_CHECKPOINT_DIR" \
+      --select-best-of-top-k \
+      --top-k 5 \
+      --flow-method "$FLOW_METHOD" \
+      --flow-integration-steps "$FLOW_INTEGRATION_STEPS" \
+      --track \
+      "${WANDB_ARGS[@]}" \
+      --output-dir "$QUALITATIVE_ROOT/$BUNDLE_NAME"
+  done
+
+  echo "[$(date)] Exporting Diffusion qualitative for $PROBLEM_ID..."
   python -m engiopt.export_qualitative_bundle_2d \
-    --problems beams2d,heatconduction2d \
+    --problems "$PROBLEM_ID" \
     --seed "$SEED" \
-    --checkpoint-dir "$RESULTS_ROOT/checkpoints/flow_matching" \
-    --select-best-of-top-k \
-    --top-k-rankings "$RANKINGS_FILE" \
-    --flow-method "$FLOW_METHOD" \
-    --flow-integration-steps "$FLOW_INTEGRATION_STEPS" \
+    --diffusion-checkpoint-path "$DIFFUSION_CHECKPOINT_DIR/model.pth" \
+    --track \
     "${WANDB_ARGS[@]}" \
-    --output-dir "$QUALITATIVE_ROOT/$BUNDLE_NAME" \
-    --upload-wandb
+      --output-dir "$QUALITATIVE_ROOT/${PROBLEM_ID}_diffusion_seed${SEED}"
+
+  echo "[$(date)] Exporting cGAN qualitative for $PROBLEM_ID..."
+  python -m engiopt.export_qualitative_bundle_2d \
+    --problems "$PROBLEM_ID" \
+    --seed "$SEED" \
+    --cgan-checkpoint-path "$CGAN_CHECKPOINT_DIR/generator.pth" \
+    --track \
+    "${WANDB_ARGS[@]}" \
+      --output-dir "$QUALITATIVE_ROOT/${PROBLEM_ID}_cgan_seed${SEED}"
 done
-
-# Diffusion
-echo "[$(date)] Exporting Diffusion qualitative..."
-python -m engiopt.export_qualitative_bundle_2d \
-  --problems beams2d,heatconduction2d \
-  --seed "$SEED" \
-  --checkpoint-dir "$RESULTS_ROOT/checkpoints/diffusion" \
-  "${WANDB_ARGS[@]}" \
-  --output-dir "$QUALITATIVE_ROOT/diffusion_seed${SEED}" \
-  --upload-wandb
-
-# cGAN
-echo "[$(date)] Exporting cGAN qualitative..."
-python -m engiopt.export_qualitative_bundle_2d \
-  --problems beams2d,heatconduction2d \
-  --seed "$SEED" \
-  --checkpoint-dir "$RESULTS_ROOT/checkpoints/cgan" \
-  "${WANDB_ARGS[@]}" \
-  --output-dir "$QUALITATIVE_ROOT/cgan_seed${SEED}" \
-  --upload-wandb
-
 echo "[$(date)] Qualitative export complete."
 
 # ============================================================================
@@ -221,7 +266,6 @@ echo "[$(date)] ========== PHASE 5: MASTER REPORT AGGREGATION =========="
 python -m engiopt.report_metrics \
   --shard-dir "$CSV_SHARD_DIR" \
   --output-dir "$REPORT_DIR" \
-  --problem-id beams2d,heatconduction2d \
   "${WANDB_ARGS[@]}" \
   --upload-wandb \
   --run-name "master_report_seed${SEED}" \

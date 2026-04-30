@@ -308,6 +308,7 @@ if __name__ == "__main__":
                 "seed": args.seed,
                 "problem_id": args.problem_id,
                 "model_id": "flow_matching_2d_cond",
+                "method": args.method,
                 "n_samples": args.n_samples,
                 "sigma": args.sigma,
             }
@@ -350,6 +351,7 @@ if __name__ == "__main__":
                     "seed": args.seed,
                     "problem_id": args.problem_id,
                     "model_id": "flow_matching_2d_cond",
+                    "method": args.method,
                     "phase": "test_top_k",
                     "checkpoint_dir": str(checkpoint_dir),
                     "selection_mode": "top_k_mmd_test_eval",
@@ -449,6 +451,7 @@ if __name__ == "__main__":
                 "seed": args.seed,
                 "problem_id": args.problem_id,
                 "model_id": "flow_matching_2d_cond",
+                "method": args.method,
                 "n_samples": args.n_samples,
                 "sigma": args.sigma,
                 "integration_steps": integration_steps,
