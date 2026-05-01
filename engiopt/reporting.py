@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Iterable
+from typing import Any, Iterable, Mapping
 
 import pandas as pd
 import wandb
@@ -11,9 +11,13 @@ import wandb
 DEFAULT_METRICS = ("cog", "mmd", "dpp", "viol", "iog", "fog")
 
 
-def build_display_name(row: pd.Series) -> str:
+def build_display_name(row: Mapping[str, Any]) -> str:
     """Build a readable label for report tables."""
     parts: list[str] = []
+
+    def append_int_part(label: str, value: Any) -> None:
+        if value is not None and not pd.isna(value):
+            parts.append(f"{label}={int(value)}")
 
     problem_id = row.get("problem_id")
     if pd.notna(problem_id):
@@ -24,28 +28,32 @@ def build_display_name(row: pd.Series) -> str:
         parts.append(str(model_id))
 
     seed = row.get("seed")
-    if pd.notna(seed):
-        parts.append(f"seed={int(seed)}")
+    append_int_part("seed", seed)
 
     rank = row.get("selection_rank")
     if pd.isna(rank):
         rank = row.get("rank")
-    if pd.notna(rank):
-        parts.append(f"rank={int(rank)}")
+    append_int_part("rank", rank)
+
+    epoch = row.get("selection_candidate_epoch")
+    if pd.isna(epoch):
+        epoch = row.get("epoch")
+    append_int_part("epoch", epoch)
 
     method = row.get("method")
     if pd.notna(method):
         parts.append(f"solver={method}")
 
     integration_steps = row.get("integration_steps")
-    if pd.notna(integration_steps):
-        parts.append(f"steps={int(integration_steps)}")
+    append_int_part("steps", integration_steps)
 
     return " | ".join(parts)
 
 
 def add_display_name_column(frame: pd.DataFrame) -> pd.DataFrame:
     """Return a copy of the frame with a leading display_name column."""
+    if "display_name" in frame.columns:
+        return frame.copy()
     result = frame.copy()
     result.insert(0, "display_name", result.apply(build_display_name, axis=1))
     return result

@@ -50,6 +50,8 @@ if __name__ == "__main__":
     )
     summary_long_df, summary_wide_df = summarize_metrics(raw_df, metrics=args.metrics)
     raw_df = add_display_name_column(raw_df)
+    summary_long_df = add_display_name_column(summary_long_df)
+    summary_wide_df = add_display_name_column(summary_wide_df)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)

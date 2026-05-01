@@ -18,6 +18,7 @@ import wandb
 from engiopt import metrics
 from engiopt.cgan_cnn_2d.cgan_cnn_2d import Generator
 from engiopt.dataset_sample_conditions import sample_conditions
+from engiopt.reporting import build_display_name
 from engiopt.reporting import write_metrics_csv
 
 
@@ -302,6 +303,8 @@ if __name__ == "__main__":
 
         candidate_rows: list[dict[str, Any]] = []
         test_design_tables: list[dict[str, Any]] = []
+        selected_candidate_rows: list[dict[str, Any]] = []
+        selected_candidate_generated_designs_np: np.ndarray | None = None
         for rank, candidate in enumerate(candidates, 1):
             candidate_metrics, candidate_generated_designs_np = evaluate_checkpoint(
                 checkpoint_path=candidate["checkpoint_path"],
@@ -330,9 +333,11 @@ if __name__ == "__main__":
                     "selection_candidate_mmd": candidate["metric_value"],
                 }
             )
+            candidate_metrics["display_name"] = build_display_name(candidate_metrics)
             candidate_rows.append(candidate_metrics)
             test_design_tables.append(
                 {
+                    "display_name": candidate_metrics["display_name"],
                     "rank": rank,
                     "epoch": int(candidate["epoch"] + 1),
                     "validation_mmd": float(candidate["metric_value"]),
@@ -343,11 +348,15 @@ if __name__ == "__main__":
                     "design_grid": build_design_grid(candidate_generated_designs_np),
                 }
             )
+            if rank == 1:
+                selected_candidate_rows = [candidate_metrics]
+                selected_candidate_generated_designs_np = candidate_generated_designs_np
 
         write_metrics_csv(candidate_rows, out_path, append_output=args.append_output)
         checkpoint_source = "selected_top_k_checkpoint"
-        final_generated_designs_np = candidate_generated_designs_np
+        final_generated_designs_np = selected_candidate_generated_designs_np
         final_reference_designs_np = test_sampled_designs_np
+        metrics_dict = selected_candidate_rows[0] if selected_candidate_rows else {}
 
     else:
         conditions_tensor, sampled_conditions, sampled_designs_np, _ = sample_conditions(
@@ -440,9 +449,10 @@ if __name__ == "__main__":
             run.log(
                 {
                     "selection/test_table": wandb.Table(
-                        columns=["rank", "epoch", "validation_mmd", "test_cog", "test_fog", "test_mmd", "checkpoint_path", "design_grid"],
+                        columns=["display_name", "rank", "epoch", "validation_mmd", "test_cog", "test_fog", "test_mmd", "checkpoint_path", "design_grid"],
                         data=[
                             [
+                                row["display_name"],
                                 row["rank"],
                                 row["epoch"],
                                 row["validation_mmd"],
@@ -450,7 +460,7 @@ if __name__ == "__main__":
                                 row["test_fog"],
                                 row["test_mmd"],
                                 row["checkpoint_path"],
-                                wandb.Image(row["design_grid"], caption=f"Rank {row['rank']}: Epoch {row['epoch']}, val MMD={row['validation_mmd']:.{args.validation_log_precision}f}, test MMD={row['test_mmd']:.{args.validation_log_precision}f}"),
+                                wandb.Image(row["design_grid"], caption=f"{row['display_name']} | val MMD={row['validation_mmd']:.{args.validation_log_precision}f} | test MMD={row['test_mmd']:.{args.validation_log_precision}f}"),
                             ]
                             for row in test_design_tables
                         ],
@@ -488,16 +498,26 @@ if __name__ == "__main__":
         if final_generated_designs_np is not None and final_reference_designs_np is not None:
             gen_grid = build_design_grid(final_generated_designs_np)
             ref_grid = build_design_grid(final_reference_designs_np)
+            final_display_name = build_display_name(metrics_dict) if metrics_dict else "selected_candidate"
             run.log(
                 {
-                    "eval/designs_generated_grid": wandb.Image(
+                    f"eval/designs_generated_grid/{final_display_name}": wandb.Image(
                         gen_grid,
-                        caption="Generated designs (same batch used for final table metrics)",
+                        caption=f"Generated designs for {final_display_name}",
                     ),
-                    "eval/designs_reference_grid": wandb.Image(
+                    f"eval/designs_reference_grid/{final_display_name}": wandb.Image(
                         ref_grid,
-                        caption="Reference test designs (same batch used for final table metrics)",
+                        caption=f"Reference test designs for {final_display_name}",
                     ),
+                }
+            )
+            run.log(
+                {
+                    f"eval/designs_generated_grid/rank{row['rank']}/{row['display_name']}": wandb.Image(
+                        row["design_grid"],
+                        caption=f"{row['display_name']} | val MMD={row['validation_mmd']:.{args.validation_log_precision}f} | test MMD={row['test_mmd']:.{args.validation_log_precision}f}",
+                    )
+                    for row in test_design_tables
                 }
             )
         run.finish()
