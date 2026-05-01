@@ -11,6 +11,46 @@ import wandb
 DEFAULT_METRICS = ("cog", "mmd", "dpp", "viol", "iog", "fog")
 
 
+def build_display_name(row: pd.Series) -> str:
+    """Build a readable label for report tables."""
+    parts: list[str] = []
+
+    problem_id = row.get("problem_id")
+    if pd.notna(problem_id):
+        parts.append(str(problem_id))
+
+    model_id = row.get("model_id")
+    if pd.notna(model_id):
+        parts.append(str(model_id))
+
+    seed = row.get("seed")
+    if pd.notna(seed):
+        parts.append(f"seed={int(seed)}")
+
+    rank = row.get("selection_rank")
+    if pd.isna(rank):
+        rank = row.get("rank")
+    if pd.notna(rank):
+        parts.append(f"rank={int(rank)}")
+
+    method = row.get("method")
+    if pd.notna(method):
+        parts.append(f"solver={method}")
+
+    integration_steps = row.get("integration_steps")
+    if pd.notna(integration_steps):
+        parts.append(f"steps={int(integration_steps)}")
+
+    return " | ".join(parts)
+
+
+def add_display_name_column(frame: pd.DataFrame) -> pd.DataFrame:
+    """Return a copy of the frame with a leading display_name column."""
+    result = frame.copy()
+    result.insert(0, "display_name", result.apply(build_display_name, axis=1))
+    return result
+
+
 def write_metrics_csv(records: list[dict], output_path: str, append_output: bool = False) -> Path:
     """Write evaluation rows to CSV, overwriting by default."""
     output = Path(output_path)
@@ -108,6 +148,10 @@ def upload_report_to_wandb(
     job_type: str = "evaluation-summary",
 ) -> str:
     """Upload raw and summary results to Weights & Biases."""
+    raw_table_df = add_display_name_column(raw_df)
+    summary_long_table_df = add_display_name_column(summary_long_df)
+    summary_wide_table_df = add_display_name_column(summary_wide_df)
+
     run = wandb.init(
         project=project,
         entity=entity,
@@ -124,9 +168,9 @@ def upload_report_to_wandb(
 
     run.log(
         {
-            "evaluation/raw_table": wandb.Table(dataframe=raw_df),
-            "evaluation/summary_table": wandb.Table(dataframe=summary_wide_df),
-            "evaluation/summary_long_table": wandb.Table(dataframe=summary_long_df),
+            "evaluation/raw_table": wandb.Table(dataframe=raw_table_df),
+            "evaluation/summary_table": wandb.Table(dataframe=summary_wide_table_df),
+            "evaluation/summary_long_table": wandb.Table(dataframe=summary_long_table_df),
         }
     )
 

@@ -8,6 +8,7 @@ from pathlib import Path
 import tyro
 
 from engiopt.reporting import DEFAULT_METRICS
+from engiopt.reporting import add_display_name_column
 from engiopt.reporting import load_metric_shards
 from engiopt.reporting import summarize_metrics
 from engiopt.reporting import upload_report_to_wandb
@@ -48,6 +49,7 @@ if __name__ == "__main__":
         latest_only=args.latest_only,
     )
     summary_long_df, summary_wide_df = summarize_metrics(raw_df, metrics=args.metrics)
+    raw_df = add_display_name_column(raw_df)
 
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
