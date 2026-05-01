@@ -80,10 +80,15 @@ def summarize_metrics(
             value_name="value",
         )
         .groupby(group_cols + ["metric"], as_index=False)
-        .agg(mean=("value", "mean"), std=("value", "std"), n_seeds=("value", "count"))
+        .agg(
+            mean=("value", "mean"),
+            median=("value", "median"),
+            std=("value", "std"),
+            n_seeds=("value", "count"),
+        )
     )
 
-    wide_df = long_df.pivot(index=group_cols, columns="metric", values=["mean", "std"])
+    wide_df = long_df.pivot(index=group_cols, columns="metric", values=["mean", "median", "std"])
     wide_df.columns = [f"{metric}_{stat}" for stat, metric in wide_df.columns]
     wide_df = wide_df.reset_index()
     return long_df, wide_df
@@ -137,9 +142,12 @@ def upload_report_to_wandb(
         )
         metric = str(getattr(row, "metric"))
         mean = getattr(row, "mean")
+        median = getattr(row, "median")
         std = getattr(row, "std")
         if pd.notna(mean):
             scalar_payload[f"evaluation/{problem_id}/{model_id}{step_suffix}/{metric}_mean"] = float(mean)
+        if pd.notna(median):
+            scalar_payload[f"evaluation/{problem_id}/{model_id}{step_suffix}/{metric}_median"] = float(median)
         if pd.notna(std):
             scalar_payload[f"evaluation/{problem_id}/{model_id}{step_suffix}/{metric}_std"] = float(std)
     if scalar_payload:

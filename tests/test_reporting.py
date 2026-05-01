@@ -47,3 +47,5 @@ def test_summarize_metrics_builds_mean_and_std():
     cog_row = summary_long[(summary_long["model_id"] == "fm") & (summary_long["metric"] == "cog")].iloc[0]
     assert cog_row["mean"] == 1.0
     assert summary_wide.iloc[0]["cog_mean"] == 1.0
+    assert summary_wide.iloc[0]["cog_median"] == 1.0
+    assert summary_wide.iloc[0]["mmd_median"] == 2.0
