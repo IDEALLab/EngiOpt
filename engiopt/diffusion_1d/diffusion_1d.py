@@ -1,5 +1,4 @@
 """Diffusion 1D algorithm for vector-based problems.
-
 We are using the implementation from https://github.com/lucidrains/denoising-diffusion-pytorch.
 """
 

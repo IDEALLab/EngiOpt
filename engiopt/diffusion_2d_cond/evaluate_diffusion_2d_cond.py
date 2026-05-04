@@ -283,6 +283,7 @@ if __name__ == "__main__":
     out_path = args.output_csv.format(problem_id=args.problem_id)
     final_generated_designs_np: np.ndarray | None = None
     final_reference_designs_np: np.ndarray | None = None
+    selection_validation_rows: list[dict[str, Any]] = []
 
     if args.checkpoint_path is not None:
         conditions_tensor, sampled_conditions, sampled_designs_np, _ = sample_conditions(
@@ -323,6 +324,50 @@ if __name__ == "__main__":
         checkpoint_dir = Path(args.checkpoint_dir)
         candidates = load_top_k_candidates(checkpoint_dir, args.top_k)
 
+        val_conditions_tensor, val_sampled_conditions, val_sampled_designs_np, _ = sample_conditions(
+            problem=problem,
+            n_samples=args.selection_batch_size,
+            device=device,
+            seed=seed + args.selection_seed_offset,
+            split="val",
+        )
+        val_conditions_tensor = val_conditions_tensor.unsqueeze(1)
+
+        best_candidate: dict[str, Any] | None = None
+        best_candidate_val_cog = float("inf")
+
+        for rank, candidate in enumerate(candidates, 1):
+            val_metrics, _ = evaluate_checkpoint(
+                checkpoint_path=candidate["checkpoint_path"],
+                conditions_tensor=val_conditions_tensor,
+                sampled_conditions=val_sampled_conditions,
+                sampled_designs_np=val_sampled_designs_np,
+                context=EvaluationContext(
+                    problem=problem,
+                    device=device,
+                    args=args,
+                    generation_seed=seed + 1000 + rank,
+                    checkpoint_source="selected_top_k_checkpoint",
+                ),
+            )
+            selection_validation_rows.append(
+                {
+                    "rank": rank,
+                    "epoch": int(candidate["epoch"] + 1),
+                    "checkpoint_path": str(candidate["checkpoint_path"]),
+                    "validation_mmd": float(candidate["metric_value"]),
+                    "validation_cog": float(val_metrics["cog"]),
+                    "validation_fog": float(val_metrics["fog"]),
+                    "validation_eval_mmd": float(val_metrics["mmd"]),
+                }
+            )
+            if float(val_metrics["cog"]) < best_candidate_val_cog:
+                best_candidate_val_cog = float(val_metrics["cog"])
+                best_candidate = candidate
+
+        if best_candidate is None:
+            raise RuntimeError("No candidate selected from top-k checkpoints")
+
         test_conditions_tensor, test_sampled_conditions, test_sampled_designs_np, _ = sample_conditions(
             problem=problem,
             n_samples=args.n_samples,
@@ -332,62 +377,43 @@ if __name__ == "__main__":
         )
         test_conditions_tensor = test_conditions_tensor.unsqueeze(1)
 
-        candidate_rows: list[dict[str, Any]] = []
-        test_design_tables: list[dict[str, Any]] = []
-        selected_candidate_rows: list[dict[str, Any]] = []
-        selected_candidate_generated_designs_np: np.ndarray | None = None
-        for rank, candidate in enumerate(candidates, 1):
-            candidate_metrics, candidate_generated_designs_np = evaluate_checkpoint(
-                checkpoint_path=candidate["checkpoint_path"],
-                conditions_tensor=test_conditions_tensor,
-                sampled_conditions=test_sampled_conditions,
-                sampled_designs_np=test_sampled_designs_np,
-                context=EvaluationContext(
-                    problem=problem,
-                    device=device,
-                    args=args,
-                    generation_seed=seed + 2000 + rank,
-                    checkpoint_source="selected_top_k_checkpoint",
-                ),
-            )
-            candidate_metrics.update(
-                {
-                    "seed": seed,
-                    "problem_id": args.problem_id,
-                    "model_id": "diffusion_2d_cond",
-                    "phase": "test_top_k",
-                    "checkpoint_dir": str(checkpoint_dir),
-                    "selection_mode": "top_k_mmd_test_eval",
-                    "selection_top_k": args.top_k,
-                    "selection_rank": rank,
-                    "selection_candidate_epoch": candidate["epoch"] + 1,
-                    "selection_candidate_mmd": candidate["metric_value"],
-                }
-            )
-            candidate_metrics["display_name"] = build_display_name(candidate_metrics)
-            candidate_rows.append(candidate_metrics)
-            test_design_tables.append(
-                {
-                    "display_name": candidate_metrics["display_name"],
-                    "rank": rank,
-                    "epoch": int(candidate["epoch"] + 1),
-                    "validation_mmd": float(candidate["metric_value"]),
-                    "test_cog": float(candidate_metrics["cog"]),
-                    "test_fog": float(candidate_metrics["fog"]),
-                    "test_mmd": float(candidate_metrics["mmd"]),
-                    "checkpoint_path": str(candidate["checkpoint_path"]),
-                    "design_grid": build_design_grid(candidate_generated_designs_np),
-                }
-            )
-            if rank == 1:
-                selected_candidate_rows = [candidate_metrics]
-                selected_candidate_generated_designs_np = candidate_generated_designs_np
+        selected_rank = next(
+            idx for idx, row in enumerate(selection_validation_rows, 1) if row["epoch"] == int(best_candidate["epoch"] + 1)
+        )
 
-        write_metrics_csv(candidate_rows, out_path, append_output=args.append_output)
+        metrics_dict, final_generated_designs_np = evaluate_checkpoint(
+            checkpoint_path=best_candidate["checkpoint_path"],
+            conditions_tensor=test_conditions_tensor,
+            sampled_conditions=test_sampled_conditions,
+            sampled_designs_np=test_sampled_designs_np,
+            context=EvaluationContext(
+                problem=problem,
+                device=device,
+                args=args,
+                generation_seed=seed + 2000,
+                checkpoint_source="selected_top_k_checkpoint",
+            ),
+        )
+        metrics_dict.update(
+            {
+                "seed": seed,
+                "problem_id": args.problem_id,
+                "model_id": "diffusion_2d_cond",
+                "phase": "test_selected",
+                "checkpoint_dir": str(checkpoint_dir),
+                "selection_mode": "top_k_val_cog_select_then_test",
+                "selection_top_k": args.top_k,
+                "selection_batch_size": args.selection_batch_size,
+                "selection_rank": selected_rank,
+                "selection_candidate_epoch": best_candidate["epoch"] + 1,
+                "selection_candidate_mmd": best_candidate["metric_value"],
+                "selection_candidate_validation_cog": best_candidate_val_cog,
+            }
+        )
+        metrics_dict["display_name"] = build_display_name(metrics_dict)
+        write_metrics_csv([metrics_dict], out_path, append_output=args.append_output)
         checkpoint_source = "selected_top_k_checkpoint"
-        final_generated_designs_np = selected_candidate_generated_designs_np
         final_reference_designs_np = test_sampled_designs_np
-        metrics_dict = selected_candidate_rows[0] if selected_candidate_rows else {}
 
     else:
         conditions_tensor, sampled_conditions, sampled_designs_np, _ = sample_conditions(
@@ -503,24 +529,22 @@ if __name__ == "__main__":
         )
         if run is None:
             raise RuntimeError("Failed to initialize Weights & Biases run")
-        if args.checkpoint_dir is not None and args.select_best_of_top_k and args.checkpoint_path is None:
+        if selection_validation_rows:
             run.log(
                 {
-                    "selection/test_table": wandb.Table(
-                        columns=["display_name", "rank", "epoch", "validation_mmd", "test_cog", "test_fog", "test_mmd", "checkpoint_path", "design_grid"],
+                    "selection/validation_table": wandb.Table(
+                        columns=["rank", "epoch", "validation_mmd", "validation_cog", "validation_fog", "validation_eval_mmd", "checkpoint_path"],
                         data=[
                             [
-                                row["display_name"],
                                 row["rank"],
                                 row["epoch"],
                                 row["validation_mmd"],
-                                row["test_cog"],
-                                row["test_fog"],
-                                row["test_mmd"],
+                                row["validation_cog"],
+                                row["validation_fog"],
+                                row["validation_eval_mmd"],
                                 row["checkpoint_path"],
-                                wandb.Image(row["design_grid"], caption=f"{row['display_name']} | val MMD={row['validation_mmd']:.{args.validation_log_precision}f} | test MMD={row['test_mmd']:.{args.validation_log_precision}f}"),
                             ]
-                            for row in test_design_tables
+                            for row in selection_validation_rows
                         ],
                     )
                 }
@@ -571,11 +595,8 @@ if __name__ == "__main__":
             )
             run.log(
                 {
-                    f"eval/designs_generated_grid/rank{row['rank']}/{row['display_name']}": wandb.Image(
-                        row["design_grid"],
-                        caption=f"{row['display_name']} | val MMD={row['validation_mmd']:.{args.validation_log_precision}f} | test MMD={row['test_mmd']:.{args.validation_log_precision}f}",
-                    )
-                    for row in test_design_tables
+                    "selection/final_checkpoint_epoch": metrics_dict.get("selection_candidate_epoch", -1),
+                    "selection/final_validation_cog": metrics_dict.get("selection_candidate_validation_cog", float("nan")),
                 }
             )
         run.finish()
