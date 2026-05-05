@@ -21,6 +21,9 @@ import wandb
 
 from engiopt.lv_vqvae.lv_vqvae import VQVAE
 from engiopt.lv_vqvae.lv_vqvae import VQVAETransformer
+from engiopt.lv_vqvae.utils import apply_condition_preprocessing
+from engiopt.lv_vqvae.utils import condition_preprocessing_from_config
+from engiopt.lv_vqvae.utils import condition_preprocessing_to_config
 from engiopt.transforms import drop_constant
 from engiopt.transforms import normalize
 from engiopt.transforms import resize_to
@@ -90,21 +93,58 @@ if __name__ == "__main__":
         batched=True,
     ).remove_columns("optimal_design")
 
-    conditions = problem.conditions_keys
-    if args.drop_constant_conditions:
-        training_ds, conditions = drop_constant(training_ds, conditions)
+    # =========================================================================
+    # LOAD STAGE 1 MODELS FROM WANDB
+    # =========================================================================
+    print(f"Loading Stage 1 models from: {args.stage1_wandb_run_path}")
+    api = wandb.Api()
+    run = api.run(args.stage1_wandb_run_path)
+    transformer_conditional = bool(run.config.get("conditional", args.conditional))
 
-    mean: Any = None
-    std: Any = None
-    if args.normalize_conditions:
-        training_ds, mean, std = normalize(training_ds, conditions)
+    image_channels = run.config["image_channels"]
+    latent_size = run.config["latent_size"]
+
+    artifact_vqvae = api.artifact(
+        f"{run.entity}/{run.project}/{args.problem_id}_lv_vqvae_lv_vqvae:latest",
+        type="model",
+    )
+    ckpt_path_vqvae = os.path.join(artifact_vqvae.download(), "lv_vqvae.pth")
+    ckpt_vqvae = th.load(ckpt_path_vqvae, map_location=device, weights_only=False)
+
+    ckpt_cvqvae = None
+    if transformer_conditional:
+        artifact_cvqvae = api.artifact(
+            f"{run.entity}/{run.project}/{args.problem_id}_lv_vqvae_lv_cvqvae:latest",
+            type="model",
+        )
+        ckpt_path_cvqvae = os.path.join(artifact_cvqvae.download(), "lv_cvqvae.pth")
+        ckpt_cvqvae = th.load(ckpt_path_cvqvae, map_location=device, weights_only=False)
+
+    condition_preprocessing = condition_preprocessing_from_config(ckpt_vqvae) or condition_preprocessing_from_config(
+        run.config
+    )
+
+    if condition_preprocessing is None:
+        conditions = problem.conditions_keys
+        if args.drop_constant_conditions:
+            training_ds, conditions = drop_constant(training_ds, conditions)
+
+        mean: Any = None
+        std: Any = None
+        if args.normalize_conditions:
+            training_ds, mean, std = normalize(training_ds, conditions)
+    else:
+        training_ds = apply_condition_preprocessing(training_ds, condition_preprocessing)
+        conditions = condition_preprocessing.conditions
+        mean = None if condition_preprocessing.mean is None else th.tensor(condition_preprocessing.mean, dtype=th.float32)
+        std = None if condition_preprocessing.std is None else th.tensor(condition_preprocessing.std, dtype=th.float32)
 
     n_conds = len(conditions)
-    condition_tensors = [training_ds[key][:] for key in conditions]
+    condition_tensors = [th.as_tensor(training_ds[key][:], device=device) for key in conditions]
 
     th_training_ds = th.utils.data.TensorDataset(
-        th.as_tensor(training_ds["optimal_upsampled"][:]).to(device),
-        *[th.as_tensor(training_ds[key][:]).to(device) for key in conditions],
+        th.as_tensor(training_ds["optimal_upsampled"][:]),
+        *[th.as_tensor(training_ds[key][:]) for key in conditions],
     )
     dataloader_transformer = th.utils.data.DataLoader(th_training_ds, batch_size=args.batch_size_transformer, shuffle=True)
 
@@ -119,22 +159,25 @@ if __name__ == "__main__":
         batched=True,
     ).remove_columns("optimal_design")
 
-    if args.drop_constant_conditions:
-        to_drop = [c for c in problem.conditions_keys if c not in conditions]
-        if to_drop:
-            val_ds = val_ds.remove_columns(to_drop)
+    if condition_preprocessing is None:
+        if args.drop_constant_conditions:
+            to_drop = [c for c in problem.conditions_keys if c not in conditions]
+            if to_drop:
+                val_ds = val_ds.remove_columns(to_drop)
 
-    if args.normalize_conditions:
-        val_ds = val_ds.map(
-            lambda batch: {
-                c: ((th.as_tensor(batch[c][:]).float() - mean[i]) / std[i]).numpy() for i, c in enumerate(conditions)
-            },
-            batched=True,
-        )
+        if args.normalize_conditions:
+            val_ds = val_ds.map(
+                lambda batch: {
+                    c: ((th.as_tensor(batch[c][:]).float() - mean[i]) / std[i]).numpy() for i, c in enumerate(conditions)
+                },
+                batched=True,
+            )
+    else:
+        val_ds = apply_condition_preprocessing(val_ds, condition_preprocessing)
 
     th_val_ds = th.utils.data.TensorDataset(
-        th.as_tensor(val_ds["optimal_upsampled"][:]).to(device),
-        *[th.as_tensor(val_ds[key][:]).to(device) for key in conditions],
+        th.as_tensor(val_ds["optimal_upsampled"][:]),
+        *[th.as_tensor(val_ds[key][:]) for key in conditions],
     )
     dataloader_val = th.utils.data.DataLoader(th_val_ds, batch_size=args.batch_size_transformer, shuffle=False)
 
@@ -157,31 +200,9 @@ if __name__ == "__main__":
         wandb.define_metric("epoch_transformer", step_metric="transformer_step")
         # Ensure this is defined regardless of early stopping status since we always log it now
         wandb.define_metric("transformer_val_loss", step_metric="transformer_step")
-
-    # =========================================================================
-    # LOAD STAGE 1 MODELS FROM WANDB
-    # =========================================================================
-    print(f"Loading Stage 1 models from: {args.stage1_wandb_run_path}")
-    api = wandb.Api()
-    run = api.run(args.stage1_wandb_run_path)
-
-    image_channels = run.config["image_channels"]
-    latent_size = run.config["latent_size"]
-
-    artifact_cvqvae = api.artifact(
-        f"{run.entity}/{run.project}/{args.problem_id}_lv_vqvae_lv_cvqvae:latest",
-        type="model",
-    )
-    artifact_vqvae = api.artifact(
-        f"{run.entity}/{run.project}/{args.problem_id}_lv_vqvae_lv_vqvae:latest",
-        type="model",
-    )
-
-    ckpt_path_cvqvae = os.path.join(artifact_cvqvae.download(), "lv_cvqvae.pth")
-    ckpt_path_vqvae = os.path.join(artifact_vqvae.download(), "lv_vqvae.pth")
-
-    ckpt_cvqvae = th.load(ckpt_path_cvqvae, map_location=device, weights_only=False)
-    ckpt_vqvae = th.load(ckpt_path_vqvae, map_location=device, weights_only=False)
+        if condition_preprocessing is not None:
+            wandb.config["condition_preprocessing"] = condition_preprocessing_to_config(condition_preprocessing)
+        wandb.config["conditional"] = transformer_conditional
 
     vqvae = VQVAE(
         device=device,
@@ -203,20 +224,24 @@ if __name__ == "__main__":
     for p in vqvae.parameters():
         p.requires_grad_(False)  # noqa: FBT003
 
-    cvqvae = VQVAE(
-        device=device,
-        is_c=True,
-        use_vq=True,
-        cond_feature_map_dim=run.config["cond_feature_map_dim"],
-        cond_dim=run.config["cond_dim"],
-        cond_hidden_dim=run.config["cond_hidden_dim"],
-        cond_latent_dim=run.config["cond_latent_dim"],
-        cond_codebook_vectors=run.config["cond_codebook_vectors"],
-    ).to(device)
-    cvqvae.load_state_dict(ckpt_cvqvae["cvqvae"])
-    cvqvae.eval()
-    for p in cvqvae.parameters():
-        p.requires_grad_(False)  # noqa: FBT003
+    cvqvae = None
+    if transformer_conditional:
+        if ckpt_cvqvae is None:
+            raise ValueError("A CVQVAE checkpoint is required for conditional transformer training.")
+        cvqvae = VQVAE(
+            device=device,
+            is_c=True,
+            use_vq=True,
+            cond_feature_map_dim=run.config["cond_feature_map_dim"],
+            cond_dim=run.config["cond_dim"],
+            cond_hidden_dim=run.config["cond_hidden_dim"],
+            cond_latent_dim=run.config["cond_latent_dim"],
+            cond_codebook_vectors=run.config["cond_codebook_vectors"],
+        ).to(device)
+        cvqvae.load_state_dict(ckpt_cvqvae["cvqvae"])
+        cvqvae.eval()
+        for p in cvqvae.parameters():
+            p.requires_grad_(False)  # noqa: FBT003
 
     lv_state = ckpt_vqvae.get("lv_state", {})
     active_mask = lv_state.get("active_mask", None)
@@ -230,7 +255,7 @@ if __name__ == "__main__":
     # INITIALIZE STAGE 2 TRANSFORMER
     # =========================================================================
     transformer = VQVAETransformer(
-        conditional=args.conditional,
+        conditional=transformer_conditional,
         vqvae=vqvae,
         cvqvae=cvqvae,
         image_size=args.image_size,
@@ -288,7 +313,7 @@ if __name__ == "__main__":
         ]
         desired_conds = th.stack(linspaces, dim=1)
 
-        if args.conditional:
+        if transformer_conditional:
             c = transformer.encode_to_z(x=desired_conds, is_c=True)[1]
         else:
             c = th.ones(n_designs, 1, dtype=th.int64, device=device) * transformer.sos_token

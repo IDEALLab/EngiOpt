@@ -13,8 +13,10 @@ Notes for this version:
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 import math
+from typing import Any, TYPE_CHECKING
 import warnings
 
 from einops import rearrange
@@ -24,6 +26,132 @@ import torch as th
 from torch import nn
 from torch.nn import functional as f
 from torch.nn.utils.parametrizations import spectral_norm
+
+if TYPE_CHECKING:
+    from datasets import Dataset
+
+
+@dataclass(frozen=True)
+class ConditionPreprocessing:
+    """Training-time condition preprocessing needed for CVQVAE-compatible eval."""
+
+    conditions: list[str]
+    dropped_conditions: list[str]
+    mean: list[float] | None
+    std: list[float] | None
+    drop_constant_conditions: bool
+    normalize_conditions: bool
+
+
+def _condition_stats(ds: Dataset, condition_names: list[str]) -> tuple[th.Tensor, th.Tensor]:
+    conds = th.stack([th.as_tensor(ds[c][:]).float() for c in condition_names], dim=1)
+    return conds.mean(dim=0), conds.std(dim=0)
+
+
+def fit_condition_preprocessing(
+    ds: Dataset,
+    condition_names: list[str],
+    *,
+    drop_constant_conditions: bool,
+    normalize_conditions: bool,
+) -> tuple[Dataset, ConditionPreprocessing]:
+    """Fit condition preprocessing on training data and apply it to the dataset."""
+    conditions = list(condition_names)
+    dropped_conditions: list[str] = []
+
+    if drop_constant_conditions:
+        _, std = _condition_stats(ds, conditions)
+        kept = [c for i, c in enumerate(conditions) if std[i] > 0]
+        dropped_conditions = [c for i, c in enumerate(conditions) if std[i] == 0]
+        if dropped_conditions:
+            print(f"Warning: Dropping constant condition columns (std=0): {dropped_conditions}")
+            ds = ds.remove_columns(dropped_conditions)
+        conditions = kept
+
+    mean_values: list[float] | None = None
+    std_values: list[float] | None = None
+    if normalize_conditions:
+        mean, std = _condition_stats(ds, conditions)
+        std = std.clamp(min=1e-8)
+        mean_values = [float(x) for x in mean.tolist()]
+        std_values = [float(x) for x in std.tolist()]
+        ds = apply_condition_preprocessing(
+            ds,
+            ConditionPreprocessing(
+                conditions=conditions,
+                dropped_conditions=[],
+                mean=mean_values,
+                std=std_values,
+                drop_constant_conditions=False,
+                normalize_conditions=True,
+            ),
+        )
+
+    return ds, ConditionPreprocessing(
+        conditions=conditions,
+        dropped_conditions=dropped_conditions,
+        mean=mean_values,
+        std=std_values,
+        drop_constant_conditions=drop_constant_conditions,
+        normalize_conditions=normalize_conditions,
+    )
+
+
+def apply_condition_preprocessing(ds: Dataset, preprocessing: ConditionPreprocessing) -> Dataset:
+    """Apply saved training-time condition preprocessing to another dataset."""
+    missing = [c for c in preprocessing.conditions if c not in ds.column_names]
+    if missing:
+        raise KeyError(f"Dataset is missing condition columns required by checkpoint preprocessing: {missing}")
+
+    to_drop = [c for c in preprocessing.dropped_conditions if c in ds.column_names]
+    if to_drop:
+        ds = ds.remove_columns(to_drop)
+
+    if preprocessing.normalize_conditions:
+        if preprocessing.mean is None or preprocessing.std is None:
+            raise ValueError("normalize_conditions=True requires saved condition mean and std.")
+        mean = th.tensor(preprocessing.mean, dtype=th.float32)
+        std = th.tensor(preprocessing.std, dtype=th.float32).clamp(min=1e-8)
+        ds = ds.map(
+            lambda batch: {
+                c: ((th.as_tensor(batch[c][:]).float() - mean[i]) / std[i]).numpy()
+                for i, c in enumerate(preprocessing.conditions)
+            },
+            batched=True,
+        )
+
+    return ds
+
+
+def condition_preprocessing_to_config(preprocessing: ConditionPreprocessing) -> dict[str, Any]:
+    """Convert condition preprocessing metadata to a checkpoint/W&B-friendly dict."""
+    return {
+        "conditions": list(preprocessing.conditions),
+        "dropped_conditions": list(preprocessing.dropped_conditions),
+        "mean": None if preprocessing.mean is None else list(preprocessing.mean),
+        "std": None if preprocessing.std is None else list(preprocessing.std),
+        "drop_constant_conditions": preprocessing.drop_constant_conditions,
+        "normalize_conditions": preprocessing.normalize_conditions,
+    }
+
+
+def condition_preprocessing_from_config(config: Mapping[str, Any]) -> ConditionPreprocessing | None:
+    """Read condition preprocessing metadata from a checkpoint or W&B config."""
+    raw = config.get("condition_preprocessing")
+    if raw is None:
+        preprocessing = config.get("preprocessing")
+        raw = preprocessing.get("condition_preprocessing") if isinstance(preprocessing, Mapping) else None
+    if raw is None:
+        return None
+
+    return ConditionPreprocessing(
+        conditions=list(raw["conditions"]),
+        dropped_conditions=list(raw.get("dropped_conditions", [])),
+        mean=None if raw.get("mean") is None else [float(x) for x in raw["mean"]],
+        std=None if raw.get("std") is None else [float(x) for x in raw["std"]],
+        drop_constant_conditions=bool(raw.get("drop_constant_conditions", False)),
+        normalize_conditions=bool(raw.get("normalize_conditions", False)),
+    )
 
 
 def _entropy_from_probs(p: th.Tensor) -> th.Tensor:
@@ -647,11 +775,10 @@ class GPT(nn.Module):
 ###########################################
 
 
-
-
 ###########################################
 ########## LV-VQVAE BLOCKS BELOW ##########
 ###########################################
+
 
 class GroupSort(nn.Module):
     """Provably 1-Lipschitz activation function.
@@ -659,6 +786,7 @@ class GroupSort(nn.Module):
     Splits channels into groups and sorts them to preserve gradient norm.
     Works for both 4D (Conv) and 2D (Linear) inputs.
     """
+
     def __init__(self, group_size=2):
         super().__init__()
         self.group_size = group_size
@@ -692,6 +820,7 @@ class ScaledTanh(nn.Module):
 
     Ensures outputs are bounded [-scale, scale] and strictly Lipschitz < 1.
     """
+
     def __init__(self, scale=0.999):
         super().__init__()
         self.scale = scale
@@ -702,11 +831,12 @@ class ScaledTanh(nn.Module):
 
 class TrueSNUpsample(nn.Module):
     """1-Lipschitz Upsampling using SN-TransposedConv."""
+
     def __init__(self, channels: int, n_power_iterations: int = 1):
         super().__init__()
         self.up_conv = spectral_norm(
             nn.ConvTranspose2d(channels, channels, kernel_size=4, stride=2, padding=1),
-            n_power_iterations=n_power_iterations
+            n_power_iterations=n_power_iterations,
         )
 
     def forward(self, x: th.Tensor) -> th.Tensor:
@@ -718,7 +848,10 @@ class TrueSNResidualBlock(nn.Module):
 
     Uses GroupSort and scales residual branch by 1/2.
     """
-    def __init__(self, in_channels: int, out_channels: int, group_size: int = 2, n_power_iterations: int = 1, dilation: int = 1):
+
+    def __init__(
+        self, in_channels: int, out_channels: int, group_size: int = 2, n_power_iterations: int = 1, dilation: int = 1
+    ):
         super().__init__()
         self.in_channels = in_channels
         self.out_channels = out_channels
@@ -728,20 +861,23 @@ class TrueSNResidualBlock(nn.Module):
         self.block = nn.Sequential(
             GroupSort(group_size=group_size),
             spectral_norm(
-                nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=padding, dilation=dilation, padding_mode="reflect"),
-                n_power_iterations=n_power_iterations
+                nn.Conv2d(
+                    in_channels, out_channels, kernel_size=3, padding=padding, dilation=dilation, padding_mode="reflect"
+                ),
+                n_power_iterations=n_power_iterations,
             ),
             GroupSort(group_size=group_size),
             spectral_norm(
-                nn.Conv2d(out_channels, out_channels, kernel_size=3, padding=padding, dilation=dilation, padding_mode="reflect"),
-                n_power_iterations=n_power_iterations
-            )
+                nn.Conv2d(
+                    out_channels, out_channels, kernel_size=3, padding=padding, dilation=dilation, padding_mode="reflect"
+                ),
+                n_power_iterations=n_power_iterations,
+            ),
         )
 
         if in_channels != out_channels:
             self.shortcut = spectral_norm(
-                nn.Conv2d(in_channels, out_channels, kernel_size=1),
-                n_power_iterations=n_power_iterations
+                nn.Conv2d(in_channels, out_channels, kernel_size=1), n_power_iterations=n_power_iterations
             )
         else:
             self.shortcut = nn.Identity()
@@ -749,6 +885,7 @@ class TrueSNResidualBlock(nn.Module):
     def forward(self, x: th.Tensor) -> th.Tensor:
         # Scale to maintain unit variance / Lipschitz bound
         return (self.shortcut(x) + self.block(x)) / 2.0
+
 
 ###########################################
 ########## LV-VQVAE BLOCKS ABOVE ##########

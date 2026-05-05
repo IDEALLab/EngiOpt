@@ -35,7 +35,6 @@ Notes for 5 February:
 - TODO: create a custom json or similar file to hold the non-default args for each model tested (rather than hard-coding into submit_grid.sh)
 """
 
-
 from __future__ import annotations
 
 import copy
@@ -58,8 +57,11 @@ import tqdm
 import tyro
 import wandb
 
+from engiopt.lv_vqvae.utils import apply_condition_preprocessing
 from engiopt.lv_vqvae.utils import Codebook
+from engiopt.lv_vqvae.utils import condition_preprocessing_to_config
 from engiopt.lv_vqvae.utils import DownSampleBlock
+from engiopt.lv_vqvae.utils import fit_condition_preprocessing
 from engiopt.lv_vqvae.utils import GPT
 from engiopt.lv_vqvae.utils import GPTConfig
 from engiopt.lv_vqvae.utils import GroupNorm
@@ -77,8 +79,6 @@ from engiopt.lv_vqvae.utils import TrueSNResidualBlock
 from engiopt.lv_vqvae.utils import TrueSNUpsample
 from engiopt.lvae_core import polynomial_schedule
 from engiopt.lvae_core import PruningPolicy
-from engiopt.transforms import drop_constant
-from engiopt.transforms import normalize
 from engiopt.transforms import resize_to
 
 
@@ -182,7 +182,9 @@ class Args:
     """maximum number of latent dimensions to prune per epoch; None for no limit"""
     lv_pruning_strategy: str = "plummet"  # "plummet" default
     """strategy name (plummet, pca_cdf, lognorm, probabilistic)"""
-    lv_pruning_params: dict[str, Any] | None = field(default_factory=lambda: {"threshold": 0.05, "beta": 0.9, "alpha": 0.5})  # threshold: 0.02 default for plummet; 0.25 more aggressive
+    lv_pruning_params: dict[str, Any] | None = field(
+        default_factory=lambda: {"threshold": 0.05, "beta": 0.9, "alpha": 0.5}
+    )  # threshold: 0.02 default for plummet; 0.25 more aggressive
     """least volume pruning parameters, default for plummet strategy with threshold 0.02 and beta 0.9"""
     lv_eta: float = 1e-4
     """smoothing parameter for volume loss"""
@@ -195,7 +197,7 @@ class Args:
     # LV constraint parameters (uses Normalized MSE = MSE / Var(data) for problem-independence)
     lv_nmse_threshold: float = 0.05
     """NMSE ceiling. Training aims to stay at or below this threshold (default: 0.05)"""
-    lv_constraint_mode: str = "gradient_balanced" #  "one_sided"
+    lv_constraint_mode: str = "gradient_balanced"  #  "one_sided"
     """Constraint mode: 'one_sided' (rec or vol), 'gated' (rec + vol), 'gradient_balanced' (auto-scaled)."""
     lv_ema_beta: float = 0.9
     """EMA smoothing for loss tracking (gradient_balanced mode)."""
@@ -316,6 +318,7 @@ class TrueSNDecoder(nn.Module):
         latent_dim: Input latent dimension
         sn_n_power_iterations: Precision of spectral norm (default 1). Increase for tighter bound.
     """
+
     def __init__(  # noqa: PLR0913
         self,
         decoder_channels: tuple[int, ...],
@@ -323,7 +326,7 @@ class TrueSNDecoder(nn.Module):
         decoder_num_res_blocks: int,
         image_channels: int,
         latent_dim: int,
-        sn_n_power_iterations: int = 1
+        sn_n_power_iterations: int = 1,
     ):
         super().__init__()
         self.sn_iters = sn_n_power_iterations
@@ -334,10 +337,7 @@ class TrueSNDecoder(nn.Module):
 
         # 1. Initial Projection
         layers.append(
-            spectral_norm(
-                nn.Conv2d(latent_dim, in_channels, kernel_size=3, padding=1),
-                n_power_iterations=self.sn_iters
-            )
+            spectral_norm(nn.Conv2d(latent_dim, in_channels, kernel_size=3, padding=1), n_power_iterations=self.sn_iters)
         )
 
         # 2. Main Decoder Loop
@@ -351,13 +351,7 @@ class TrueSNDecoder(nn.Module):
 
             # Residual Blocks
             for _ in range(decoder_num_res_blocks):
-                layers.append(
-                    TrueSNResidualBlock(
-                        in_channels,
-                        out_channels,
-                        n_power_iterations=self.sn_iters
-                    )
-                )
+                layers.append(TrueSNResidualBlock(in_channels, out_channels, n_power_iterations=self.sn_iters))
                 in_channels = out_channels
 
             # Attention blocks removed
@@ -366,8 +360,7 @@ class TrueSNDecoder(nn.Module):
         layers.append(GroupSort(group_size=2))
         layers.append(
             spectral_norm(
-                nn.Conv2d(in_channels, image_channels, kernel_size=3, padding=1),
-                n_power_iterations=self.sn_iters
+                nn.Conv2d(in_channels, image_channels, kernel_size=3, padding=1), n_power_iterations=self.sn_iters
             )
         )
 
@@ -409,7 +402,7 @@ class TrueSNCondDecoder(nn.Module):
         cond_dim: int,
         cond_hidden_dim: int,
         cond_feature_map_dim: int,
-        sn_n_power_iterations: int = 1
+        sn_n_power_iterations: int = 1,
     ):
         super().__init__()
 
@@ -417,26 +410,15 @@ class TrueSNCondDecoder(nn.Module):
 
         self.model = nn.Sequential(
             # Layer 1: Linear -> GroupSort
-            spectral_norm(
-                nn.Linear(input_dim, cond_hidden_dim),
-                n_power_iterations=sn_n_power_iterations
-            ),
+            spectral_norm(nn.Linear(input_dim, cond_hidden_dim), n_power_iterations=sn_n_power_iterations),
             GroupSort(group_size=2),
-
             # Layer 2: Linear -> GroupSort
-            spectral_norm(
-                nn.Linear(cond_hidden_dim, cond_hidden_dim),
-                n_power_iterations=sn_n_power_iterations
-            ),
+            spectral_norm(nn.Linear(cond_hidden_dim, cond_hidden_dim), n_power_iterations=sn_n_power_iterations),
             GroupSort(group_size=2),
-
             # Layer 3: Output Projection -> Identity
             # SNLinear is already 1-Lipschitz.
             # No activation needed for N(0,1) targets.
-            spectral_norm(
-                nn.Linear(cond_hidden_dim, cond_dim),
-                n_power_iterations=sn_n_power_iterations
-            ),
+            spectral_norm(nn.Linear(cond_hidden_dim, cond_dim), n_power_iterations=sn_n_power_iterations),
         )
 
     def forward(self, x: th.Tensor) -> th.Tensor:
@@ -501,10 +483,14 @@ class VQVAE(nn.Module):
         if is_c:
             self.encoder = CondEncoder(cond_feature_map_dim, cond_dim, cond_hidden_dim, cond_latent_dim).to(device=device)
 
-            self.decoder = TrueSNCondDecoder(cond_latent_dim, cond_dim, cond_hidden_dim, cond_feature_map_dim).to(device=device)
+            self.decoder = TrueSNCondDecoder(cond_latent_dim, cond_dim, cond_hidden_dim, cond_feature_map_dim).to(
+                device=device
+            )
 
             self.quant_conv = nn.Conv2d(cond_latent_dim, cond_latent_dim, kernel_size=1).to(device=device)
-            self.post_quant_conv = spectral_norm(nn.Conv2d(cond_latent_dim, cond_latent_dim, kernel_size=1), n_power_iterations=1).to(device=device)
+            self.post_quant_conv = spectral_norm(
+                nn.Conv2d(cond_latent_dim, cond_latent_dim, kernel_size=1), n_power_iterations=1
+            ).to(device=device)
         else:
             self.encoder = Encoder(
                 encoder_channels,
@@ -525,7 +511,9 @@ class VQVAE(nn.Module):
             ).to(device=device)
 
             self.quant_conv = nn.Conv2d(latent_dim, latent_dim, kernel_size=1).to(device=device)
-            self.post_quant_conv = spectral_norm(nn.Conv2d(latent_dim, latent_dim, kernel_size=1), n_power_iterations=1).to(device=device)
+            self.post_quant_conv = spectral_norm(nn.Conv2d(latent_dim, latent_dim, kernel_size=1), n_power_iterations=1).to(
+                device=device
+            )
 
         self.use_vq = use_vq
         if self.use_vq:
@@ -540,7 +528,7 @@ class VQVAE(nn.Module):
         *,
         return_latents: bool = False,
         active_mask: th.Tensor | None = None,
-        frozen_mean: th.Tensor | None = None
+        frozen_mean: th.Tensor | None = None,
     ):
         """Full VQVAE forward pass."""
         encoded = self.encoder(designs)
@@ -562,10 +550,7 @@ class VQVAE(nn.Module):
         return decoded, indices, q_loss
 
     def encode(
-        self,
-        designs: th.Tensor,
-        active_mask: th.Tensor | None = None,
-        frozen_mean: th.Tensor | None = None
+        self, designs: th.Tensor, active_mask: th.Tensor | None = None, frozen_mean: th.Tensor | None = None
     ) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         """Encode image batch into quantized latent representation."""
         encoded = self.encoder(designs)
@@ -584,12 +569,7 @@ class VQVAE(nn.Module):
 
         return z_q, indices, loss, min_encodings, perplexity
 
-    def decode(
-        self,
-        z: th.Tensor,
-        active_mask: th.Tensor | None = None,
-        frozen_mean: th.Tensor | None = None
-    ) -> th.Tensor:
+    def decode(self, z: th.Tensor, active_mask: th.Tensor | None = None, frozen_mean: th.Tensor | None = None) -> th.Tensor:
         """Decode quantized latent representation back to image space."""
         z = self.apply_pruning(z, active_mask, frozen_mean)
         return self.decoder(self.post_quant_conv(z))
@@ -622,7 +602,7 @@ class VQVAE(nn.Module):
         epoch: int,
         next_prune_epoch: int,
         best_val_recon: float,
-        val_recon: float | None = None
+        val_recon: float | None = None,
     ) -> (th.Tensor, th.Tensor, th.Tensor, th.Tensor, int) | None:
         """Core pruning step.
 
@@ -643,7 +623,9 @@ class VQVAE(nn.Module):
             and (val_recon - best_val_recon) / best_val_recon > recon_tol
         ):
             #  Do not prune if recon is already worse than best_val by > tol
-            print(f"Exited due to reconstruction criteria: val_recon = {val_recon}, best_val_recon = {best_val_recon}, (val_recon - best_val_recon) / best_val_recon = {(val_recon - best_val_recon) / best_val_recon}, and recon_tol = {recon_tol}")
+            print(
+                f"Exited due to reconstruction criteria: val_recon = {val_recon}, best_val_recon = {best_val_recon}, (val_recon - best_val_recon) / best_val_recon = {(val_recon - best_val_recon) / best_val_recon}, and recon_tol = {recon_tol}"
+            )
             return active_mask, frozen_mean, frozen_std, below_counts, next_prune_epoch
 
         #  --- Candidate selection from policy ---
@@ -667,11 +649,20 @@ class VQVAE(nn.Module):
             stable = below_counts >= k_consecutive
 
         print(
-            "epoch", epoch,
-            "dim", int(active_mask.sum()),
-            "zstd[min/med/max]", float(zstd.min()), float(zstd.median()), float(zstd.max()),
-            "z_std_active[min/med/max]", float(z_std_active.min()), float(z_std_active.median()), float(z_std_active.max()),
-            "cand_active_sum", int(cand_active.sum().item()),
+            "epoch",
+            epoch,
+            "dim",
+            int(active_mask.sum()),
+            "zstd[min/med/max]",
+            float(zstd.min()),
+            float(zstd.median()),
+            float(zstd.max()),
+            "z_std_active[min/med/max]",
+            float(z_std_active.min()),
+            float(z_std_active.median()),
+            float(z_std_active.max()),
+            "cand_active_sum",
+            int(cand_active.sum().item()),
         )
 
         #  Filter to *active* dims only (don not re-prune pruned ones)
@@ -692,31 +683,33 @@ class VQVAE(nn.Module):
         next_prune_epoch = epoch + cooldown_epochs  # set next allowed prune epoch
 
         print(
-            "epoch", epoch,
-            "dim", int(active_mask.sum()),
-            "zstd[min/med/max]", float(zstd.min()), float(zstd.median()), float(zstd.max()),
-            "cand_active", int(cand_active.sum()),
-            "stable", int((stable & active_mask).sum()),
+            "epoch",
+            epoch,
+            "dim",
+            int(active_mask.sum()),
+            "zstd[min/med/max]",
+            float(zstd.min()),
+            float(zstd.median()),
+            float(zstd.max()),
+            "cand_active",
+            int(cand_active.sum()),
+            "stable",
+            int((stable & active_mask).sum()),
         )
 
         return active_mask, frozen_mean, frozen_std, below_counts, next_prune_epoch
 
-
     @th.no_grad()
     def update_moving_mean(
-        self,
-        z: th.Tensor,
-        zstd: th.Tensor | None,
-        zmean: th.Tensor | None,
-        beta: float
+        self, z: th.Tensor, zstd: th.Tensor | None, zmean: th.Tensor | None, beta: float
     ) -> (th.Tensor, th.Tensor):
         """Update exponential moving average of latent statistics."""
         if zstd is None or zmean is None:
-            zstd = z.std(dim=(0,2,3))  # Compute per-channel (per-latent-dim) std
-            zmean = z.mean(dim=(0,2,3))  # Compute per-channel (per-latent-dim) mean
+            zstd = z.std(dim=(0, 2, 3))  # Compute per-channel (per-latent-dim) std
+            zmean = z.mean(dim=(0, 2, 3))  # Compute per-channel (per-latent-dim) mean
         else:
-            zstd = th.lerp(zstd, z.std(dim=(0,2,3)), 1 - beta)
-            zmean = th.lerp(zmean, z.mean(dim=(0,2,3)), 1 - beta)
+            zstd = th.lerp(zstd, z.std(dim=(0, 2, 3)), 1 - beta)
+            zmean = th.lerp(zmean, z.mean(dim=(0, 2, 3)), 1 - beta)
 
         return zstd, zmean
 
@@ -746,7 +739,7 @@ class VQVAETransformer(nn.Module):
         *,
         conditional: bool = True,
         vqvae: VQVAE,
-        cvqvae: VQVAE,
+        cvqvae: VQVAE | None,
         image_size: int,
         decoder_channels: tuple[int, ...],
         cond_feature_map_dim: int,
@@ -758,6 +751,8 @@ class VQVAETransformer(nn.Module):
         bias: bool = True,
     ):
         super().__init__()
+        if conditional and cvqvae is None:
+            raise ValueError("cvqvae is required when conditional=True")
         self.sos_token = 0
         self.vqvae = vqvae
         self.cvqvae = cvqvae
@@ -791,6 +786,8 @@ class VQVAETransformer(nn.Module):
     def encode_to_z(self, *, x: th.Tensor, is_c: bool = False) -> tuple[th.Tensor, th.Tensor]:
         """Encode images to quantized latent vectors (z) and their indices."""
         if is_c:  #  For the conditional tokens, use the CVQVAE encoder
+            if self.cvqvae is None:
+                raise ValueError("Cannot encode conditional tokens without a CVQVAE.")
             quant_z, indices, _, _, _ = self.cvqvae.encode(x)
         else:
             mask = getattr(self, "active_mask", None)
@@ -806,7 +803,9 @@ class VQVAETransformer(nn.Module):
     def z_to_image(self, indices: th.Tensor) -> th.Tensor:
         """Convert quantized latent indices back to image space."""
         raw_indices = indices - self.image_offset
-        ix_to_vectors = self.vqvae.codebook.embedding(raw_indices).reshape(raw_indices.shape[0], self.sidelen, self.sidelen, -1)
+        ix_to_vectors = self.vqvae.codebook.embedding(raw_indices).reshape(
+            raw_indices.shape[0], self.sidelen, self.sidelen, -1
+        )
         ix_to_vectors = ix_to_vectors.permute(0, 3, 1, 2)
 
         mask = getattr(self, "active_mask", None)
@@ -829,10 +828,7 @@ class VQVAETransformer(nn.Module):
             mask = mask.round().to(dtype=th.int64)
             # Generate random replacements specifically from the shifted image vocabulary
             random_indices = th.randint(
-                low=self.image_offset,
-                high=self.transformer.config.vocab_size,
-                size=indices.shape,
-                device=indices.device
+                low=self.image_offset, high=self.transformer.config.vocab_size, size=indices.shape, device=indices.device
             )
             new_indices = mask * indices + (1 - mask) * random_indices
         else:
@@ -877,7 +873,13 @@ class VQVAETransformer(nn.Module):
 
     @th.no_grad()
     def sample(  # noqa: PLR0913
-        self, x: th.Tensor, c: th.Tensor, steps: int, temperature: float = 1.0, top_k: int | None = None, top_p: float | None = None
+        self,
+        x: th.Tensor,
+        c: th.Tensor,
+        steps: int,
+        temperature: float = 1.0,
+        top_k: int | None = None,
+        top_p: float | None = None,
     ) -> th.Tensor:
         """Autoregressively sample from the model given initial context x and conditional c."""
         x = th.cat((c, x), dim=1)
@@ -889,7 +891,7 @@ class VQVAETransformer(nn.Module):
 
             # NEW: Logit Masking (Structural Prior)
             # Prevent the model from generating condition tokens or the generic SOS token
-            logits[:, :self.image_offset] = -float("inf")
+            logits[:, : self.image_offset] = -float("inf")
 
             if top_k is not None:
                 # Determine the actual vocabulary size for this batch
@@ -906,7 +908,7 @@ class VQVAETransformer(nn.Module):
                     # Fallback if all logits are -inf (shouldn't happen, but just in case)
                     warnings.warn("Warning: No finite logits found for sampling", stacklevel=2)
                     # Make all valid logits equal (uniform distribution over image space)
-                    logits[:, self.image_offset:] = 0.0
+                    logits[:, self.image_offset :] = 0.0
 
             if top_p is not None:
                 logits = self.top_p_logits(logits, top_p)
@@ -989,18 +991,20 @@ if __name__ == "__main__":
     image_channels = training_ds["optimal_upsampled"][:].shape[1]
     latent_size = args.image_size // (2 ** (len(args.encoder_channels) - 2))
 
-    conditions = problem.conditions_keys
-    # Optionally drop condition columns that are constant like overhang_constraint in beams2d
-    if args.drop_constant_conditions:
-        training_ds, conditions = drop_constant(training_ds, conditions)
-
-    # Optionally normalize condition columns
-    if args.normalize_conditions:
-        training_ds, mean, std = normalize(training_ds, conditions)
+    training_ds, condition_preprocessing = fit_condition_preprocessing(
+        training_ds,
+        problem.conditions_keys,
+        drop_constant_conditions=args.drop_constant_conditions,
+        normalize_conditions=args.normalize_conditions,
+    )
+    condition_preprocessing_config = condition_preprocessing_to_config(condition_preprocessing)
+    conditions = condition_preprocessing.conditions
+    mean = None if condition_preprocessing.mean is None else th.tensor(condition_preprocessing.mean, dtype=th.float32)
+    std = None if condition_preprocessing.std is None else th.tensor(condition_preprocessing.std, dtype=th.float32)
 
     n_conds = len(conditions)
     args.cond_dim = n_conds
-    condition_tensors = [training_ds[key][:] for key in conditions]
+    condition_tensors = [th.as_tensor(training_ds[key][:], device=device) for key in conditions]
 
     # Calculate train data variance
     data_var = set_data_variance(training_ds["optimal_upsampled"][:].unsqueeze(1))
@@ -1008,8 +1012,8 @@ if __name__ == "__main__":
 
     # Move to device only here
     th_training_ds = th.utils.data.TensorDataset(
-        th.as_tensor(training_ds["optimal_upsampled"][:]).to(device),
-        *[th.as_tensor(training_ds[key][:]).to(device) for key in conditions],
+        th.as_tensor(training_ds["optimal_upsampled"][:]),
+        *[th.as_tensor(training_ds[key][:]) for key in conditions],
     )
     dataloader_cvqvae = th.utils.data.DataLoader(
         th_training_ds,
@@ -1043,25 +1047,12 @@ if __name__ == "__main__":
     )
     val_ds = val_ds.remove_columns("optimal_design")
 
-    # Optionally drop condition columns that are constant like overhang_constraint in beams2d
-    if args.drop_constant_conditions:
-        to_drop = [c for c in problem.conditions_keys if c not in conditions]
-        if to_drop:
-            val_ds = val_ds.remove_columns(to_drop)
-
-    # If enabled, normalize using training mean/std (computed above)
-    if args.normalize_conditions:
-        val_ds = val_ds.map(
-            lambda batch: {
-                c: ((th.as_tensor(batch[c][:]).float() - mean[i]) / std[i]).numpy() for i, c in enumerate(conditions)
-            },
-            batched=True,
-        )
+    val_ds = apply_condition_preprocessing(val_ds, condition_preprocessing)
 
     # Move to device only here
     th_val_ds = th.utils.data.TensorDataset(
-        th.as_tensor(val_ds["optimal_upsampled"][:]).to(device),
-        *[th.as_tensor(val_ds[key][:]).to(device) for key in conditions],
+        th.as_tensor(val_ds["optimal_upsampled"][:]),
+        *[th.as_tensor(val_ds[key][:]) for key in conditions],
     )
     dataloader_val = th.utils.data.DataLoader(
         th_val_ds,
@@ -1089,7 +1080,7 @@ if __name__ == "__main__":
             save_code=True,
             name=run_name,
             dir="./logs/wandb",
-            resume="never"
+            resume="never",
         )
 
         #  Base VQ-related metrics
@@ -1111,6 +1102,7 @@ if __name__ == "__main__":
             wandb.define_metric("transformer_val_loss", step_metric="transformer_step")
         wandb.config["image_channels"] = image_channels
         wandb.config["latent_size"] = latent_size
+        wandb.config["condition_preprocessing"] = condition_preprocessing_config
 
         #  LV-VQVAE-specific metrics
         wandb.define_metric("vqvae_lv_loss", step_metric="vqvae_step")
@@ -1125,7 +1117,6 @@ if __name__ == "__main__":
         wandb.define_metric("lv_vol_active", step_metric="vqvae_step")
         wandb.define_metric("next_prune_epoch", step_metric="vqvae_step")
         wandb.define_metric("latent_std_sorted", step_metric="vqvae_step")
-
 
     vqvae = VQVAE(
         device=device,
@@ -1229,11 +1220,7 @@ if __name__ == "__main__":
         opt_transformer = th.optim.AdamW(optim_groups, lr=args.lr_transformer, betas=(0.9, 0.95))
 
     @th.no_grad()
-    def sample_designs_vqvae(
-        n_designs: int,
-        active_mask: th.Tensor,
-        frozen_mean: th.Tensor
-    ) -> tuple[th.Tensor, th.Tensor]:
+    def sample_designs_vqvae(n_designs: int, active_mask: th.Tensor, frozen_mean: th.Tensor) -> tuple[th.Tensor, th.Tensor]:
         """Sample reconstructions from trained Stage 1 (VQVAE)."""
         vqvae.eval()
 
@@ -1241,11 +1228,7 @@ if __name__ == "__main__":
         designs = designs[:n_designs].to(device)
 
         # Pass the pruning context here
-        reconstructions, _, _ = vqvae(
-            designs,
-            active_mask=active_mask,
-            frozen_mean=frozen_mean
-        )
+        reconstructions, _, _ = vqvae(designs, active_mask=active_mask, frozen_mean=frozen_mean)
 
         vqvae.train()
         return designs, reconstructions
@@ -1270,11 +1253,7 @@ if __name__ == "__main__":
 
         # Use optimal Nucleus Sampling parameters
         latent_imgs = transformer.sample(
-            x=th.empty(n_designs, 0, dtype=th.int64, device=device),
-            c=c,
-            steps=latent_size**2,
-            temperature=0.8,
-            top_p=0.95
+            x=th.empty(n_designs, 0, dtype=th.int64, device=device), c=c, steps=latent_size**2, temperature=0.8, top_p=0.95
         )
         gen_imgs = transformer.z_to_image(latent_imgs)
 
@@ -1322,6 +1301,7 @@ if __name__ == "__main__":
                             "cvqvae": cvqvae.state_dict(),
                             "optimizer_cvqvae": opt_cvq.state_dict(),
                             "loss": cvq_loss.item(),
+                            "condition_preprocessing": condition_preprocessing_config,
                         }
 
                         th.save(ckpt_cvq, "lv_cvqvae.pth")
@@ -1341,7 +1321,9 @@ if __name__ == "__main__":
     vqvae.train()
     codebook_freeze = 0
 
-    lv_policy = PruningPolicy(args.lv_pruning_strategy, args.lv_pruning_params)  # We assume a plummet strategy here with the associated baseline parameters.
+    lv_policy = PruningPolicy(
+        args.lv_pruning_strategy, args.lv_pruning_params
+    )  # We assume a plummet strategy here with the associated baseline parameters.
     lv_w_schedule = polynomial_schedule(
         args.lv_w_max,
         args.lv_start_epoch + args.lv_ramp_epochs,
@@ -1444,11 +1426,7 @@ if __name__ == "__main__":
                             vocab_size=args.num_codebook_vectors,
                         )
                     else:
-                        tstats = {
-                            "token_perplexity": 0.0,
-                            "token_perplexity_frac": 0.0,
-                            "token_usage_frac": 0.0
-                        }
+                        tstats = {"token_perplexity": 0.0, "token_perplexity_frac": 0.0, "token_usage_frac": 0.0}
                 log_vq = {
                     "vqvae_step": batches_done,
                     "epoch_vqvae": epoch,
@@ -1464,16 +1442,14 @@ if __name__ == "__main__":
                     "lv_vol_active": int(vol_active),
                     "lv_nmse": nmse.item(),
                     "lv_nmae": nmae.item(),
-                    "next_prune_epoch": next_prune_epoch
+                    "next_prune_epoch": next_prune_epoch,
                 }
 
                 # This saves a grid image of generated designs every sample_interval
                 if (batches_done + 1) % args.sample_interval_vqvae == 0:
                     # Extract 16 original designs and their reconstructions
                     origs, recons = sample_designs_vqvae(
-                        n_designs=n_logged_designs,
-                        active_mask=active_mask,
-                        frozen_mean=frozen_mean
+                        n_designs=n_logged_designs, active_mask=active_mask, frozen_mean=frozen_mean
                     )
                     origs = resize_to(data=origs, h=design_shape[0], w=design_shape[1])
                     recons = resize_to(data=recons, h=design_shape[0], w=design_shape[1])
@@ -1520,6 +1496,7 @@ if __name__ == "__main__":
                         "vqvae": vqvae.state_dict(),
                         "optimizer_vqvae": opt_vq.state_dict(),
                         "loss": vq_loss.item(),
+                        "condition_preprocessing": condition_preprocessing_config,
                         "lv_state": {
                             "active_mask": active_mask.detach().cpu(),
                             "frozen_mean": frozen_mean.detach().cpu(),
@@ -1575,7 +1552,7 @@ if __name__ == "__main__":
             epoch,
             next_prune_epoch,
             best_val_mse,
-            val_mse
+            val_mse,
         )
 
         vqvae.train()
@@ -1653,7 +1630,9 @@ if __name__ == "__main__":
 
                         # Plot each tensor as a scatter plot
                         for j, tensor in enumerate(designs):
-                            img = tensor.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
+                            img = (
+                                tensor.cpu().numpy().reshape(design_shape[0], design_shape[1])
+                            )  # Extract x and y coordinates
                             dc = desired_conds[j].cpu()
                             axes[j].imshow(img)  # Scatter plot
                             title = [(conditions[i][0], f"{dc[i]:.2f}") for i in range(n_conds)]
@@ -1706,14 +1685,18 @@ if __name__ == "__main__":
         # --------------
         if args.track and args.save_model:
             if args.early_stopping:
-                ckpt_tr = best_ckpt_tr if best_ckpt_tr is not None else {
-                    "epoch": epoch,
-                    "batches_done": batches_done,
-                    "transformer": transformer.state_dict(),
-                    "optimizer_transformer": opt_transformer.state_dict(),
-                    "loss": loss.item(),
-                    "val_loss": float("nan"),
-                }
+                ckpt_tr = (
+                    best_ckpt_tr
+                    if best_ckpt_tr is not None
+                    else {
+                        "epoch": epoch,
+                        "batches_done": batches_done,
+                        "transformer": transformer.state_dict(),
+                        "optimizer_transformer": opt_transformer.state_dict(),
+                        "loss": loss.item(),
+                        "val_loss": float("nan"),
+                    }
+                )
             else:
                 ckpt_tr = {
                     "epoch": epoch,

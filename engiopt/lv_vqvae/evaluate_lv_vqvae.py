@@ -21,6 +21,8 @@ from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.lv_vqvae.lv_vqvae import VQVAE
 from engiopt.lv_vqvae.lv_vqvae import VQVAETransformer
+from engiopt.lv_vqvae.utils import apply_condition_preprocessing
+from engiopt.lv_vqvae.utils import condition_preprocessing_from_config
 from engiopt.transforms import drop_constant
 from engiopt.transforms import normalize
 from engiopt.transforms import resize_to
@@ -80,7 +82,6 @@ if __name__ == "__main__":
         artifact_path_transformer = f"{args.wandb_project}/{args.problem_id}_lv_vqvae_transformer:seed_{seed}"
 
     api = wandb.Api()
-    artifact_cvqvae = api.artifact(artifact_path_cvqvae, type="model")
     artifact_vqvae = api.artifact(artifact_path_vqvae, type="model")
     artifact_transformer = api.artifact(artifact_path_transformer, type="model")
 
@@ -92,15 +93,13 @@ if __name__ == "__main__":
     if run is None:
         raise RunRetrievalError
     run = api.run(f"{run.entity}/{run.project}/{run.id}")
+    conditional = bool(run.config["conditional"])
 
-    artifact_dir_cvqvae = artifact_cvqvae.download()
     artifact_dir_vqvae = artifact_vqvae.download()
     artifact_dir_transformer = artifact_transformer.download()
 
-    ckpt_path_cvqvae = os.path.join(artifact_dir_cvqvae, "lv_cvqvae.pth")
     ckpt_path_vqvae = os.path.join(artifact_dir_vqvae, "lv_vqvae.pth")
     ckpt_path_transformer = os.path.join(artifact_dir_transformer, "transformer.pth")
-    ckpt_cvqvae = th.load(ckpt_path_cvqvae, map_location=th.device(device), weights_only=False)
     ckpt_vqvae = th.load(ckpt_path_vqvae, map_location=th.device(device), weights_only=False)
 
     # Extract the nested lv_state dictionary and pruning attributes
@@ -109,6 +108,9 @@ if __name__ == "__main__":
     frozen_mean = lv_state.get("frozen_mean", None)
 
     ckpt_transformer = th.load(ckpt_path_transformer, map_location=th.device(device), weights_only=False)
+    condition_preprocessing = condition_preprocessing_from_config(ckpt_vqvae) or condition_preprocessing_from_config(
+        run.config
+    )
 
     vqvae = VQVAE(
         device=device,
@@ -128,21 +130,27 @@ if __name__ == "__main__":
     vqvae.eval()
     vqvae.to(device)
 
-    cvqvae = VQVAE(
-        device=device,
-        is_c=True,
-        cond_feature_map_dim=run.config["cond_feature_map_dim"],
-        cond_dim=run.config["cond_dim"],
-        cond_hidden_dim=run.config["cond_hidden_dim"],
-        cond_latent_dim=run.config["cond_latent_dim"],
-        cond_codebook_vectors=run.config["cond_codebook_vectors"],
-    )
-    cvqvae.load_state_dict(ckpt_cvqvae["cvqvae"])
-    cvqvae.eval()
-    cvqvae.to(device)
+    cvqvae = None
+    if conditional:
+        artifact_cvqvae = api.artifact(artifact_path_cvqvae, type="model")
+        artifact_dir_cvqvae = artifact_cvqvae.download()
+        ckpt_path_cvqvae = os.path.join(artifact_dir_cvqvae, "lv_cvqvae.pth")
+        ckpt_cvqvae = th.load(ckpt_path_cvqvae, map_location=th.device(device), weights_only=False)
+        cvqvae = VQVAE(
+            device=device,
+            is_c=True,
+            cond_feature_map_dim=run.config["cond_feature_map_dim"],
+            cond_dim=run.config["cond_dim"],
+            cond_hidden_dim=run.config["cond_hidden_dim"],
+            cond_latent_dim=run.config["cond_latent_dim"],
+            cond_codebook_vectors=run.config["cond_codebook_vectors"],
+        )
+        cvqvae.load_state_dict(ckpt_cvqvae["cvqvae"])
+        cvqvae.eval()
+        cvqvae.to(device)
 
     model = VQVAETransformer(
-        conditional=run.config["conditional"],
+        conditional=conditional,
         vqvae=vqvae,
         cvqvae=cvqvae,
         image_size=run.config["image_size"],
@@ -168,23 +176,25 @@ if __name__ == "__main__":
         problem=problem, n_samples=args.n_samples, device=device, seed=seed
     )
 
-    # Clean up conditions based on model training settings and convert back to tensor
-    sampled_conditions_new = sampled_conditions.select(range(len(sampled_conditions)))
-    conditions = sampled_conditions_new.column_names
-
-    # Drop constant condition columns if enabled
-    if run.config["drop_constant_conditions"]:
-        sampled_conditions_new, conditions = drop_constant(sampled_conditions_new, sampled_conditions_new.column_names)
-
-    # Normalize condition columns if enabled
-    if run.config["normalize_conditions"]:
-        sampled_conditions_new, mean, std = normalize(sampled_conditions_new, conditions)
-
-    # Convert to tensor
-    conditions_tensor = th.stack([th.as_tensor(sampled_conditions_new[c][:]).float() for c in conditions], dim=1).to(device)
-
     # Set the start-of-sequence tokens for the transformer using the CVQVAE to discretize the conditions if enabled
-    if run.config["conditional"]:
+    if conditional:
+        # Clean up conditions based on model training settings and convert back to tensor
+        sampled_conditions_new = sampled_conditions.select(range(len(sampled_conditions)))
+        if condition_preprocessing is None:
+            conditions = sampled_conditions_new.column_names
+            if run.config["drop_constant_conditions"]:
+                sampled_conditions_new, conditions = drop_constant(
+                    sampled_conditions_new, sampled_conditions_new.column_names
+                )
+            if run.config["normalize_conditions"]:
+                sampled_conditions_new, _, _ = normalize(sampled_conditions_new, conditions)
+        else:
+            sampled_conditions_new = apply_condition_preprocessing(sampled_conditions_new, condition_preprocessing)
+            conditions = condition_preprocessing.conditions
+
+        conditions_tensor = th.stack([th.as_tensor(sampled_conditions_new[c][:]).float() for c in conditions], dim=1).to(
+            device
+        )
         c = model.encode_to_z(x=conditions_tensor, is_c=True)[1]
     else:
         c = th.ones(args.n_samples, 1, dtype=th.int64, device=device) * model.sos_token
@@ -231,7 +241,7 @@ if __name__ == "__main__":
     # --------------------------------------------------------------------------
     # Plot and Save Test vs. Generated Visual Comparisons
     # --------------------------------------------------------------------------
-    num_vis = min(8, args.n_samples) # How many pairs to plot
+    num_vis = min(8, args.n_samples)  # How many pairs to plot
     fig, axes = plt.subplots(num_vis, 2, figsize=(6, 2 * num_vis))
     for i in range(num_vis):
         ax_true = axes[i, 0] if num_vis > 1 else axes[0]
