@@ -256,6 +256,7 @@ def metrics(
             - "mmd": Maximum Mean Discrepancy (float).
             - "dpp": Determinantal Point Process diversity (float).
             - "mmd_sigma": The actual sigma used for MMD/DPP (float).
+            - "viol": Average violation ratio (float).
     """
     n_samples = len(gen_designs)
 

@@ -11,7 +11,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
-import random
 import time
 import typing
 
@@ -25,6 +24,10 @@ from torch.nn.utils.parametrizations import weight_norm
 import tqdm
 import tyro
 import wandb
+
+from engiopt.reproducibility import enable_strict_determinism
+from engiopt.reproducibility import make_dataloader_generator
+from engiopt.reproducibility import seed_training
 
 
 @dataclass
@@ -45,6 +48,9 @@ class Args:
     """Wandb entity name."""
     seed: int = 1
     """Random seed."""
+
+    strict_determinism: bool = False
+    """Enable strict deterministic operations for reproducibility debugging."""
     save_model: bool = False
     """Saves the model to disk."""
 
@@ -708,10 +714,9 @@ if __name__ == "__main__":
         wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args), save_code=True, name=run_name)
 
     # Seeding
-    th.manual_seed(args.seed)
-    rng = np.random.default_rng(args.seed)
-    random.seed(args.seed)
-    th.backends.cudnn.deterministic = True
+    rng = seed_training(args.seed)
+    if args.strict_determinism:
+        enable_strict_determinism(warn_only=True)
 
     os.makedirs("images", exist_ok=True)
 
@@ -748,6 +753,7 @@ if __name__ == "__main__":
         training_ds,
         batch_size=args.batch_size,
         shuffle=True,
+        generator=make_dataloader_generator(args.seed),
     )
 
     # Optimizer

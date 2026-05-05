@@ -25,7 +25,6 @@ import warnings
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import matplotlib.pyplot as plt
-import numpy as np
 import torch as th
 from torch import nn
 from torch.nn import functional as f
@@ -34,6 +33,9 @@ import tyro
 import wandb
 
 from engiopt.lv_vqvae.utils import token_stats_from_indices
+from engiopt.reproducibility import enable_strict_determinism
+from engiopt.reproducibility import make_dataloader_generator
+from engiopt.reproducibility import seed_training
 from engiopt.transforms import drop_constant
 from engiopt.transforms import normalize
 from engiopt.transforms import resize_to
@@ -69,6 +71,9 @@ class Args:
     """Wandb entity name."""
     seed: int = 1
     """Random seed."""
+
+    strict_determinism: bool = False
+    """Enable strict deterministic operations for reproducibility debugging."""
     save_model: bool = True
     """Saves the model to disk."""
 
@@ -557,9 +562,9 @@ class VQGANTransformer(nn.Module):
             mask = mask.round().to(dtype=th.int64)
             # Generate random replacements specifically from the shifted image vocabulary
             random_indices = th.randint(
-                low=self.image_offset, 
-                high=self.transformer.config.vocab_size, 
-                size=indices.shape, 
+                low=self.image_offset,
+                high=self.transformer.config.vocab_size,
+                size=indices.shape,
                 device=indices.device
             )
             new_indices = mask * indices + (1 - mask) * random_indices
@@ -663,10 +668,9 @@ if __name__ == "__main__":
     args = tyro.cli(Args)
 
     # Seeding
-    th.manual_seed(args.seed)
-    rng = np.random.default_rng(args.seed)
-    random.seed(args.seed)
-    th.backends.cudnn.deterministic = True
+    rng = seed_training(args.seed)
+    if args.strict_determinism:
+        enable_strict_determinism(warn_only=True)
 
     os.makedirs("images/vqgan", exist_ok=True)
     os.makedirs("images/transformer", exist_ok=True)
@@ -723,16 +727,19 @@ if __name__ == "__main__":
         th_training_ds,
         batch_size=args.batch_size_cvqgan,
         shuffle=True,
+        generator=make_dataloader_generator(args.seed),
     )
     dataloader_vqgan = th.utils.data.DataLoader(
         th_training_ds,
         batch_size=args.batch_size_vqgan,
         shuffle=True,
+        generator=make_dataloader_generator(args.seed),
     )
     dataloader_transformer = th.utils.data.DataLoader(
         th_training_ds,
         batch_size=args.batch_size_transformer,
         shuffle=True,
+        generator=make_dataloader_generator(args.seed),
     )
     # If None, log once per epoch (in steps)
     if args.sample_interval_vqgan is None:
