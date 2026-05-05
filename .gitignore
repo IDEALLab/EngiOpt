@@ -164,6 +164,7 @@ cython_debug/
 wandb/*
 images/*
 logs/*
+papers/*
 *.csv
 # Editors
 .idea/
