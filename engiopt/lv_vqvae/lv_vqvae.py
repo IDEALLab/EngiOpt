@@ -803,7 +803,7 @@ class VQVAETransformer(nn.Module):
     def z_to_image(self, indices: th.Tensor) -> th.Tensor:
         """Convert quantized latent indices back to image space."""
         raw_indices = indices - self.image_offset
-        ix_to_vectors = self.vqvae.codebook.embedding(raw_indices).reshape(
+        ix_to_vectors = self.vqvae.codebook.indices_to_vectors(raw_indices).reshape(
             raw_indices.shape[0], self.sidelen, self.sidelen, -1
         )
         ix_to_vectors = ix_to_vectors.permute(0, 3, 1, 2)

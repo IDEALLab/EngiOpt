@@ -299,28 +299,30 @@ class Codebook(nn.Module):
         self.embedding.weight.data.uniform_(-1.0 / self.num_embed, 1.0 / self.num_embed)
         self.register_buffer("embed_prob", th.zeros(self.num_embed))
 
+    def indices_to_vectors(self, indices: th.Tensor) -> th.Tensor:
+        """Return the decoder-facing vectors for codebook indices."""
+        return self.embedding(indices.to(dtype=th.long))
+
     def forward(self, z: th.Tensor) -> tuple[th.Tensor, th.Tensor, th.Tensor, th.Tensor, th.Tensor]:
         # reshape z -> (batch, height, width, channel) and flatten
         z = rearrange(z, "b c h w -> b h w c").contiguous()
         z_flattened = z.view(-1, self.embed_dim)
 
-        # Capture original magnitude BEFORE normalizing
-        orig_norm = th.norm(z_flattened, p=2, dim=1, keepdim=True).clamp_min(1e-12)
-
-        # Normalize weights to unit sphere
-        self.embedding.weight.data = f.normalize(self.embedding.weight.data, dim=1)
-
-        # Calculate distance using normalized versions of z
+        # Calculate distances for token assignment. The decoder input below is
+        # always the selected codebook vector itself, not any continuous
+        # sample-specific magnitude from z.
         if self.distance == "l2":
-            normed_z = z_flattened / orig_norm
             d = (
-                -th.sum(normed_z.detach() ** 2, dim=1, keepdim=True)
+                -th.sum(z_flattened.detach() ** 2, dim=1, keepdim=True)
                 - th.sum(self.embedding.weight**2, dim=1)
-                + 2 * th.einsum("bd,dn->bn", normed_z.detach(), rearrange(self.embedding.weight, "n d-> d n"))
+                + 2 * th.einsum("bd,dn->bn", z_flattened.detach(), rearrange(self.embedding.weight, "n d-> d n"))
             )
         elif self.distance == "cos":
-            normed_z_flattened = (z_flattened / orig_norm).detach()
-            d = th.einsum("bd,dn->bn", normed_z_flattened, rearrange(self.embedding.weight, "n d -> d n"))
+            normed_z_flattened = f.normalize(z_flattened, dim=1).detach()
+            normed_codebook = f.normalize(self.embedding.weight, dim=1)
+            d = th.einsum("bd,dn->bn", normed_z_flattened, rearrange(normed_codebook, "n d -> d n"))
+        else:
+            raise ValueError(f"Unknown codebook distance: {self.distance}")
 
         # encoding
         sort_distance, indices = d.sort(dim=1)
@@ -328,17 +330,15 @@ class Codebook(nn.Module):
         encodings = th.zeros(encoding_indices.unsqueeze(1).shape[0], self.num_embed, device=z.device)
         encodings.scatter_(1, encoding_indices.unsqueeze(1), 1)
 
-        # quantize (vector sits on unit sphere)
-        z_q_sphere = th.matmul(encodings, self.embedding.weight)
+        # Quantize with an index-determined vector. This is the same mapping
+        # used when Stage 2 decodes generated token indices.
+        z_q = self.indices_to_vectors(encoding_indices).view(z.shape)
 
-        # RESTORE MAGNITUDE
-        z_q_restored = (z_q_sphere * orig_norm).view(z.shape)
-
-        # compute loss for embedding using restored magnitude against ORIGINAL z
-        loss = self.beta * th.mean((z_q_restored.detach() - z) ** 2) + th.mean((z_q_restored - z.detach()) ** 2)
+        # compute loss for embedding
+        loss = self.beta * th.mean((z_q.detach() - z) ** 2) + th.mean((z_q - z.detach()) ** 2)
 
         # preserve gradients via straight-through estimator
-        z_q = z + (z_q_restored - z).detach()
+        z_q = z + (z_q - z).detach()
         # reshape back to match original input shape
         z_q = rearrange(z_q, "b h w c -> b c h w").contiguous()
         # count
