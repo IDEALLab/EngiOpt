@@ -30,6 +30,11 @@ It is split into two tracks:
   - PyBullet-based robotics co-design simulation and optimization loop
   - Mapping to contribution docs
 
+- `participant/04_heat_exchanger_design_problem.ipynb` and `solutions/04_heat_exchanger_design_problem.ipynb` (optional capstone / alternative to Notebook 03)
+  - Lightweight thermal-fluid design problem
+  - Wraps `ht` and `fluids` when available, with textbook fallbacks
+  - Emphasizes conditions, objectives, constraints, baseline optimization, and rendering
+
 ## Runtime assumptions
 
 - Primary live problem: `Beams2D`
@@ -55,10 +60,12 @@ Use these `?copy=true` links for workshop sharing so attendees are prompted to c
 - Participant 01: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/participant/01_train_generate.ipynb?copy=true
 - Participant 02: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/participant/02_evaluate_metrics.ipynb?copy=true
 - Participant 03: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/participant/03_add_new_problem_scaffold.ipynb?copy=true
+- Participant 04: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/participant/04_heat_exchanger_design_problem.ipynb?copy=true
 - Solution 00: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/solutions/00_setup_api_warmup.ipynb?copy=true
 - Solution 01: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/solutions/01_train_generate.ipynb?copy=true
 - Solution 02: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/solutions/02_evaluate_metrics.ipynb?copy=true
 - Solution 03: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/solutions/03_add_new_problem_scaffold.ipynb?copy=true
+- Solution 04: https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/dcc26-workshop-notebooks/workshops/dcc26/solutions/04_heat_exchanger_design_problem.ipynb?copy=true
 
 ## Output artifacts
 

@@ -116,6 +116,28 @@ What metadata is minimally required so another lab can reproduce your new benchm
 
 ---
 
+## Notebook 04: Heat Exchanger Design Problem
+
+### Learning objective
+Wrap a lightweight external engineering calculation as an EngiBench-style benchmark problem.
+
+### Section plan
+1. Read-me-first + copy mode
+2. Concept cell: same thermal domain, different physics than heat-conduction topology optimization
+3. Bootstrap optional `ht` and `fluids` dependencies
+4. Define design variables, operating conditions, objectives, and constraints
+5. Implement a small simulator using effectiveness-NTU and pressure-drop calculations
+6. Package the simulator behind `simulate`, `check_constraints`, `random_design`, `optimize`, and `render`
+7. Compare candidate designs and constraint violations
+8. Run a transparent random-search baseline
+9. Vary operating conditions to show conditional design behavior
+10. Map the notebook wrapper to a production EngiBench contribution checklist
+
+### Discussion trigger
+When should a performance quantity be an objective, a constraint, or both?
+
+---
+
 ## Participant vs Solution Policy
 
 - Participant notebooks: keep code TODOs, but each TODO has explicit completion checks and expected outputs.

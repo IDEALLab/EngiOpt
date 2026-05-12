@@ -117,6 +117,7 @@ For the DCC'26 hands-on tutorial flow, see:
 - `workshops/dcc26/participant/01_train_generate.ipynb`
 - `workshops/dcc26/participant/02_evaluate_metrics.ipynb`
 - `workshops/dcc26/participant/03_add_new_problem_scaffold.ipynb`
+- `workshops/dcc26/participant/04_heat_exchanger_design_problem.ipynb`
 
 Facilitator solutions are in:
 
