@@ -111,19 +111,18 @@ We have some colab notebooks that show how to use some of the EngiBench/EngiOpt 
 
 ## Workshop notebooks
 
-For the DCC'26 hands-on tutorial flow, see:
+For the DCC'26 workshop notebook landing page and Colab links, see:
 
-- `workshops/dcc26/participant/00_setup_api_warmup.ipynb`
-- `workshops/dcc26/participant/01_train_generate.ipynb`
-- `workshops/dcc26/participant/02_evaluate_metrics.ipynb`
-- `workshops/dcc26/participant/03_add_new_problem_scaffold.ipynb`
-- `workshops/dcc26/participant/04_heat_exchanger_design_problem.ipynb`
+- `workshops/dcc26/README.md`
 
-Facilitator solutions are in:
+The main live-workshop flow is in:
 
+- `workshops/dcc26/simple/`
+
+Extra fill-in exercises and facilitator solutions are in:
+
+- `workshops/dcc26/participant/`
 - `workshops/dcc26/solutions/`
-
-See `workshops/dcc26/README.md` for agenda mapping, fallback path, and artifact outputs.
 
 
 ## Citing
