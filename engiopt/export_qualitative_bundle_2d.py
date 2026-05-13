@@ -155,9 +155,10 @@ def load_cgan_checkpoint(
 
 
 def save_grayscale_image(image: np.ndarray, output_path: Path) -> None:
-    """Save a single 2D design image in grayscale."""
+    """Save a single 2D design image in EngiBench Reds_r colormap."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    plt.imsave(output_path, image, cmap="gray", vmin=0.0, vmax=1.0)
+    cmap = plt.get_cmap("Reds_r")
+    plt.imsave(output_path, image, cmap=cmap, vmin=0.0, vmax=1.0)
 
 
 def to_jsonable_dict(values: dict[str, Any]) -> dict[str, Any]:
@@ -175,7 +176,8 @@ def save_design_raster(designs_np: np.ndarray, output_path: Path) -> None:
     """Save a tiled raster of designs using 3x1 layout (3 rows, 1 col for compact visualization)."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     grid = build_design_grid(designs_np, rows=3, cols=1)
-    plt.imsave(output_path, grid, cmap="gray", vmin=0.0, vmax=1.0)
+    cmap = plt.get_cmap("Reds_r")
+    plt.imsave(output_path, grid, cmap=cmap, vmin=0.0, vmax=1.0)
 
 
 if __name__ == "__main__":
