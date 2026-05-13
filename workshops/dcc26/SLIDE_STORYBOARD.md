@@ -6,7 +6,7 @@ Contact sheet: `workshops/dcc26/slides/contact-sheet.png`
 
 Presenters: Matthew Keeler, Soheyl Massoudi, Mark Fuge.
 
-Core message: EngiBench and EngiOpt help engineering design ML become cumulative by turning design problems into executable benchmark contracts. Participants should leave less impressed by isolated generated shapes and more confident asking what was actually benchmarked.
+Core message: EngiBench and EngiOpt help engineering design ML become cumulative by turning design problems into executable benchmark contracts. Participants should leave able to ask what was actually benchmarked, whether the result is reusable, and how to express their own design problem in the same way.
 
 Audience: DCC 2026 workshop participants: design computing researchers, engineering design researchers, and AI-for-design practitioners. Assume mixed ML depth and keep the simple notebooks as the main path.
 
@@ -16,7 +16,7 @@ Audience: DCC 2026 workshop participants: design computing researchers, engineer
 2. A benchmark is not just a dataset or leaderboard; it is an executable contract.
 3. The contract makes hidden choices explicit: design space, conditions, objectives, constraints, dataset, renderer, simulator, and optimizer.
 4. The simple notebooks let participants use that contract to frame a problem, train a generator, evaluate designs, and sketch their own domain problem.
-5. The closing psychological goal is transfer: participants should know how this infrastructure can make their own research more reproducible, comparable, and reusable.
+5. The closing takeaway is transfer: participants should know how this infrastructure can make their own research more reproducible, comparable, and reusable.
 
 ## Design System
 
