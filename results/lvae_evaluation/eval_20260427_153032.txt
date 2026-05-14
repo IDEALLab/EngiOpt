@@ -1,0 +1,55 @@
+Checkpoint: results/lvae_new_dataset/lae_aoa_init_3d_new_dataset_v7.pth
+Test wings: 94
+x0 seed: 0 (matched)
+
+── Generation ───────────────────────────────────────────
+shape_mse       : 0.000091
+aoa_mse         : 0.698994
+mmd             : 0.036431
+vendi           : 0.451472
+pressure_mse    : 0.019621
+perf_mse        : 0.000492
+cd_mse          : 0.000747
+cl_mse          : 0.000236
+Pressure slice MSE:
+  slice 0: 0.018961
+  slice 1: 0.017972
+  slice 2: 0.018302
+  slice 3: 0.018171
+  slice 4: 0.018386
+  slice 5: 0.018606
+  slice 6: 0.018607
+  slice 7: 0.019253
+  slice 8: 0.020677
+  slice 9: 0.021746
+  slice 10: 0.022581
+  slice 11: 0.023120
+  slice 12: 0.020765
+  slice 13: 0.018170
+  slice 14: 0.018994
+
+── Reconstruction ───────────────────────────────────────
+rec_shape_mse       : 0.000035
+rec_aoa_mse         : 0.325578
+rec_mmd             : 0.007490
+rec_vendi           : 0.929101
+rec_pressure_mse    : 0.007855
+rec_perf_mse        : 0.000228
+rec_cd_mse          : 0.000097
+rec_cl_mse          : 0.000359
+Pressure slice MSE:
+  slice 0: 0.009123
+  slice 1: 0.007840
+  slice 2: 0.007246
+  slice 3: 0.007099
+  slice 4: 0.007196
+  slice 5: 0.007245
+  slice 6: 0.007169
+  slice 7: 0.007037
+  slice 8: 0.007462
+  slice 9: 0.008113
+  slice 10: 0.008745
+  slice 11: 0.009189
+  slice 12: 0.008470
+  slice 13: 0.007702
+  slice 14: 0.008181

@@ -1,0 +1,356 @@
+Many modules are hidden in this stack. Use "module --show_hidden spider SOFTWARE" if you are not able to find the required software
+Using device: cuda
+Loaded BAE.
+Using the latest cached version of the dataset since Cashen/optiwing3d_engibench couldn't be found on the Hugging Face Hub (offline mode is enabled).
+Found the latest cached dataset configuration 'default' at /cluster/scratch/adelbeke/hf_datasets/Cashen___optiwing3d_engibench/default/0.0.0/898b8cab74f6dff3f3ed60cfe6066e7f15a912fc (last modified on Wed Mar 18 13:25:32 2026).
+Loaded Wings3D train split with 1622 items.
+Params mean: [6.10526390e-01 5.60245224e+06 7.86789981e-01 8.71319544e-01], std: [1.40246978e-01 2.69124750e+06 1.80454197e-01 7.17903911e-02]
+AoA mean: 5.0684, std: 2.5740
+Pre-computing BAE latents for 1622 samples...
+  Encoding sample 100/1622...
+  Encoding sample 200/1622...
+  Encoding sample 300/1622...
+  Encoding sample 400/1622...
+  Encoding sample 500/1622...
+  Encoding sample 600/1622...
+  Encoding sample 700/1622...
+  Encoding sample 800/1622...
+  Encoding sample 900/1622...
+  Encoding sample 1000/1622...
+  Encoding sample 1100/1622...
+  Encoding sample 1200/1622...
+  Encoding sample 1300/1622...
+  Encoding sample 1400/1622...
+  Encoding sample 1500/1622...
+  Encoding sample 1600/1622...
+Pre-computation complete.
+latent_channels_full =  latent_channels +  c_dim_latent +  x_dim_add +  alpha_dim
+23  =  3 + 16 + 3 + 1
+down_channels[0] =  32
+Built UNet.
+latent_channels_full =  latent_channels +  c_dim_latent +  x_dim_add +  alpha_dim
+Built sampler.
+Built DDM model.
+Starting training for 20000 epochs (checkpoint every 500 epochs)...
+Epoch 00001/20000 | Train Loss 1.660699
+Epoch 00002/20000 | Train Loss 1.349892
+Epoch 00003/20000 | Train Loss 1.267060
+Epoch 00004/20000 | Train Loss 1.150912
+Epoch 00005/20000 | Train Loss 0.959223
+Epoch 00006/20000 | Train Loss 0.717174
+Epoch 00007/20000 | Train Loss 0.389423
+Epoch 00008/20000 | Train Loss 0.391749
+Epoch 00009/20000 | Train Loss 0.396083
+Epoch 00010/20000 | Train Loss 0.387695
+Epoch 00011/20000 | Train Loss 0.359280
+Epoch 00012/20000 | Train Loss 0.345324
+Epoch 00013/20000 | Train Loss 0.295008
+Epoch 00014/20000 | Train Loss 0.367201
+Epoch 00015/20000 | Train Loss 0.328080
+Epoch 00016/20000 | Train Loss 0.315709
+Epoch 00017/20000 | Train Loss 0.323947
+Epoch 00018/20000 | Train Loss 0.276175
+Epoch 00019/20000 | Train Loss 0.304894
+Epoch 00020/20000 | Train Loss 0.310448
+Epoch 00021/20000 | Train Loss 0.300092
+Epoch 00022/20000 | Train Loss 0.280743
+Epoch 00023/20000 | Train Loss 0.269424
+Epoch 00024/20000 | Train Loss 0.303147
+Epoch 00025/20000 | Train Loss 0.286987
+Epoch 00026/20000 | Train Loss 0.259299
+Epoch 00027/20000 | Train Loss 0.225274
+Epoch 00028/20000 | Train Loss 0.293594
+Epoch 00029/20000 | Train Loss 0.265651
+Epoch 00030/20000 | Train Loss 0.260534
+Epoch 00031/20000 | Train Loss 0.300144
+Epoch 00032/20000 | Train Loss 0.258668
+Epoch 00033/20000 | Train Loss 0.283576
+Epoch 00034/20000 | Train Loss 0.273341
+Epoch 00035/20000 | Train Loss 0.255222
+Epoch 00036/20000 | Train Loss 0.244645
+Epoch 00037/20000 | Train Loss 0.260044
+Epoch 00038/20000 | Train Loss 0.264242
+Epoch 00039/20000 | Train Loss 0.277682
+Epoch 00040/20000 | Train Loss 0.288334
+Epoch 00041/20000 | Train Loss 0.268191
+Epoch 00042/20000 | Train Loss 0.273781
+Epoch 00043/20000 | Train Loss 0.263566
+Epoch 00044/20000 | Train Loss 0.230338
+Epoch 00045/20000 | Train Loss 0.232640
+Epoch 00046/20000 | Train Loss 0.269890
+Epoch 00047/20000 | Train Loss 0.243810
+Epoch 00048/20000 | Train Loss 0.231886
+Epoch 00049/20000 | Train Loss 0.246866
+Epoch 00050/20000 | Train Loss 0.227834
+Epoch 00051/20000 | Train Loss 0.236542
+Epoch 00052/20000 | Train Loss 0.272632
+Epoch 00053/20000 | Train Loss 0.258180
+Epoch 00054/20000 | Train Loss 0.268667
+Epoch 00055/20000 | Train Loss 0.263286
+Epoch 00056/20000 | Train Loss 0.237554
+Epoch 00057/20000 | Train Loss 0.229963
+Epoch 00058/20000 | Train Loss 0.236722
+Epoch 00059/20000 | Train Loss 0.266416
+Epoch 00060/20000 | Train Loss 0.260432
+Epoch 00061/20000 | Train Loss 0.257861
+Epoch 00062/20000 | Train Loss 0.264295
+Epoch 00063/20000 | Train Loss 0.252900
+Epoch 00064/20000 | Train Loss 0.245885
+Epoch 00065/20000 | Train Loss 0.244888
+Epoch 00066/20000 | Train Loss 0.248556
+Epoch 00067/20000 | Train Loss 0.247882
+Epoch 00068/20000 | Train Loss 0.220110
+Epoch 00069/20000 | Train Loss 0.261393
+Epoch 00070/20000 | Train Loss 0.256993
+Epoch 00071/20000 | Train Loss 0.259780
+Epoch 00072/20000 | Train Loss 0.232276
+Epoch 00073/20000 | Train Loss 0.266562
+Epoch 00074/20000 | Train Loss 0.249152
+Epoch 00075/20000 | Train Loss 0.259766
+Epoch 00076/20000 | Train Loss 0.244577
+Epoch 00077/20000 | Train Loss 0.236270
+Epoch 00078/20000 | Train Loss 0.246986
+Epoch 00079/20000 | Train Loss 0.211312
+Epoch 00080/20000 | Train Loss 0.230702
+Epoch 00081/20000 | Train Loss 0.235207
+Epoch 00082/20000 | Train Loss 0.239780
+Epoch 00083/20000 | Train Loss 0.253986
+Epoch 00084/20000 | Train Loss 0.223375
+Epoch 00085/20000 | Train Loss 0.249878
+Epoch 00086/20000 | Train Loss 0.206997
+Epoch 00087/20000 | Train Loss 0.248480
+Epoch 00088/20000 | Train Loss 0.254450
+Epoch 00089/20000 | Train Loss 0.230816
+Epoch 00090/20000 | Train Loss 0.254365
+Epoch 00091/20000 | Train Loss 0.242847
+Epoch 00092/20000 | Train Loss 0.233684
+Epoch 00093/20000 | Train Loss 0.275132
+Epoch 00094/20000 | Train Loss 0.252023
+Epoch 00095/20000 | Train Loss 0.216671
+Epoch 00096/20000 | Train Loss 0.254173
+Epoch 00097/20000 | Train Loss 0.904887
+Epoch 00098/20000 | Train Loss 0.251308
+Epoch 00099/20000 | Train Loss 0.209437
+Epoch 00100/20000 | Train Loss 0.254648
+Epoch 00101/20000 | Train Loss 0.212074
+Epoch 00102/20000 | Train Loss 0.205311
+Epoch 00103/20000 | Train Loss 0.251411
+Epoch 00104/20000 | Train Loss 0.203154
+Epoch 00105/20000 | Train Loss 0.230822
+Epoch 00106/20000 | Train Loss 0.241381
+Epoch 00107/20000 | Train Loss 0.226550
+Epoch 00108/20000 | Train Loss 0.255270
+Epoch 00109/20000 | Train Loss 0.226607
+Epoch 00110/20000 | Train Loss 0.224665
+Epoch 00111/20000 | Train Loss 0.219429
+Epoch 00112/20000 | Train Loss 0.251208
+Epoch 00113/20000 | Train Loss 0.246959
+Epoch 00114/20000 | Train Loss 0.246101
+Epoch 00115/20000 | Train Loss 0.265880
+Epoch 00116/20000 | Train Loss 0.237863
+Epoch 00117/20000 | Train Loss 0.246612
+Epoch 00118/20000 | Train Loss 0.237802
+Epoch 00119/20000 | Train Loss 0.211504
+Epoch 00120/20000 | Train Loss 0.265213
+Epoch 00121/20000 | Train Loss 0.239786
+Epoch 00122/20000 | Train Loss 0.245029
+Epoch 00123/20000 | Train Loss 0.240047
+Epoch 00124/20000 | Train Loss 0.263540
+Epoch 00125/20000 | Train Loss 0.237087
+Epoch 00126/20000 | Train Loss 0.215896
+Epoch 00127/20000 | Train Loss 0.231817
+Epoch 00128/20000 | Train Loss 0.234408
+Epoch 00129/20000 | Train Loss 0.226157
+Epoch 00130/20000 | Train Loss 0.223068
+Epoch 00131/20000 | Train Loss 0.240373
+Epoch 00132/20000 | Train Loss 0.231206
+Epoch 00133/20000 | Train Loss 0.254099
+Epoch 00134/20000 | Train Loss 0.270852
+Epoch 00135/20000 | Train Loss 0.242974
+Epoch 00136/20000 | Train Loss 0.257275
+Epoch 00137/20000 | Train Loss 0.255050
+Epoch 00138/20000 | Train Loss 0.224140
+Epoch 00139/20000 | Train Loss 0.230354
+Epoch 00140/20000 | Train Loss 0.240749
+Epoch 00141/20000 | Train Loss 0.224658
+Epoch 00142/20000 | Train Loss 0.230223
+Epoch 00143/20000 | Train Loss 0.233210
+Epoch 00144/20000 | Train Loss 0.247877
+Epoch 00145/20000 | Train Loss 0.224685
+Epoch 00146/20000 | Train Loss 0.220956
+Epoch 00147/20000 | Train Loss 0.250470
+Epoch 00148/20000 | Train Loss 0.214469
+Epoch 00149/20000 | Train Loss 0.244802
+Epoch 00150/20000 | Train Loss 0.233471
+Epoch 00151/20000 | Train Loss 0.226801
+Epoch 00152/20000 | Train Loss 0.230011
+Epoch 00153/20000 | Train Loss 0.227154
+Epoch 00154/20000 | Train Loss 0.304216
+Epoch 00155/20000 | Train Loss 0.204332
+Epoch 00156/20000 | Train Loss 0.211112
+Epoch 00157/20000 | Train Loss 0.237089
+Epoch 00158/20000 | Train Loss 0.248106
+Epoch 00159/20000 | Train Loss 0.224992
+Epoch 00160/20000 | Train Loss 0.234679
+Epoch 00161/20000 | Train Loss 0.236838
+Epoch 00162/20000 | Train Loss 0.255665
+Epoch 00163/20000 | Train Loss 0.230088
+Epoch 00164/20000 | Train Loss 0.257028
+Epoch 00165/20000 | Train Loss 0.214838
+Epoch 00166/20000 | Train Loss 0.260874
+Epoch 00167/20000 | Train Loss 0.231643
+Epoch 00168/20000 | Train Loss 0.249990
+Epoch 00169/20000 | Train Loss 0.253869
+Epoch 00170/20000 | Train Loss 0.228234
+Epoch 00171/20000 | Train Loss 0.222672
+Epoch 00172/20000 | Train Loss 0.215223
+Epoch 00173/20000 | Train Loss 0.228329
+Epoch 00174/20000 | Train Loss 0.235687
+Epoch 00175/20000 | Train Loss 0.235410
+Epoch 00176/20000 | Train Loss 1305.665387
+Epoch 00177/20000 | Train Loss 0.233770
+Epoch 00178/20000 | Train Loss 0.240190
+Epoch 00179/20000 | Train Loss 0.219900
+Epoch 00180/20000 | Train Loss 0.235099
+Epoch 00181/20000 | Train Loss 0.228902
+Epoch 00182/20000 | Train Loss 0.230265
+Epoch 00183/20000 | Train Loss 0.226400
+Epoch 00184/20000 | Train Loss 0.234420
+Epoch 00185/20000 | Train Loss 0.216695
+Epoch 00186/20000 | Train Loss 0.244929
+Epoch 00187/20000 | Train Loss 0.225724
+Epoch 00188/20000 | Train Loss 0.238398
+Epoch 00189/20000 | Train Loss 0.225990
+Epoch 00190/20000 | Train Loss 0.231901
+Epoch 00191/20000 | Train Loss 0.235285
+Epoch 00192/20000 | Train Loss 0.255343
+Epoch 00193/20000 | Train Loss 0.217298
+Epoch 00194/20000 | Train Loss 0.240920
+Epoch 00195/20000 | Train Loss 0.217376
+Epoch 00196/20000 | Train Loss 0.213802
+Epoch 00197/20000 | Train Loss 0.218312
+Epoch 00198/20000 | Train Loss 0.205154
+Epoch 00199/20000 | Train Loss 0.224265
+Epoch 00200/20000 | Train Loss 0.222802
+Epoch 00201/20000 | Train Loss 0.234704
+Epoch 00202/20000 | Train Loss 0.235567
+Epoch 00203/20000 | Train Loss 0.247752
+Epoch 00204/20000 | Train Loss 0.226007
+Epoch 00205/20000 | Train Loss 0.227374
+Epoch 00206/20000 | Train Loss 0.240771
+Epoch 00207/20000 | Train Loss 0.202452
+Epoch 00208/20000 | Train Loss 0.229022
+Epoch 00209/20000 | Train Loss 0.218564
+Epoch 00210/20000 | Train Loss 0.240692
+Epoch 00211/20000 | Train Loss 0.218051
+Epoch 00212/20000 | Train Loss 0.222873
+Epoch 00213/20000 | Train Loss 0.248135
+Epoch 00214/20000 | Train Loss 0.217354
+Epoch 00215/20000 | Train Loss 0.239768
+Epoch 00216/20000 | Train Loss 0.217130
+Epoch 00217/20000 | Train Loss 0.223058
+Epoch 00218/20000 | Train Loss 0.239764
+Epoch 00219/20000 | Train Loss 0.246856
+Epoch 00220/20000 | Train Loss 0.268058
+Epoch 00221/20000 | Train Loss 0.253256
+Epoch 00222/20000 | Train Loss 0.222213
+Epoch 00223/20000 | Train Loss 0.205601
+Epoch 00224/20000 | Train Loss 0.227545
+Epoch 00225/20000 | Train Loss 0.207157
+Epoch 00226/20000 | Train Loss 0.226794
+Epoch 00227/20000 | Train Loss 0.232287
+Epoch 00228/20000 | Train Loss 0.358807
+Epoch 00229/20000 | Train Loss 0.249894
+Epoch 00230/20000 | Train Loss 0.238056
+Epoch 00231/20000 | Train Loss 0.235029
+Epoch 00232/20000 | Train Loss 0.223645
+Epoch 00233/20000 | Train Loss 0.216846
+Epoch 00234/20000 | Train Loss 0.227897
+Epoch 00235/20000 | Train Loss 0.228813
+Epoch 00236/20000 | Train Loss 0.215866
+Epoch 00237/20000 | Train Loss 0.213069
+Epoch 00238/20000 | Train Loss 0.233113
+Epoch 00239/20000 | Train Loss 0.257031
+Epoch 00240/20000 | Train Loss 0.211028
+Epoch 00241/20000 | Train Loss 0.240693
+Epoch 00242/20000 | Train Loss 0.225071
+Epoch 00243/20000 | Train Loss 0.250204
+Epoch 00244/20000 | Train Loss 0.225752
+Epoch 00245/20000 | Train Loss 0.215824
+Epoch 00246/20000 | Train Loss 0.227398
+Epoch 00247/20000 | Train Loss 0.221802
+Epoch 00248/20000 | Train Loss 0.224211
+Epoch 00249/20000 | Train Loss 0.257581
+Epoch 00250/20000 | Train Loss 0.217959
+Epoch 00251/20000 | Train Loss 0.263306
+Epoch 00252/20000 | Train Loss 0.263332
+Epoch 00253/20000 | Train Loss 0.250105
+Epoch 00254/20000 | Train Loss 0.246356
+Epoch 00255/20000 | Train Loss 0.219057
+Epoch 00256/20000 | Train Loss 0.270837
+Epoch 00257/20000 | Train Loss 0.228377
+Epoch 00258/20000 | Train Loss 0.215116
+Epoch 00259/20000 | Train Loss 0.216042
+Epoch 00260/20000 | Train Loss 0.211251
+Epoch 00261/20000 | Train Loss 0.265810
+Epoch 00262/20000 | Train Loss 0.225424
+Epoch 00263/20000 | Train Loss 0.238237
+Epoch 00264/20000 | Train Loss 0.222008
+Epoch 00265/20000 | Train Loss 0.224142
+Epoch 00266/20000 | Train Loss 0.213807
+Epoch 00267/20000 | Train Loss 0.208812
+Epoch 00268/20000 | Train Loss 0.225617
+Epoch 00269/20000 | Train Loss 0.221277
+Epoch 00270/20000 | Train Loss 0.261544
+Epoch 00271/20000 | Train Loss 0.244144
+Epoch 00272/20000 | Train Loss 0.227015
+Epoch 00273/20000 | Train Loss 0.202643
+Epoch 00274/20000 | Train Loss 0.240121
+Epoch 00275/20000 | Train Loss 0.242139
+Epoch 00276/20000 | Train Loss 0.248730
+Epoch 00277/20000 | Train Loss 0.223057
+Epoch 00278/20000 | Train Loss 0.197651
+Epoch 00279/20000 | Train Loss 0.236390
+Epoch 00280/20000 | Train Loss 0.222720
+Epoch 00281/20000 | Train Loss 0.236350
+Epoch 00282/20000 | Train Loss 0.202488
+Epoch 00283/20000 | Train Loss 0.210755
+Epoch 00284/20000 | Train Loss 0.253538
+Epoch 00285/20000 | Train Loss 0.230793
+Epoch 00286/20000 | Train Loss 0.211164
+Epoch 00287/20000 | Train Loss 0.205004
+Epoch 00288/20000 | Train Loss 0.268392
+Epoch 00289/20000 | Train Loss 0.271629
+Epoch 00290/20000 | Train Loss 0.204885
+Epoch 00291/20000 | Train Loss 0.239399
+Epoch 00292/20000 | Train Loss 0.243018
+Epoch 00293/20000 | Train Loss 0.254949
+Epoch 00294/20000 | Train Loss 0.229243
+Epoch 00295/20000 | Train Loss 0.214957
+Epoch 00296/20000 | Train Loss 0.217876
+Epoch 00297/20000 | Train Loss 0.204193
+Epoch 00298/20000 | Train Loss 0.242052
+Epoch 00299/20000 | Train Loss 0.231243
+Epoch 00300/20000 | Train Loss 0.229045
+Epoch 00301/20000 | Train Loss 0.226196
+Epoch 00302/20000 | Train Loss 0.245584
+Epoch 00303/20000 | Train Loss 0.184107
+Epoch 00304/20000 | Train Loss 0.220779
+Epoch 00305/20000 | Train Loss 0.220658
+Epoch 00306/20000 | Train Loss 0.220373
+Epoch 00307/20000 | Train Loss 0.215538
+Epoch 00308/20000 | Train Loss 0.198751
+Epoch 00309/20000 | Train Loss 0.238381
+Epoch 00310/20000 | Train Loss 0.236773
+Epoch 00311/20000 | Train Loss 0.200217
+Epoch 00312/20000 | Train Loss 0.251034
+Epoch 00313/20000 | Train Loss 0.233153
+Epoch 00314/20000 | Train Loss 0.213712
+Epoch 00315/20000 | Train Loss 0.217767
+Epoch 00316/20000 | Train Loss 0.245495
+Epoch 00317/20000 | Train Loss 24110.712732
+Epoch 00318/20000 | Train Loss 0.255709
+Epoch 00319/20000 | Train Loss 0.280252
+Epoch 00320/20000 | Train Loss 0.271873
+Epoch 00321/20000 | Train Loss 0.230428
+[2026-03-19T14:42:11.047+01:00] error: *** JOB 60867943 ON eu-lo-g2-023 CANCELLED AT 2026-03-19T14:42:11 DUE to SIGNAL Terminated ***

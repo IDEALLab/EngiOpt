@@ -1,0 +1,11 @@
+Checkpoint: results/ddm/ddm_wingTL_changes.pth
+Test wings: 117
+Forward passes: 10
+Gammas: [0.5, 25, 50, 100]
+Batch size: 32
+
+RESULTS (mean ± std)
+Shape MSE : 1.18e-04 ± 4.30e-06
+AoA MSE   : 1.4083 ± 0.0717
+MMD       : 0.0377 ± 0.0007
+Vendi     : 1.5672 ± 0.0085

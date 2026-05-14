@@ -1,0 +1,11 @@
+Checkpoint: results/ablation/n543_s1/ddm_ablation_n543_s1.pth
+Test wings: 117
+Forward passes: 10
+Gammas: [0.5, 25, 50, 100]
+Batch size: 32
+
+RESULTS (mean ± std)
+Shape MSE : 5.18e-05 ± 1.75e-05
+AoA MSE   : 0.2967 ± 0.0139
+MMD       : 0.0098 ± 0.0002
+Vendi     : 1.0063 ± 0.0076

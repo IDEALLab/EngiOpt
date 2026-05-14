@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(squeue *)",
+      "Bash(squeue)",
+      "Bash(scancel *)",
+      "Bash(sbatch *)",
+      "Bash(ls *)",
+      "Bash(ls)",
+      "Bash(tail *)",
+      "Bash(diff *)",
+      "Bash(find *)"
+    ],
+    "deny": []
+  }
+}

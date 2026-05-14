@@ -1,0 +1,60 @@
+Checkpoint: results/lvae/lae_dropout_0.2_best.pth
+Test wings: 94
+x0 seed: 0 (matched)
+
+── Generation ───────────────────────────────────────────
+shape_mse       : 0.000090
+aoa_mse         : 0.594576
+mmd             : 0.067227
+vendi           : 0.277307
+pressure_mse    : 0.018999
+perf_mse        : 0.000503
+cd_mse          : 0.000822
+cl_mse          : 0.000183
+Pressure slice MSE:
+  slice 0: 0.019078
+  slice 1: 0.018137
+  slice 2: 0.017918
+  slice 3: 0.018064
+  slice 4: 0.017890
+  slice 5: 0.018126
+  slice 6: 0.018109
+  slice 7: 0.018321
+  slice 8: 0.019530
+  slice 9: 0.021025
+  slice 10: 0.022652
+  slice 11: 0.022715
+  slice 12: 0.018958
+  slice 13: 0.016017
+  slice 14: 0.018444
+
+── Reconstruction ───────────────────────────────────────
+rec_shape_mse       : 0.000007
+rec_aoa_mse         : 0.164996
+rec_mmd             : 0.004007
+rec_vendi           : 0.897504
+rec_pressure_mse    : 0.006278
+rec_perf_mse        : 0.000215
+rec_cd_mse          : 0.000111
+rec_cl_mse          : 0.000320
+Pressure slice MSE:
+  slice 0: 0.007089
+  slice 1: 0.006330
+  slice 2: 0.006192
+  slice 3: 0.006296
+  slice 4: 0.006029
+  slice 5: 0.005629
+  slice 6: 0.005592
+  slice 7: 0.005413
+  slice 8: 0.005746
+  slice 9: 0.006388
+  slice 10: 0.007169
+  slice 11: 0.007527
+  slice 12: 0.006428
+  slice 13: 0.005695
+  slice 14: 0.006649
+
+── Reconstruction by flow regime ────────────────────────
+  Subsonic   (Mach < 0.8): n= 45  shape MSE=0.000007  pressure MSE=0.007558
+  Transonic  (0.8-1.0)   : n= 20  shape MSE=0.000011  pressure MSE=0.007723
+  Supersonic (Mach >= 1.0): n= 29  shape MSE=0.000004  pressure MSE=0.003295

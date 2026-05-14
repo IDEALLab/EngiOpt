@@ -1,0 +1,13 @@
+device: cpu
+total_slices: 14598
+train_size: 13138
+val_size: 1460
+batch_size: 32
+learning_rate: 0.001
+reg_fac: 0.0005
+n_control_points: 20
+n_data_points: 192
+n_epochs: 100
+best_epoch: 97
+best_val_loss: 6.59423789180088e-05
+best_model_path: results/bezier_ae/run_003/models/bezier_ae_best.pt

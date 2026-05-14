@@ -1,0 +1,43 @@
+Checkpoint: results/lvae/lae_hp3_wpres5.pth
+Test wings: 117
+x0 seed: 0 (matched)
+
+── Generation ───────────────────────────────────────────
+shape_mse       : 0.000049
+aoa_mse         : 2.592066
+mmd             : 0.085268
+vendi           : 0.485863
+pressure_mse    : 0.051511
+perf_mse        : 1.266237
+cd_mse          : 2.532033
+cl_mse          : 0.000440
+Pressure slice MSE:
+  slice 0: 0.057644
+  slice 1: 0.057196
+  slice 2: 0.056311
+  slice 3: 0.055023
+  slice 4: 0.053300
+  slice 5: 0.049547
+  slice 6: 0.046544
+  slice 7: 0.047111
+  slice 8: 0.040921
+
+── Reconstruction ───────────────────────────────────────
+rec_shape_mse       : 0.000022
+rec_aoa_mse         : 0.737241
+rec_mmd             : 0.015389
+rec_vendi           : 0.781793
+rec_pressure_mse    : 0.022430
+rec_perf_mse        : 0.191110
+rec_cd_mse          : 0.381818
+rec_cl_mse          : 0.000402
+Pressure slice MSE:
+  slice 0: 0.023587
+  slice 1: 0.023642
+  slice 2: 0.023595
+  slice 3: 0.023212
+  slice 4: 0.022931
+  slice 5: 0.022180
+  slice 6: 0.021733
+  slice 7: 0.021593
+  slice 8: 0.019395

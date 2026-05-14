@@ -1,0 +1,12 @@
+device: cpu
+total_slices: 14598
+train_size: 13138
+val_size: 1460
+batch_size: 32
+learning_rate: 0.001
+reg_fac: 0.001
+n_control_points: 16
+n_data_points: 192
+n_epochs: 100
+best_epoch: 100
+best_val_loss: 0.00016791144041472102

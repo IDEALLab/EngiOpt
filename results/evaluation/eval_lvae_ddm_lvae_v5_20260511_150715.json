@@ -1,0 +1,6 @@
+{
+  "checkpoint": "results/ddm_lvae/ddm_lvae_v5.pth",
+  "n_test": 94,
+  "n_passes": 10,
+  "results": {}
+}

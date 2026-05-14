@@ -1,0 +1,32 @@
+Slice failure counts:
+  Slice 0: 4/20
+  Slice 1: 0/20
+  Slice 2: 0/20
+  Slice 3: 0/20
+  Slice 4: 3/20
+  Slice 5: 0/20
+  Slice 6: 0/20
+  Slice 7: 1/20
+  Slice 8: 0/20
+
+Sample failure counts:
+  Sample 00: 0/9
+  Sample 01: 0/9
+  Sample 02: 0/9
+  Sample 03: 1/9
+  Sample 04: 1/9
+  Sample 05: 3/9
+  Sample 06: 0/9
+  Sample 07: 0/9
+  Sample 08: 0/9
+  Sample 09: 0/9
+  Sample 10: 0/9
+  Sample 11: 0/9
+  Sample 12: 1/9
+  Sample 13: 0/9
+  Sample 14: 0/9
+  Sample 15: 0/9
+  Sample 16: 0/9
+  Sample 17: 1/9
+  Sample 18: 0/9
+  Sample 19: 1/9

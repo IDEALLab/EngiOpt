@@ -1,0 +1,11 @@
+Checkpoint: results/ablation/n400_s0/ddm_ablation_n400_s0.pth
+Test wings: 117
+Forward passes: 10
+Gammas: [0.5, 25, 50, 100]
+Batch size: 32
+
+RESULTS (mean ± std)
+Shape MSE : 8.19e-05 ± 1.05e-04
+AoA MSE   : 0.2666 ± 0.0228
+MMD       : 0.0249 ± 0.0006
+Vendi     : 1.2172 ± 0.0091

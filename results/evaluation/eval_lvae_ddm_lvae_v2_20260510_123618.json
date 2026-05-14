@@ -1,0 +1,27 @@
+{
+  "checkpoint": "results/ddm_lvae/ddm_lvae_v2.pth",
+  "n_test": 94,
+  "n_passes": 10,
+  "results": {
+    "shape_mse": {
+      "mean": Infinity,
+      "std": NaN
+    },
+    "aoa_mse": {
+      "mean": 1.1123570882148846e+33,
+      "std": 3.3370712646152754e+33
+    },
+    "mmd": {
+      "mean": 0.05961775525783499,
+      "std": 0.0037421316236138356
+    },
+    "vendi": {
+      "mean": 1.4936572728358548,
+      "std": 0.09268710012437024
+    },
+    "pressure_mse": {
+      "mean": Infinity,
+      "std": NaN
+    }
+  }
+}

@@ -1,0 +1,9 @@
+Checkpoint : results/ddm_lvae/ddm_lvae_v4b.pth
+Test wings : 94
+Passes     : 10
+
+shape_mse       : 5.9547e-02 ± 6.9389e-18
+aoa_mse         : nan ± nan
+mmd             : 1.3193e+00 ± 0.0000e+00
+vendi           : 3.6299e-02 ± 0.0000e+00
+pressure_mse    : nan ± nan

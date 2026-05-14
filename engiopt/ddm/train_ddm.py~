@@ -1,0 +1,237 @@
+import os
+from dataclasses import dataclass
+
+import numpy as np
+import torch
+from torch.utils.data import Dataset, DataLoader
+
+from engiopt.bezier_ae.bezier_ae import BezierAutoencoder
+from engiopt.ddm.ddm import DDM_AoAInit
+from engiopt.ddm.unets import Unet_AoAInit
+from engiopt.ddm import samplers
+from engibench.problems.wings3D.v0 import Wings3D
+
+@dataclass
+class Config:
+    device: str = "cuda" if torch.cuda.is_available() else "cpu"
+
+    # BAE
+    bae_checkpoint: str = "bezier_ae_best.pt"
+    n_control_points: int = 16
+    n_data_points: int = 192
+    bae_batch_size: int = 32
+
+    # DDM / UNet
+    latent_channels: int = 3
+    latent_length: int = 14
+    c_dim: int = 4
+    batch_size: int = 32
+    lr: float = 1e-3
+    n_epochs: int = 100
+    num_diffusion_steps: int = 1000
+
+    # Outputs
+    save_dir: str = "results/ddm"
+    model_name: str = "ddm_aoa_init"
+
+    # Misc
+    seed: int = 0
+    num_workers: int = 0
+
+
+class WingsDDMDataset(Dataset):
+    """
+    Builds DDM training tuples:
+        (z_opt, aoa, params, z_init)
+
+    from the Wings3D dataset, using:
+        - slice 0   as initial wing
+        - slice -1  as final optimized wing
+
+    Expected coords shape per item: [num_slices, 192, 2]
+    """
+
+    def __init__(self, base_dataset, bae_model: BezierAutoencoder, device: str):
+        self.base_dataset = base_dataset
+        self.bae_model = bae_model
+        self.device = device
+
+    def __len__(self):
+        return len(self.base_dataset)
+
+    def __getitem__(self, idx):
+        item = self.base_dataset[idx]
+
+        coords = torch.tensor(item["coords"], dtype=torch.float32)  # [9,192,2]
+
+        x_init = coords[0]     # [192,2]
+        x_opt = coords[-1]     # [192,2]
+
+        # BAE expects [B, 2, 192]
+        x_init = x_init.permute(1, 0).unsqueeze(0)  # [1,2,192]
+        x_opt = x_opt.permute(1, 0).unsqueeze(0)    # [1,2,192]
+
+        with torch.no_grad():
+            z_init = self.bae_model.encode(
+                x_init.to(self.device),
+                return_z=True,
+                z_ae_mode=True
+            )  # [1,3,N]
+
+            z_opt = self.bae_model.encode(
+                x_opt.to(self.device),
+                return_z=True,
+                z_ae_mode=True
+            )  # [1,3,N]
+
+        z_init = z_init.squeeze(0).cpu()   # [3,N]
+        z_opt = z_opt.squeeze(0).cpu()     # [3,N]
+
+        
+        # AoA as scalar tensor
+        aoa = torch.tensor(item["alpha"], dtype=torch.float32)
+        if aoa.ndim == 0:
+            aoa = aoa.unsqueeze(0)  # [1]
+
+        # Conditioning vector expected by DDM UNet: 4 params
+        params = torch.tensor(
+            [
+                item["mach"],
+                item["reynolds"],
+                item["cl_target"],
+                item["area_case_ratio"],
+            ],
+            dtype=torch.float32,
+        )  # [4]
+
+        return z_opt, aoa, params, z_init
+
+
+def load_bae(cfg: Config) -> BezierAutoencoder:
+    model = BezierAutoencoder(
+        n_control_points=cfg.n_control_points,
+        n_data_points=cfg.n_data_points,
+        batch_size=cfg.bae_batch_size,
+        auto_batch=True,
+    ).to(cfg.device)
+
+    ckpt = torch.load(cfg.bae_checkpoint, map_location=cfg.device, weights_only=False)
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.eval()
+
+    for p in model.parameters():
+        p.requires_grad = False
+
+    return model
+
+
+def build_unet(cfg: Config) -> Unet_AoAInit:
+    return Unet_AoAInit(
+        latent_channels=cfg.latent_channels,
+        N_dim=cfg.latent_length,
+        c_dim=cfg.c_dim,
+        down_channels=[32, 64, 128, 256],
+        middle_channel=128,
+        up_channels=[256, 128, 64, 32],
+    ).to(cfg.device)
+
+
+def build_sampler(cfg: Config):
+    sampler = samplers.BaselineSampler_AoA(
+        cfg.num_diffusion_steps,
+        1e-4,
+        0.02,
+        1e-4,
+        0.02,
+    )
+    return sampler
+
+
+def train_one_epoch(ddm_model: DDM_AoAInit, loader: DataLoader, device: str, epoch: int) -> float:
+    ddm_model.unet.train()
+    total_loss = 0.0
+
+    for batch in loader:
+        batch = tuple(t.to(device) for t in batch)
+
+        # Use the model's own update routine so it maintains its stats/timers
+        ddm_model._update_DDM(epoch, batch, device, ddm_model.bae_model)
+        loss_val = ddm_model.stats['current_loss']
+
+        # Track loss history for checkpoint diagnostics
+        ddm_model.stats['train_loss'] = np.append(ddm_model.stats['train_loss'], loss_val)
+        ddm_model.stats['train_loss_epoch'] = np.append(ddm_model.stats['train_loss_epoch'], epoch)
+
+        total_loss += loss_val
+
+    return total_loss / max(len(loader), 1)
+
+
+def main():
+    cfg = Config()
+
+    torch.manual_seed(cfg.seed)
+    os.makedirs(cfg.save_dir, exist_ok=True)
+
+    print(f"Using device: {cfg.device}")
+
+    # 1) Load frozen BAE
+    bae_model = load_bae(cfg)
+    print("Loaded BAE.")
+
+    # 2) Load Wings3D dataset
+    problem = Wings3D(seed=cfg.seed)
+    base_dataset = problem.dataset["train"]
+    print(f"Loaded Wings3D train split with {len(base_dataset)} items.")
+
+    # 3) Build DDM dataset/dataloader
+    ddm_dataset = WingsDDMDataset(
+        base_dataset=base_dataset,
+        bae_model=bae_model,
+        device=cfg.device,
+    )
+
+    ddm_loader = DataLoader(
+        ddm_dataset,
+        batch_size=cfg.batch_size,
+        shuffle=True,
+        num_workers=cfg.num_workers,
+    )
+
+    # 4) Build UNet
+    unet = build_unet(cfg)
+    print("Built UNet.")
+
+    # 5) Build sampler
+    sampler = build_sampler(cfg)
+    print("Built sampler.")
+
+    # 6) Create DDM wrapper
+    ddm_model = DDM_AoAInit(
+        unet=unet,
+        sampler=sampler,
+        bae_model=bae_model,
+        params_mean_std=(0, 1),   # replace later with real training mean/std
+        aoas_mean_std=(0, 1),     # replace later with real training mean/std
+        name=cfg.model_name,
+        opt_lr=cfg.lr,
+    )
+    print("Built DDM model.")
+
+    # 7) Train loop
+    for epoch in range(cfg.n_epochs):
+        train_loss = train_one_epoch(ddm_model, ddm_loader, cfg.device, epoch)
+
+        print(
+            f"Epoch {epoch + 1:03d} | "
+            f"Train Loss {train_loss:.6f}"
+        )
+
+        # save every epoch
+        ddm_model.save(cfg.save_dir)
+
+    print("Training complete.")
+
+
+if __name__ == "__main__":
+    main()

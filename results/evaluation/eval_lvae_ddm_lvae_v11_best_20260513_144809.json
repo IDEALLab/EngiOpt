@@ -1,0 +1,6 @@
+{
+  "checkpoint": "results/ddm_lvae/ddm_lvae_v11_best.pth",
+  "n_test": 94,
+  "n_passes": 0,
+  "results": {}
+}

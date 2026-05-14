@@ -1,0 +1,13 @@
+device: cuda
+total_slices: 17730
+train_size: 15957
+val_size: 1773
+batch_size: 64
+learning_rate: 0.001
+reg_fac: 0.0002
+n_control_points: 32
+n_data_points: 192
+n_epochs: 500
+best_epoch: 453
+best_val_loss: 1.5763061832689056e-05
+best_model_path: results/bezier_ae/run_006/models/bezier_ae_best.pt

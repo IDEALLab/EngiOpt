@@ -1,0 +1,43 @@
+Checkpoint: results/lvae/lae_aoa_init_3d_v5.pth
+Test wings: 117
+Forward passes: 10
+
+── Generation (mean ± std) ──────────────────────────────
+shape_mse       : 0.000050 ± 0.000000
+aoa_mse         : 1.001553 ± 0.000000
+mmd             : 0.104830 ± 0.000000
+vendi           : 1.313076 ± 0.000000
+pressure_mse    : 0.027058 ± 0.000000
+perf_mse        : 0.619146 ± 0.000000
+cd_mse          : 1.236858 ± 0.000000
+cl_mse          : 0.001435 ± 0.000000
+Pressure slice MSE:
+  slice 0: 0.025847
+  slice 1: 0.025386
+  slice 2: 0.024900
+  slice 3: 0.024591
+  slice 4: 0.024864
+  slice 5: 0.025531
+  slice 6: 0.027147
+  slice 7: 0.029754
+  slice 8: 0.035505
+
+── Reconstruction (mean ± std) ──────────────────────────
+rec_shape_mse       : 0.000035 ± 0.000000
+rec_aoa_mse         : 0.422470 ± 0.000000
+rec_mmd             : 0.069214 ± 0.000000
+rec_vendi           : 1.092508 ± 0.000000
+rec_pressure_mse    : 0.015499 ± 0.000000
+rec_perf_mse        : 0.206627 ± 0.000000
+rec_cd_mse          : 0.413065 ± 0.000000
+rec_cl_mse          : 0.000189 ± 0.000000
+Pressure slice MSE:
+  slice 0: 0.015654
+  slice 1: 0.015006
+  slice 2: 0.014203
+  slice 3: 0.013385
+  slice 4: 0.012787
+  slice 5: 0.012654
+  slice 6: 0.014331
+  slice 7: 0.018678
+  slice 8: 0.022795

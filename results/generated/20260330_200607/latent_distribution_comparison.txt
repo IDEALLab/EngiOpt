@@ -1,0 +1,9 @@
+  Slice 0: train=[-0.13,2.00] μ=0.445 σ=0.667  |  gen=[nan,nan] μ=nan σ=nan  |  OOB: 60.1% below, 12.3% above
+  Slice 1: train=[-0.13,2.00] μ=0.445 σ=0.667  |  gen=[nan,nan] μ=nan σ=nan  |  OOB: 57.1% below, 15.1% above
+  Slice 2: train=[-0.13,2.00] μ=0.445 σ=0.667  |  gen=[nan,nan] μ=nan σ=nan  |  OOB: 58.9% below, 12.9% above
+  Slice 3: train=[-0.13,2.00] μ=0.445 σ=0.668  |  gen=[nan,nan] μ=nan σ=nan  |  OOB: 57.6% below, 14.7% above
+  Slice 4: train=[-0.13,2.00] μ=0.444 σ=0.668  |  gen=[nan,nan] μ=nan σ=nan  |  OOB: 57.7% below, 14.2% above
+  Slice 5: train=[-0.13,2.00] μ=0.444 σ=0.668  |  gen=[nan,nan] μ=nan σ=nan  |  OOB: 57.1% below, 14.7% above
+  Slice 6: train=[-0.14,2.00] μ=0.444 σ=0.669  |  gen=[nan,nan] μ=nan σ=nan  |  OOB: 57.2% below, 14.6% above
+  Slice 7: train=[-0.16,2.00] μ=0.444 σ=0.670  |  gen=[nan,nan] μ=nan σ=nan  |  OOB: 57.0% below, 14.7% above
+  Slice 8: train=[-0.15,2.00] μ=0.444 σ=0.670  |  gen=[nan,nan] μ=nan σ=nan  |  OOB: 59.6% below, 12.3% above

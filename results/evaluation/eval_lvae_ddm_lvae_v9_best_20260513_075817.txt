@@ -1,0 +1,9 @@
+Checkpoint : results/ddm_lvae/ddm_lvae_v9_best.pth
+Test wings : 94
+Passes     : 10
+
+shape_mse       : 3.3319e-02 ± 2.7149e-04
+aoa_mse         : 1.2404e+02 ± 3.6417e+02
+mmd             : 3.7114e-01 ± 2.7229e-03
+vendi           : 2.6031e+00 ± 2.9585e-02
+pressure_mse    : 1.4926e+01 ± 4.3922e+01

@@ -1,0 +1,43 @@
+Checkpoint: results/lvae/lae_aoa_init_3d_v1_repro_ep8000.pth
+Test wings: 117
+x0 seed: 0 (matched)
+
+── Generation ───────────────────────────────────────────
+shape_mse       : 0.000029
+aoa_mse         : 1.056556
+mmd             : 0.019544
+vendi           : 0.821276
+pressure_mse    : 0.018914
+perf_mse        : 0.679305
+cd_mse          : 1.357399
+cl_mse          : 0.001212
+Pressure slice MSE:
+  slice 0: 0.021403
+  slice 1: 0.021044
+  slice 2: 0.020704
+  slice 3: 0.020081
+  slice 4: 0.019060
+  slice 5: 0.017587
+  slice 6: 0.016784
+  slice 7: 0.017363
+  slice 8: 0.016198
+
+── Reconstruction ───────────────────────────────────────
+rec_shape_mse       : 0.000012
+rec_aoa_mse         : 0.424406
+rec_mmd             : 0.010166
+rec_vendi           : 0.737811
+rec_pressure_mse    : 0.013577
+rec_perf_mse        : 0.233014
+rec_cd_mse          : 0.465703
+rec_cl_mse          : 0.000325
+Pressure slice MSE:
+  slice 0: 0.014683
+  slice 1: 0.014389
+  slice 2: 0.014168
+  slice 3: 0.013950
+  slice 4: 0.013505
+  slice 5: 0.013087
+  slice 6: 0.012840
+  slice 7: 0.013362
+  slice 8: 0.012213

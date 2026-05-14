@@ -1,0 +1,11 @@
+Checkpoint: results/ddm/ddm_v4hope(50:1).pth
+Test wings: 117
+Forward passes: 10
+Gammas: [0.5, 25, 50, 100]
+Batch size: 32
+
+RESULTS (mean ± std)
+Shape MSE : 1.22e-04 ± 8.34e-07
+AoA MSE   : 0.2121 ± 0.0137
+MMD       : 0.0880 ± 0.0005
+Vendi     : 1.2377 ± 0.0071

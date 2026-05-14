@@ -1,0 +1,932 @@
+"""" 
+    Contains the main class for the DDM model. 
+"""
+import torch
+from torch import nn
+import torch.nn.functional as F
+import os
+import numpy as np
+import time
+from . import plotting
+from torch.utils.data import DataLoader
+from engiopt.data_processing.utils import scaler
+
+class DDM_AoAInit:
+    def __init__(
+        self, unet: nn.Module, sampler, bae_model: nn.Module,
+        params_mean_std = None, aoas_mean_std = None,
+        name: str=None,
+        weights: tuple=(1, 1),
+        apply_reg: bool=False, reg_factor: float=1e-3, reg_exp: float=2, punish_tail_crossing: bool=False,
+        opt_lr: float=1e-3, opt_betas: tuple=(0.5, 0.99), opt_eps: float=1e-8,
+        lr_scheduler: str='None', 
+        ReduceLROnPlateau_mode: str='min', ReduceLROnPlateau_factor: float=0.1, ReduceLROnPlateau_patience: int=10,
+        CosineAnnealingLR_T_max: int=10,
+        CosineAnnealingWarmRestarts_T_0: int=10, CosineAnnealingWarmRestarts_T_mult: int=2,
+        checkpoint: str=None, 
+        train_mode: bool=True,
+        latent_mean = 0.0,
+        latent_std = 1.0,
+        ):
+        super().__init__()
+        self.unet = unet
+        self.sampler = sampler
+        self.bae_model = bae_model
+        self.bae_model.eval()
+        self.name = name
+
+        self.weights = weights
+        self.apply_reg = apply_reg
+        self.reg_factor = reg_factor
+        self.reg_exp = reg_exp
+        self.punish_tail_crossing = punish_tail_crossing
+        self.elapsed_time = 0
+
+        ######
+        self.latent_mean = latent_mean
+        self.latent_std = latent_std
+    #####
+
+        self.stats = self.init_stats()
+        self.params_mean_std = None
+        self.aoas_mean_std = None
+        self.optimizer = torch.optim.Adam(
+            self.unet.parameters(), lr=opt_lr, betas=opt_betas, eps=opt_eps)
+        
+        if lr_scheduler != 'None':
+            if lr_scheduler == 'ReduceLROnPlateau':
+                self.scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(self.optimizer, mode=ReduceLROnPlateau_mode, factor=ReduceLROnPlateau_factor, patience=ReduceLROnPlateau_patience, verbose=True)
+            elif lr_scheduler == 'CosineAnnealingLR':
+                self.scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(self.optimizer, T_max=CosineAnnealingLR_T_max, verbose=True)
+            elif lr_scheduler == 'CosineAnnealingWarmRestarts':
+                self.scheduler = torch.optim.lr_scheduler.CosineAnnealingWarmRestarts(self.optimizer, T_0=CosineAnnealingWarmRestarts_T_0, T_mult=CosineAnnealingWarmRestarts_T_mult, verbose=True)
+            else:
+                raise ValueError('Invalid learning rate scheduler')
+        
+        self.lr_scheduler = lr_scheduler
+
+        if checkpoint:
+            self.load(checkpoint, train_mode)
+
+        if self.params_mean_std is None:
+            if params_mean_std is None:
+                params_mean_std = (0, 1)
+                print('Warning: Using the default (0,1) mean and std for the parameters. Make sure this is what you want.')
+            if aoas_mean_std is None:
+                aoas_mean_std = (0, 1)
+                print('Warning: Using the default (0,1) mean and std for the AoA. Make sure this is what you want.')
+            self.init_scalers(params_mean_std, aoas_mean_std)
+    
+    def init_stats(self):
+        epoch = 0
+        current_loss = 0
+        test_loss = np.array([])
+        train_loss = np.array([])
+        test_loss_epoch = np.array([])
+        test_loss_x = np.array([])
+        test_loss_AoA = np.array([])
+        test_loss_mean_reg = np.array([])
+        train_loss_epoch = np.array([])
+        stats = {'epoch': epoch, 'current_loss': current_loss, 'test_loss': test_loss, 'train_loss': train_loss,
+                'test_loss_x': test_loss_x, 'test_loss_AoA':test_loss_AoA, 'test_loss_mean_reg':test_loss_mean_reg,
+            'test_loss_epoch': test_loss_epoch, 'train_loss_epoch': train_loss_epoch}
+        return stats
+    
+    def get_mean_std(self, mean_std_inp):
+        if isinstance(mean_std_inp, scaler):
+            mean_std_scaler = mean_std_inp
+            mean_std = (mean_std_inp.mean, mean_std_inp.std)
+        else:
+            mean_std_scaler = scaler(mean_std_inp)
+            mean_std = mean_std_inp
+        return mean_std, mean_std_scaler
+    
+    def init_scalers(self, params_mean_std, aoas_mean_std):
+        # Check if they are scaler objects
+        self.params_mean_std, self.scaler_params = self.get_mean_std(params_mean_std)
+        self.aoas_mean_std, self.scaler_aoas = self.get_mean_std(aoas_mean_std)
+    
+    def _train_gen_criterion(self, batch, noise_gen, epoch): return True
+
+    def save(self, save_dir, **kwargs):
+        torch.save({
+            # 'unet': self.unet.state_dict(),
+            'unet': self.unet,
+            'sampler': self.sampler,
+            'bae_model_state_dict': self.bae_model.state_dict(),
+            'optimizer': self.optimizer.state_dict(),
+            'stats': self.stats,
+            'scheduler': self.scheduler.state_dict() if self.lr_scheduler != 'None' else None,
+            'params_mean_std': self.params_mean_std,
+            'aoas_mean_std': self.aoas_mean_std,
+            #####
+            'latent_mean': self.latent_mean,
+            'latent_std': self.latent_std,
+            ####
+            }, os.path.join(save_dir, self.name+'.pth'))
+
+    def load(self, checkpoint, train_mode):
+        ckp = torch.load(checkpoint, weights_only=False, map_location='cpu')        # Print all the keys in the checkpoint
+        print(ckp.keys())
+        # load unet state dict
+        # unet_new = self.unet
+        # unet_new.load_state_dict(ckp['unet'])
+        # self.unet = unet_new
+        bae_model_state_dict = ckp['bae_model_state_dict']
+        self.bae_model.load_state_dict(bae_model_state_dict)
+        self.unet = ckp['unet']
+        # Check if the unet state dict has been loaded correctly
+        if train_mode:  
+            self.unet.train()
+        else:
+            self.unet.eval()
+        if train_mode:
+            self.optimizer.load_state_dict(ckp['optimizer'])
+            if self.lr_scheduler != 'None':
+                self.scheduler.load_state_dict(ckp['scheduler'])
+        self.stats = ckp['stats']
+        try:
+            self.params_mean_std = ckp['params_mean_std']
+            self.aoas_mean_std = ckp['aoas_mean_std']
+            self.init_scalers(self.params_mean_std, self.aoas_mean_std)
+            self.latent_mean = ckp.get('latent_mean', 0.0)
+            self.latent_std = ckp.get('latent_std', 1.0)
+            print(f"Loaded latent stats: mean={self.latent_mean}, std={self.latent_std}")
+        except:
+            print('Warning: Could not load the mean and std scalers from the checkpoint. Make sure to set them manually.')
+        print(f'Loaded model from {checkpoint}')
+
+    def _loss_DDM(self,
+            x_noisy, x_noise, x_noise_pred, 
+            alpha_noise, alpha_noise_pred, t, 
+            return_components=False,
+                ):
+        
+        if self.apply_reg or self.punish_tail_crossing:
+            x_denoised = self.sampler.schedule_x.diffusion_step_sample(x_noise_pred, x_noisy, t, x_noisy.device)
+            x_decoded = self.bae_model.decode_z(x_denoised, z_ae_mode=True, denormalize_output=True,normalized_data=False)[0]
+
+        if self.apply_reg:
+            mean_reg = (torch.norm((x_decoded[:, 1:, 1:] - x_decoded[:, 1:, :-1]), dim=1)*torch.exp(-self.reg_exp*(t.unsqueeze(-1)/self.T))).mean()
+        else:
+            mean_reg = torch.tensor(0.0).to(x_noisy.device)
+        
+        if self.punish_tail_crossing:
+            y_diff = x_decoded[:, 1, 1:int(x_decoded.shape[2]/8)] - torch.flip(x_decoded, [2])[:, 1, 1:int(x_decoded.shape[2]/8)]
+            y_diff_loss = torch.where(y_diff < 0, torch.pow(y_diff,2), torch.zeros_like(y_diff)).mean(axis=1)
+            y_diff_loss = torch.where(t < 0.25*self.sampler.T, y_diff_loss, torch.zeros_like(y_diff_loss)).mean()
+            # print(f'Loss ydiff: {y_diff_loss.item()}')
+            mean_reg += y_diff_loss
+
+        if return_components:
+            # Return the individual components of the loss function
+            loss_x = F.mse_loss(x_noise_pred, x_noise)
+            loss_alpha = F.mse_loss(alpha_noise_pred, alpha_noise)
+            mean_reg = self.reg_factor*mean_reg
+            total_loss = self.weights[0]*loss_x + self.weights[1]*loss_alpha + mean_reg 
+            return total_loss, loss_x, loss_alpha, mean_reg
+        else:
+            total_loss = self.weights[0]*F.mse_loss(x_noise_pred, x_noise) + self.weights[1]*F.mse_loss(alpha_noise_pred, alpha_noise) + self.reg_factor*mean_reg
+            return total_loss
+
+    def loss(self, batch_noised, return_components, **kwargs):
+        x_noisy, x_noise, alpha_noisy, alpha_noise, param_train_b, airfoil_init_train_b, t = batch_noised
+        x_noise_pred, alpha_noise_pred = self.unet(x_noisy, alpha_noisy, param_train_b, airfoil_init_train_b, t)
+        return self._loss_DDM(x_noisy, x_noise, x_noise_pred, alpha_noise, alpha_noise_pred, t, return_components=return_components)
+
+    def t_gen(self, batch_size, device):
+        return torch.randint(0, self.sampler.T, (batch_size,), device=device).long()
+        
+    def _noise_data(self, batch, device, **kwargs):
+        airfoil_train_b, aoa_train_b, param_train_b, airfoil_init_train_b = batch
+
+        # Move the data to the device
+        airfoil_train_b = airfoil_train_b.to(device)
+        aoa_train_b = aoa_train_b.to(device)
+        param_train_b = param_train_b.to(device).float()
+        airfoil_init_train_b = airfoil_init_train_b.to(device)
+
+        current_batch_size = airfoil_train_b.shape[0]
+        t = self.t_gen(current_batch_size, device)
+        t_avg = t.cpu().detach().float().mean()
+        # print(f'Average time: {t_avg.item()}')
+        # Get the noise and the noisy input
+        x_noisy, x_noise = self.sampler.schedule_x.forward_diffusion_sample(airfoil_train_b, t, device)
+        alpha_noisy, alpha_noise = self.sampler.schedule_AoA.forward_diffusion_sample(aoa_train_b, t, device)
+        return x_noisy, x_noise, alpha_noisy, alpha_noise, param_train_b, airfoil_init_train_b, t
+    
+    def _update_DDM(self, epoch, batch, device, bae, **kwargs):
+        start_time = time.time()
+        batch_noised = self._noise_data(batch, device, **kwargs)
+
+        self.optimizer.zero_grad()
+        train_loss = self.loss(batch_noised, return_components=False, **kwargs)
+        train_loss.backward()
+
+        torch.nn.utils.clip_grad_norm_(self.unet.parameters(), max_norm=self.grad_clip)
+
+        self.optimizer.step()
+
+        end_time = time.time()
+        self.elapsed_time += end_time - start_time
+
+        self.stats['current_loss'] = train_loss.item()
+    
+    def _test_stats(self, epoch, dataloader_test, stats_intvl, device,**kwargs):
+
+        self.stats['train_loss'] = np.append(self.stats['train_loss'], self.stats['current_loss'])
+        self.stats['train_loss_epoch'] = np.append(self.stats['train_loss_epoch'], epoch)
+        self.stats['epoch'] = epoch
+
+        if not self.lr_scheduler == 'ReduceLROnPlateau' and not self.lr_scheduler == 'None':
+            self.scheduler.step()
+
+        # save at the end of each epoch
+        if epoch % stats_intvl == 0:
+            self.unet.eval()
+            print(f"Epoch {epoch}, Loss = {self.stats['current_loss']}, Compute Time = {self.elapsed_time:.2f} s")
+            # calculate test loss
+            
+            with torch.no_grad():
+                for j, batch in enumerate(dataloader_test):
+                    batch_noised = self._noise_data(batch, device, **kwargs)
+                    loss, loss_x, loss_AoA, loss_mean_reg = self.loss(batch_noised, return_components=True, **kwargs)                 
+                    self.stats['test_loss'] = np.append(self.stats['test_loss'], loss.item())
+                    self.stats['test_loss_x'] = np.append(self.stats['test_loss_x'], loss_x.item())
+                    self.stats['test_loss_AoA'] = np.append(self.stats['test_loss_AoA'], loss_AoA.item())
+                    self.stats['test_loss_mean_reg'] = np.append(self.stats['test_loss_mean_reg'], loss_mean_reg.item())
+                    self.stats['test_loss_epoch'] = np.append(self.stats['test_loss_epoch'], epoch)
+                    break
+
+            self.unet.train()
+            if self.lr_scheduler == 'ReduceLROnPlateau':
+                self.scheduler.step(loss)        
+
+            print(f"Test Loss: Total = {loss.item()}",", x = ", loss_x.item(), ", AoA = ", loss_AoA.item(), ", Mean Reg = ", loss_mean_reg.item())
+            print(f'Learning rate: {self.optimizer.param_groups[0]["lr"]:.2e}')
+    
+    def _save_hook(self, epoch, epochs, save, save_intvl, save_dir, **kwargs):
+        if save and epoch % save_intvl == 0 or epoch == epochs-1:
+            print(f'Saving model at epoch {epoch}')
+            self.save(save_dir, **kwargs)
+    
+    def _plot_hook(self, 
+                   epoch, dataloader_test, 
+                   save_plots, plot_intvl, save_dir_plots,
+                   scaler_params, scaler_aoas,
+                   device, 
+                   **kwargs
+                   ):
+        if epoch % plot_intvl == 0:
+            self.unet.eval()
+            # pick a random set of parameters from the test set
+            try:
+                idx = kwargs['idx']
+            except:
+                try:
+                    plot_seed = kwargs['plot_seed']
+                except:
+                    plot_seed = 0
+                np.random.seed(plot_seed)
+                idx = np.random.randint(0, len(dataloader_test))
+            batch = next(iter(dataloader_test))
+
+            try:
+                plot_images = kwargs['plot_images']
+            except:
+                plot_images = 3
+
+            try:
+                modeled = kwargs['modeled']
+            except:
+                modeled = False
+            
+            save_path_plots = os.path.join(save_dir_plots, f'epoch_{epoch}')
+            
+            with torch.no_grad():
+                c_rand = batch[2][idx].unsqueeze(0).to(device).float()
+                airfoil_init_rand = batch[3][idx].unsqueeze(0).to(device)
+                c_print = c_rand.cpu().numpy()
+                # scale the parameters back to the original scale
+                c_print = scaler_params.inverse_transform(c_print)
+                print(f'Parameters: Mach = {c_print[0,0]:.2f}, Re = {c_print[0,1]:.2f}, Cl = {c_print[0,2]:.2f}, Area = {c_print[0,3]:.2f}')
+                plotting.sample_plot_image(
+                    self.unet, epoch, self.sampler.sample_timestep, self.bae_model,
+                        num_images=plot_images, T=self.sampler.T, dims=(1,airfoil_init_rand.shape[1],airfoil_init_rand.shape[2]),
+                        save=save_plots, save_path=save_path_plots,
+                        c=c_rand, device=device, alpha_mean_std=(scaler_aoas.mean, scaler_aoas.std),
+                        airfoil_init=airfoil_init_rand,
+                        xlim_dec=[-0.005, 1.005], ylim_dec=[-0.125,0.125],
+                        modeled=modeled
+                        )
+            self.unet.train()
+    
+    def train(self, 
+            dataset_train, dataset_test,
+            device,
+            epochs,
+            save, save_intvl, save_dir,
+            save_plots, plot_intvl,
+            stats_intvl,
+            batch_train='full', 
+            batch_test='full',
+            **kwargs
+            ):
+        
+        #  if save_dir is a list, then get the path
+        if type(save_dir) == list:
+            save_dir = os.path.join(*save_dir)
+        save_dir_plots = os.path.join(save_dir, self.name+'_plots')
+        if save_plots and not os.path.exists(save_dir_plots):
+            os.makedirs(save_dir_plots)
+        
+        if batch_train == 'full':
+            batch_size_train = len(dataset_train)
+        else:
+            batch_size_train = batch_train
+
+        if batch_test == 'full':
+            batch_size_test = len(dataset_test)
+        else:
+            batch_size_test = batch_test
+
+        dataloader_train = DataLoader(dataset_train, batch_size=batch_size_train, shuffle=True)
+
+        # Test loader (full size)
+        dataloader_test = DataLoader(dataset_test, batch_size=batch_size_test, shuffle=False)
+
+        scaler_params = self.scaler_params
+        scaler_aoas = self.scaler_aoas
+
+        for epoch in range(self.stats['epoch'], epochs):
+            for i, batch in enumerate(dataloader_train):
+                self._update_DDM(epoch, batch, device, self.bae_model, **kwargs)
+            self._test_stats(epoch, dataloader_test, stats_intvl, device, **kwargs)
+            self._save_hook(epoch, epochs, save, save_intvl, save_dir, **kwargs)
+            self._plot_hook(epoch, dataloader_test, save_plots, plot_intvl, 
+                            save_dir_plots, scaler_params, scaler_aoas, device, **kwargs)
+        
+    def __call__(self, noise_list, params, encoded_init, output_decoded=False, T=None):
+        """
+        Function to generate the airfoils and AoA from a given starting noise and parameters.
+        Args:
+            @noise_list: list of noise tensors; [Airfoil noise, AoA noise]
+            @params: Scalar parameters tensor
+            @encoded_init: Initial encoded airfoils tensor
+            @output_decoded: If True, return airfoils decoded from latent space (coordinates), and rescale AoA. Else, return the airfoils in the latent space (bezier points) and do not rescale AoA.
+        Returns:
+            @x_pred: Predicted airfoils
+            @alpha_pred: Predicted AoAs
+        """
+
+        noise_x = noise_list[0]
+        noise_alpha = noise_list[1]
+        self.bae_model.to(noise_x.device)
+
+        # TODO: Add different sampling options and skip sampling parameters
+        gen_airfoil, gen_alpha = self.sampler.sample_airfoil(
+                       self.unet,
+                       noise_x, noise_alpha, 
+                       params, encoded_init,
+                       T=T
+                       )
+        
+        if output_decoded:
+            gen_airfoil = self.bae_model.decode_z(gen_airfoil, z_ae_mode=True, denormalize_output=True,normalized_data=False)[0]
+            gen_alpha = self.scaler_aoas.inverse_transform(gen_alpha)
+        
+        return gen_airfoil, gen_alpha
+
+class DDM_AoAInit_3D(DDM_AoAInit):
+    def __init__(self, unet, sampler, bae_model, **kwargs):
+        super().__init__(unet, sampler, bae_model, **kwargs)
+        self.grad_clip = kwargs.get('grad_clip', 1.0)
+        self.T = sampler.T
+
+        self.scheduler = None
+        if 'scheduler' in kwargs:
+            self.scheduler = kwargs['scheduler']
+   
+    def step_scheduler(self):
+        if self.scheduler is not None:
+            self.scheduler.step()
+
+    def _noise_data(self, batch, device, **kwargs):
+        z_opt, aoa_train_b, param_train_b, z_init_train_b = batch
+
+        z_opt          = z_opt.to(device)
+        aoa_train_b    = aoa_train_b.to(device)
+        param_train_b  = param_train_b.to(device).float()
+        z_init_train_b = z_init_train_b.to(device)
+
+        t = self.t_gen(z_opt.shape[0], device)
+
+        x_noisy,     x_noise     = self.sampler.schedule_x.forward_diffusion_sample(z_opt, t, device)
+        alpha_noisy, alpha_noise = self.sampler.schedule_AoA.forward_diffusion_sample(aoa_train_b, t, device)
+
+        return x_noisy, x_noise, alpha_noisy, alpha_noise, param_train_b, z_init_train_b, t
+
+    def _loss_DDM(self,
+            x_noisy, x_noise, x_noise_pred,
+            alpha_noise, alpha_noise_pred,
+            t,
+            return_components=False,
+                ):
+        loss_x     = F.mse_loss(x_noise_pred,     x_noise)
+        loss_alpha = F.mse_loss(alpha_noise_pred, alpha_noise)
+
+        if self.apply_reg:
+            # Estimate x_0 from noisy latent and predicted noise, then decode all
+            # 9 slices to airfoil space and penalise non-smooth shapes.
+            x_denoised = self.sampler.schedule_x.diffusion_step_sample(
+                x_noise_pred, x_noisy, t, x_noisy.device
+            )  # [B, 9, 3, L]
+            B, S = x_denoised.shape[0], x_denoised.shape[1]
+            x_flat = x_denoised.reshape(B * S, x_denoised.shape[2], x_denoised.shape[3])  # [B*9, 3, L]
+            x_decoded = self.bae_model.decode_z(
+                x_flat, z_ae_mode=True, denormalize_output=False, normalized_data=False
+            )[0]  # [B*9, 2, 192]
+            t_rep = t.repeat_interleave(S)  # [B*9]
+            smooth_weight = torch.exp(
+                -self.reg_exp * (t_rep.float() / self.T)
+            ).unsqueeze(-1)  # [B*9, 1]
+            smooth_diff = x_decoded[:, 1:, 1:] - x_decoded[:, 1:, :-1]  # [B*9, 1, 191]
+            smooth_norm = torch.norm(smooth_diff, dim=1)  # [B*9, 191]
+            mean_reg = (smooth_norm * smooth_weight).mean()
+        else:
+            mean_reg = torch.tensor(0.0, device=x_noisy.device)
+
+        w_x, w_alpha = self.weights[0], self.weights[1]
+        total_loss = w_x * loss_x + w_alpha * loss_alpha + self.reg_factor * mean_reg
+
+        if return_components:
+            return total_loss, loss_x, loss_alpha, self.reg_factor * mean_reg
+        return total_loss
+
+    def loss(self, batch_noised, return_components, **kwargs):
+        x_noisy, x_noise, alpha_noisy, alpha_noise, param_train_b, z_init_train_b, t = batch_noised
+        x_noise_pred, alpha_noise_pred = self.unet(
+            x_noisy, alpha_noisy, param_train_b, z_init_train_b, t
+        )
+        return self._loss_DDM(
+            x_noisy, x_noise, x_noise_pred,
+            alpha_noise, alpha_noise_pred,
+            t, return_components=return_components,
+        )
+
+        
+    def _plot_hook(self, 
+                   epoch, dataloader_test, 
+                   save_plots, plot_intvl, save_dir_plots,
+                   scaler_params, scaler_aoas,
+                   device, 
+                   **kwargs
+                   ):
+        if epoch % plot_intvl == 0:
+            self.unet.eval()
+            # pick a random set of parameters from the test set
+            try:
+                idx = kwargs['idx']
+            except:
+                try:
+                    plot_seed = kwargs['plot_seed']
+                except:
+                    plot_seed = 0
+                np.random.seed(plot_seed)
+                idx = np.random.randint(0, len(dataloader_test))
+            batch = next(iter(dataloader_test))
+
+            try:
+                plot_images = kwargs['plot_images']
+            except:
+                plot_images = 3
+
+            try:
+                modeled = kwargs['modeled']
+            except:
+                modeled = False
+            
+            save_path_plots = os.path.join(save_dir_plots, f'epoch_{epoch}')
+            
+            with torch.no_grad():
+                c_rand = batch[2][idx].unsqueeze(0).to(device).float()
+                airfoil_init_rand = batch[3][idx].unsqueeze(0).to(device)
+                c_print = c_rand.cpu().numpy()
+                # scale the parameters back to the original scale
+                c_print = scaler_params.inverse_transform(c_print)
+                print(f'Parameters: Mach = {c_print[0,0]:.2f}, Re = {c_print[0,1]:.2f}, Cl = {c_print[0,2]:.2f}, Area = {c_print[0,3]:.2f}')
+                plotting.sample_plot_image_3D(
+                    self.unet, epoch, self.sampler.sample_timestep, self.bae_model,
+                        num_images=plot_images, T=self.sampler.T, dims=(1,9,airfoil_init_rand.shape[1],airfoil_init_rand.shape[2]),
+                        save=save_plots, save_path=save_path_plots,
+                        c=c_rand, device=device, alpha_mean_std=(scaler_aoas.mean, scaler_aoas.std),
+                        airfoil_init=airfoil_init_rand,
+                        xlim_dec=[-0.005, 1.005], ylim_dec=[-0.125,0.125]
+                        )
+            self.unet.train()
+
+class TrajDiff(DDM_AoAInit):
+    def __init__(self, unet, sampler, bae_model, **kwargs):
+        super().__init__(unet, sampler, bae_model, **kwargs)
+
+    def _loss_DDM(self,
+            x_noisy, x_noise, x_noise_pred, 
+            alpha_noise, alpha_noise_pred, t, 
+            return_components=False,
+                ):
+        
+        if self.apply_reg or self.punish_tail_crossing:
+            x_denoised = self.sampler.schedule_x.diffusion_step_sample(x_noise_pred, x_noisy, t, x_noisy.device)
+            x_decoded = self.bae_model.decode_z(x_denoised, z_ae_mode=True, denormalize_output=True,normalized_data=False)[0]
+
+        if self.apply_reg:
+            mean_reg = (torch.norm((x_decoded[:, 1:, 1:] - x_decoded[:, 1:, :-1]), dim=1)*torch.exp(-self.reg_exp*(t.unsqueeze(-1)/self.T))).mean()
+        else:
+            mean_reg = torch.tensor(0.0).to(x_noisy.device)
+        
+        if self.punish_tail_crossing:
+            y_diff = x_decoded[:, 1, 1:int(x_decoded.shape[2]/8)] - torch.flip(x_decoded, [2])[:, 1, 1:int(x_decoded.shape[2]/8)]
+            y_diff_loss = torch.where(y_diff < 0, torch.pow(y_diff,2), torch.zeros_like(y_diff)).mean(axis=1)
+            y_diff_loss = torch.where(t < 0.25*self.sampler.T, y_diff_loss, torch.zeros_like(y_diff_loss)).mean()
+            # print(f'Loss ydiff: {y_diff_loss.item()}')
+            mean_reg += y_diff_loss
+
+        if return_components:
+            # Return the individual components of the loss function
+            loss_x = F.mse_loss(x_noise_pred, x_noise)
+            loss_alpha = F.mse_loss(alpha_noise_pred, alpha_noise)
+            mean_reg = self.reg_factor*mean_reg
+            total_loss = self.weights[0]*loss_x + self.weights[1]*loss_alpha + mean_reg 
+            return total_loss, loss_x, loss_alpha, mean_reg
+        else:
+            total_loss = self.weights[0]*F.mse_loss(x_noise_pred, x_noise) + self.weights[1]*F.mse_loss(alpha_noise_pred, alpha_noise) + self.reg_factor*mean_reg
+            return total_loss
+
+    def _noise_data(self, batch, device, **kwargs):
+        airfoil_opt_train_b, aoa_train_b, param_train_b, airfoil_init_train_b, airfoil_traj_train_b, pct_train_b, aoa_traj_train_b = batch
+
+        # Move the data to the device
+        airfoil_opt_train_b = airfoil_opt_train_b.to(device)
+        aoa_train_b = aoa_train_b.to(device)
+        param_train_b = param_train_b.to(device).float()
+        airfoil_init_train_b = airfoil_init_train_b.to(device)
+        airfoil_traj_train_b = airfoil_traj_train_b.to(device)
+        pct_train_b = pct_train_b.to(device)
+        aoa_traj_train_b = aoa_traj_train_b.to(device)
+
+        t = (1 - pct_train_b)*(self.sampler.T-1)
+
+        # Round the time to the nearest integer
+        t = t.round().long()
+        # print('batch size:', t.shape[0])
+
+        # t_avg = t.cpu().detach().float().mean()
+        # print(f'Average time: {t_avg.item()}')
+        # Get the noise and the noisy input
+        # x_noisy = airfoil_traj_train_b
+        # x_noise_1 = airfoil_opt_train_b - airfoil_traj_train_b
+
+        # alpha_noisy = aoa_traj_train_b
+        # alpha_noise = aoa_traj_train_b - aoa_train_b
+        x_noisy, x_noise = self.sampler.schedule_x.forward_diffusion_sample(airfoil_traj_train_b, t, device)
+        # x_noisy, x_noise = self.sampler.schedule_x.forward_diffusion_sample(airfoil_traj_train_b, x_noise_1, t, device)
+
+        alpha_noisy, alpha_noise = self.sampler.schedule_AoA.forward_diffusion_sample(aoa_train_b, t, device)
+        return x_noisy, x_noise, alpha_noisy, alpha_noise, param_train_b, airfoil_init_train_b, t
+
+class TrajCorr(DDM_AoAInit):
+    def __init__(self, unet, sampler, bae_model, weight_traj_corr=1, **kwargs):
+        super().__init__(unet, sampler, bae_model, **kwargs)
+        self.weight_traj_corr = weight_traj_corr
+
+    def _plot_hook(self, 
+                   epoch, dataloader_test, 
+                   save_plots, plot_intvl, save_dir_plots,
+                   scaler_params, scaler_aoas,
+                   device, 
+                   **kwargs
+                   ):
+        if epoch % plot_intvl == 0:
+            self.unet.eval()
+            # pick a random set of parameters from the test set
+            try:
+                idx = kwargs['idx']
+            except:
+                try:
+                    plot_seed = kwargs['plot_seed']
+                except:
+                    plot_seed = 0
+                np.random.seed(plot_seed)
+                idx = np.random.randint(0, len(dataloader_test))
+            batch = next(iter(dataloader_test))
+
+            try:
+                plot_images = kwargs['plot_images']
+            except:
+                plot_images = 3
+
+            try:
+                modeled = kwargs['modeled']
+            except:
+                modeled = False
+            
+            save_path_plots = os.path.join(save_dir_plots, f'epoch_{epoch}')
+            
+            with torch.no_grad():
+                c_rand = batch[2][idx].unsqueeze(0).to(device).float()
+                airfoil_init_rand = batch[3][idx].unsqueeze(0).to(device)
+                c_print = c_rand.cpu().numpy()
+                # scale the parameters back to the original scale
+                c_print = scaler_params.inverse_transform(c_print)
+                print(f'Parameters: Mach = {c_print[0,0]:.2f}, Re = {c_print[0,1]:.2f}, Cl = {c_print[0,2]:.2f}, Area = {c_print[0,3]:.2f}')
+                plotting.sample_plot_image(
+                    self.unet, epoch, self.sampler.sample_timestep, self.bae_model,
+                        num_images=plot_images, T=self.sampler.T, dims=(1,airfoil_init_rand.shape[1],airfoil_init_rand.shape[2]),
+                        save=save_plots, save_path=save_path_plots,
+                        c=c_rand, device=device, alpha_mean_std=(scaler_aoas.mean, scaler_aoas.std),
+                        airfoil_init=airfoil_init_rand,
+                        xlim_dec=[-0.005, 1.005], ylim_dec=[-0.125,0.125],
+                        modeled=modeled
+                        )
+            self.unet.train()
+
+    def _loss_DDM(self,
+            x_noisy, x_noise, x_noise_pred, 
+            alpha_noise, alpha_noise_pred, t, 
+            return_components=False,
+                ):
+
+        if self.apply_reg or self.punish_tail_crossing:
+            x_denoised = self.sampler.denoise_sample(x_noise_pred, x_noisy)
+            x_decoded = self.bae_model.decode_z(x_denoised, z_ae_mode=True, denormalize_output=True,normalized_data=False)[0]
+
+        if self.apply_reg:
+            mean_reg = (torch.norm((x_decoded[:, 1:, 1:] - x_decoded[:, 1:, :-1]), dim=1)).mean()
+        else:
+            mean_reg = torch.tensor(0.0).to(x_noisy.device)
+        
+        if self.punish_tail_crossing:
+            y_diff = x_decoded[:, 1, 1:int(x_decoded.shape[2]/8)] - torch.flip(x_decoded, [2])[:, 1, 1:int(x_decoded.shape[2]/8)]
+            y_diff_loss = torch.where(y_diff < 0, torch.pow(y_diff,2), torch.zeros_like(y_diff)).mean(axis=1).mean()
+            # print(f'Loss ydiff: {y_diff_loss.item()}')
+            mean_reg += y_diff_loss
+
+        if return_components:
+            # Return the individual components of the loss function
+            loss_x = F.mse_loss(x_noise_pred, x_noise)
+            loss_alpha = F.mse_loss(alpha_noise_pred, alpha_noise)
+            mean_reg = self.reg_factor*mean_reg
+            total_loss = self.weights[0]*loss_x + self.weights[1]*loss_alpha + mean_reg 
+            return total_loss, loss_x, loss_alpha, mean_reg
+        else:
+            total_loss = self.weights[0]*F.mse_loss(x_noise_pred, x_noise) + self.weights[1]*F.mse_loss(alpha_noise_pred, alpha_noise) + self.reg_factor*mean_reg
+            return total_loss
+
+    def _loss_traj_corr(self, batch_noised, return_components=False, **kwargs):
+        x_noisy, x_noise, alpha_noisy, alpha_noise, param_train_b, airfoil_init_train_b, t, airfoil_opt_train_b, aoa_train_b = batch_noised
+        alpha_opt = aoa_train_b
+        airfoil_opt = airfoil_opt_train_b
+
+        x_pred_opt_noise, alpha_pred_opt_noise = self.unet(airfoil_opt, alpha_opt, param_train_b, airfoil_init_train_b)
+        
+        loss_x = F.mse_loss(x_pred_opt_noise, torch.zeros_like(x_pred_opt_noise))
+        loss_alpha = F.mse_loss(alpha_pred_opt_noise, torch.zeros_like(alpha_pred_opt_noise)) 
+        if return_components:
+            # Return the individual components of the loss function
+
+            return self.weight_traj_corr*(self.weights[0]*loss_x + self.weights[1]*loss_alpha), self.weight_traj_corr*loss_x, self.weight_traj_corr*loss_alpha, torch.tensor(0.0).to(x_noisy.device)
+        else:
+            # predicted noise should be zero
+            return self.weight_traj_corr*(self.weights[0]*loss_x + self.weights[1]*loss_alpha)
+    
+    def loss(self, batch_noised, return_components, **kwargs):
+        x_noisy, x_noise, alpha_noisy, alpha_noise, param_train_b, airfoil_init_train_b, t, airfoil_opt_train_b, aoa_train_b = batch_noised
+        x_noise_pred, alpha_noise_pred = self.unet(x_noisy, alpha_noisy, param_train_b, airfoil_init_train_b)
+        loss_DDM = self._loss_DDM(x_noisy, x_noise, x_noise_pred, alpha_noise, alpha_noise_pred, t, return_components=return_components)
+        loss_traj_corr = self._loss_traj_corr(batch_noised, return_components=return_components)
+        # Add the two losses together accounting for the fact that each may return a tuple
+        if return_components:
+            return (loss_DDM[0] + loss_traj_corr[0], loss_DDM[1] + loss_traj_corr[1], loss_DDM[2] + loss_traj_corr[2], loss_DDM[3] + loss_traj_corr[3])
+        else:
+            return loss_DDM + loss_traj_corr
+
+    def _noise_data(self, batch, device, **kwargs):
+        airfoil_opt_train_b, aoa_train_b, param_train_b, airfoil_init_train_b, airfoil_traj_train_b, pct_train_b, aoa_traj_train_b = batch
+
+        # Move the data to the device
+        airfoil_opt_train_b = airfoil_opt_train_b.to(device)
+        aoa_train_b = aoa_train_b.to(device)
+        param_train_b = param_train_b.to(device).float()
+        airfoil_init_train_b = airfoil_init_train_b.to(device)
+        airfoil_traj_train_b = airfoil_traj_train_b.to(device)
+        pct_train_b = pct_train_b.to(device)
+        aoa_traj_train_b = aoa_traj_train_b.to(device)
+
+        t = (1 - pct_train_b)*(self.sampler.T-1)
+
+        # Round the time to the nearest integer
+        t = t.round().long()
+
+        # Get the noise and the noisy input
+        x_noisy = airfoil_traj_train_b 
+        x_noise = airfoil_traj_train_b - airfoil_opt_train_b 
+
+        alpha_noisy = aoa_traj_train_b 
+        alpha_noise = aoa_traj_train_b - aoa_train_b
+
+        return x_noisy, x_noise, alpha_noisy, alpha_noise, param_train_b, airfoil_init_train_b, t, airfoil_opt_train_b, aoa_train_b,
+
+class TrajCorrPerf(DDM_AoAInit):
+    def __init__(self, unet, sampler, bae_model, weight_traj_corr=1, weight_perf= 1, **kwargs):
+        super().__init__(unet, sampler, bae_model, **kwargs)
+        self.weight_traj_corr = weight_traj_corr
+        self.weight_perf = weight_perf
+    
+    def init_stats(self):
+        epoch = 0
+        current_loss = 0
+        test_loss = np.array([])
+        train_loss = np.array([])
+        test_loss_epoch = np.array([])
+        test_loss_x = np.array([])
+        test_loss_AoA = np.array([])
+        test_loss_mean_reg = np.array([])
+        train_loss_epoch = np.array([])
+        test_loss_perf = np.array([])
+        stats = {'epoch': epoch, 'current_loss': current_loss, 'test_loss': test_loss, 'train_loss': train_loss,
+                'test_loss_x': test_loss_x, 'test_loss_AoA':test_loss_AoA, 'test_loss_mean_reg':test_loss_mean_reg,
+            'test_loss_epoch': test_loss_epoch, 'train_loss_epoch': train_loss_epoch, 'test_loss_perf': test_loss_perf}
+        return stats 
+
+    def _test_stats(self, epoch, dataloader_test, stats_intvl, device,**kwargs):
+
+        self.stats['train_loss'] = np.append(self.stats['train_loss'], self.stats['current_loss'])
+        self.stats['train_loss_epoch'] = np.append(self.stats['train_loss_epoch'], epoch)
+        self.stats['epoch'] = epoch
+
+        if not self.lr_scheduler == 'ReduceLROnPlateau' and not self.lr_scheduler == 'None':
+            self.scheduler.step()
+
+        # save at the end of each epoch
+        if epoch % stats_intvl == 0:
+            self.unet.eval()
+            print(f"Epoch {epoch}, Loss = {self.stats['current_loss']}, Compute Time = {self.elapsed_time:.2f} s")
+            # calculate test loss
+            
+            with torch.no_grad():
+                for j, batch in enumerate(dataloader_test):
+                    batch_noised = self._noise_data(batch, device, **kwargs)
+                    loss, loss_x, loss_AoA, loss_mean_reg, loss_perf = self.loss(batch_noised, return_components=True, **kwargs)                 
+                    self.stats['test_loss'] = np.append(self.stats['test_loss'], loss.item())
+                    self.stats['test_loss_x'] = np.append(self.stats['test_loss_x'], loss_x.item())
+                    self.stats['test_loss_AoA'] = np.append(self.stats['test_loss_AoA'], loss_AoA.item())
+                    self.stats['test_loss_mean_reg'] = np.append(self.stats['test_loss_mean_reg'], loss_mean_reg.item())
+                    self.stats['test_loss_epoch'] = np.append(self.stats['test_loss_epoch'], epoch)
+                    self.stats['test_loss_perf'] = np.append(self.stats['test_loss_perf'], loss_perf.item())
+                    break
+
+            self.unet.train()
+            if self.lr_scheduler == 'ReduceLROnPlateau':
+                self.scheduler.step(loss)        
+
+            print(f"Test Loss: Total = {loss.item()}",", x = ", loss_x.item(), ", AoA = ", loss_AoA.item(), ", Mean Reg = ", loss_mean_reg.item())
+            print(f'Learning rate: {self.optimizer.param_groups[0]["lr"]:.2e}')
+
+    def _plot_hook(self, 
+                   epoch, dataloader_test, 
+                   save_plots, plot_intvl, save_dir_plots,
+                   scaler_params, scaler_aoas,
+                   device, 
+                   **kwargs
+                   ):
+        if epoch % plot_intvl == 0:
+            self.unet.eval()
+            # pick a random set of parameters from the test set
+            try:
+                idx = kwargs['idx']
+            except:
+                try:
+                    plot_seed = kwargs['plot_seed']
+                except:
+                    plot_seed = 0
+                np.random.seed(plot_seed)
+                idx = np.random.randint(0, len(dataloader_test))
+            batch = next(iter(dataloader_test))
+
+            try:
+                plot_images = kwargs['plot_images']
+            except:
+                plot_images = 3
+
+            try:
+                modeled = kwargs['modeled']
+            except:
+                modeled = False
+            
+            save_path_plots = os.path.join(save_dir_plots, f'epoch_{epoch}')
+            
+            with torch.no_grad():
+                c_rand = batch[2][idx].unsqueeze(0).to(device).float()
+                airfoil_init_rand = batch[3][idx].unsqueeze(0).to(device)
+                c_print = c_rand.cpu().numpy()
+                # scale the parameters back to the original scale
+                c_print = scaler_params.inverse_transform(c_print)
+                print(f'Parameters: Mach = {c_print[0,0]:.2f}, Re = {c_print[0,1]:.2f}, Cl = {c_print[0,2]:.2f}, Area = {c_print[0,3]:.2f}')
+                plotting.sample_plot_image(
+                    self.unet, epoch, self.sampler.sample_timestep, self.bae_model,
+                        num_images=plot_images, T=self.sampler.T, dims=(1,airfoil_init_rand.shape[1],airfoil_init_rand.shape[2]),
+                        save=save_plots, save_path=save_path_plots,
+                        c=c_rand, device=device, alpha_mean_std=(scaler_aoas.mean, scaler_aoas.std),
+                        airfoil_init=airfoil_init_rand,
+                        xlim_dec=[-0.005, 1.005], ylim_dec=[-0.125,0.125],
+                        modeled=modeled
+                        )
+            self.unet.train()
+
+    def _loss_DDM(self,
+            x_noisy, x_noise, x_noise_pred, 
+            alpha_noise, alpha_noise_pred, t, 
+            return_components=False,
+                ):
+
+        if self.apply_reg or self.punish_tail_crossing:
+            x_denoised = self.sampler.denoise_sample(x_noise_pred, x_noisy)
+            x_decoded = self.bae_model.decode_z(x_denoised, z_ae_mode=True, denormalize_output=True,normalized_data=False)[0]
+
+        if self.apply_reg:
+            mean_reg = (torch.norm((x_decoded[:, 1:, 1:] - x_decoded[:, 1:, :-1]), dim=1)).mean()
+        else:
+            mean_reg = torch.tensor(0.0).to(x_noisy.device)
+        
+        if self.punish_tail_crossing:
+            y_diff = x_decoded[:, 1, 1:int(x_decoded.shape[2]/8)] - torch.flip(x_decoded, [2])[:, 1, 1:int(x_decoded.shape[2]/8)]
+            y_diff_loss = torch.where(y_diff < 0, torch.pow(y_diff,2), torch.zeros_like(y_diff)).mean(axis=1).mean()
+            # print(f'Loss ydiff: {y_diff_loss.item()}')
+            mean_reg += y_diff_loss
+
+        if return_components:
+            # Return the individual components of the loss function
+            loss_x = F.mse_loss(x_noise_pred, x_noise)
+            loss_alpha = F.mse_loss(alpha_noise_pred, alpha_noise)
+            mean_reg = self.reg_factor*mean_reg
+            total_loss = self.weights[0]*loss_x + self.weights[1]*loss_alpha + self.reg_factor*mean_reg 
+            return total_loss, loss_x, loss_alpha, mean_reg
+        else:
+            total_loss = self.weights[0]*F.mse_loss(x_noise_pred, x_noise) + self.weights[1]*F.mse_loss(alpha_noise_pred, alpha_noise) + self.reg_factor*mean_reg
+            return total_loss
+
+    def _loss_traj_corr(self, batch_noised, return_components=False, **kwargs):
+        x_noisy, x_noise, alpha_noisy, alpha_noise, param_train_b, airfoil_init_train_b, t, airfoil_opt_train_b, aoa_train_b, perf_train_b = batch_noised
+        alpha_opt = aoa_train_b
+        airfoil_opt = airfoil_opt_train_b
+
+        x_pred_opt_noise, alpha_pred_opt_noise, _ = self.unet(airfoil_opt, alpha_opt, param_train_b, airfoil_init_train_b)
+        
+        loss_x = F.mse_loss(x_pred_opt_noise, torch.zeros_like(x_pred_opt_noise))
+        loss_alpha = F.mse_loss(alpha_pred_opt_noise, torch.zeros_like(alpha_pred_opt_noise)) 
+        if return_components:
+            # Return the individual components of the loss function
+
+            return self.weight_traj_corr*(self.weights[0]*loss_x + self.weights[1]*loss_alpha), self.weight_traj_corr*loss_x, self.weight_traj_corr*loss_alpha, torch.tensor(0.0).to(x_noisy.device)
+        else:
+            # predicted noise should be zero
+            return self.weight_traj_corr*(self.weights[0]*loss_x + self.weights[1]*loss_alpha)
+    
+    def loss(self, batch_noised, return_components, **kwargs):
+        x_noisy, x_noise, alpha_noisy, alpha_noise, param_train_b, airfoil_init_train_b, t, airfoil_opt_train_b, aoa_train_b, perf_train_b = batch_noised
+        x_noise_pred, alpha_noise_pred, perf_pred = self.unet(x_noisy, alpha_noisy, param_train_b, airfoil_init_train_b)
+        loss_DDM = self._loss_DDM(x_noisy, x_noise, x_noise_pred, alpha_noise, alpha_noise_pred, t, return_components=return_components)
+        loss_traj_corr = self._loss_traj_corr(batch_noised, return_components=return_components)
+        loss_perf = F.mse_loss(perf_pred, perf_train_b)
+        # Add the two losses together accounting for the fact that each may return a tuple
+        if return_components:
+            return (loss_DDM[0] + loss_traj_corr[0] + loss_perf*self.weight_perf, loss_DDM[1] + loss_traj_corr[1], loss_DDM[2] + loss_traj_corr[2], loss_DDM[3] + loss_traj_corr[3], loss_perf)
+        else:
+            return loss_DDM + loss_traj_corr + loss_perf*self.weight_perf
+
+    def _noise_data(self, batch, device, **kwargs):
+        airfoil_opt_train_b, aoa_train_b, param_train_b, airfoil_init_train_b, airfoil_traj_train_b, pct_train_b, aoa_traj_train_b, perf_train_b = batch
+
+        # Move the data to the device
+        airfoil_opt_train_b = airfoil_opt_train_b.to(device)
+        aoa_train_b = aoa_train_b.to(device)
+        param_train_b = param_train_b.to(device).float()
+        airfoil_init_train_b = airfoil_init_train_b.to(device)
+        airfoil_traj_train_b = airfoil_traj_train_b.to(device)
+        pct_train_b = pct_train_b.to(device)
+        aoa_traj_train_b = aoa_traj_train_b.to(device)
+        perf_train_b = perf_train_b.to(device)
+
+        t = (1 - pct_train_b)*(self.sampler.T-1)
+
+        # Round the time to the nearest integer
+        t = t.round().long()
+
+        # Get the noise and the noisy input
+        x_noisy = airfoil_traj_train_b 
+        x_noise = airfoil_traj_train_b - airfoil_opt_train_b 
+
+        alpha_noisy = aoa_traj_train_b 
+        alpha_noise = aoa_traj_train_b - aoa_train_b
+
+        return x_noisy, x_noise, alpha_noisy, alpha_noise, param_train_b, airfoil_init_train_b, t, airfoil_opt_train_b, aoa_train_b, perf_train_b

@@ -1,0 +1,4 @@
+Checkpoint : results/ddm_lvae/ddm_lvae_v12_best.pth
+Test wings : 94
+Passes     : 0
+

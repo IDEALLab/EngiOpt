@@ -1,0 +1,40 @@
+Many modules are hidden in this stack. Use "module --show_hidden spider SOFTWARE" if you are not able to find the required software
+Using device: cuda
+Loaded BAE.
+Using the latest cached version of the dataset since Cashen/optiwing3d_engibench couldn't be found on the Hugging Face Hub (offline mode is enabled).
+Found the latest cached dataset configuration 'default' at /cluster/scratch/adelbeke/hf_datasets/Cashen___optiwing3d_engibench/default/0.0.0/898b8cab74f6dff3f3ed60cfe6066e7f15a912fc (last modified on Wed Mar 18 13:25:32 2026).
+Loaded Wings3D train split with 1622 items.
+latent_channels_full =  latent_channels +  c_dim_latent +  x_dim_add +  alpha_dim
+23  =  3 + 16 + 3 + 1
+down_channels[0] =  32
+Built UNet.
+Built sampler.
+Built DDM model.
+Epoch 001 | Train Loss 58433.061096
+Epoch 002 | Train Loss 3555.707272
+Epoch 003 | Train Loss 39.955195
+Epoch 004 | Train Loss 3026.497037
+Epoch 005 | Train Loss 7053.763113
+Epoch 006 | Train Loss 3.271672
+Epoch 007 | Train Loss 3894.240468
+Epoch 008 | Train Loss 2300.323241
+Epoch 009 | Train Loss 1866.875067
+Epoch 010 | Train Loss 1412.057002
+Epoch 011 | Train Loss 1731.770147
+Epoch 012 | Train Loss 1682.237590
+Epoch 013 | Train Loss 1737.283661
+Epoch 014 | Train Loss 3253.633826
+Epoch 015 | Train Loss 2.865999
+Epoch 016 | Train Loss 1131.361988
+Epoch 017 | Train Loss 17.694930
+Epoch 018 | Train Loss 1714.583545
+Epoch 019 | Train Loss 12.386272
+Epoch 020 | Train Loss 2288.913112
+Epoch 021 | Train Loss 3.301012
+Epoch 022 | Train Loss 326.438512
+Epoch 023 | Train Loss 523.183076
+Epoch 024 | Train Loss 515.006292
+Epoch 025 | Train Loss 250.809837
+Epoch 026 | Train Loss 858.971348
+Epoch 027 | Train Loss 18.114920
+[2026-03-18T15:58:46.972+01:00] error: *** JOB 60742953 ON eu-lo-g2-026 CANCELLED AT 2026-03-18T15:58:46 DUE to SIGNAL Terminated ***

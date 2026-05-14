@@ -1,0 +1,11 @@
+Checkpoint: results/ddm/ddm_aoa_init_3d_final.pth
+Test wings: 350
+Forward passes: 10
+Gammas: [0.5, 25, 50, 100]
+Batch size: 64
+
+RESULTS (mean ± std)
+Shape MSE : 1.04e+01 ± 9.24e+00
+AoA MSE   : 8.5988 ± 0.4975
+MMD       : 0.1547 ± 0.0000
+Vendi     : 2.1120 ± 0.0000
