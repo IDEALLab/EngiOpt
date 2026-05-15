@@ -17,4 +17,4 @@ python -u -m engiopt.ddm.ddm_lvae.evaluate_ddm_lvae \
     --checkpoint results/ddm_lvae/ddm_lvae_v11_best.pth \
     --n_passes 10 \
     --seed 0 \
-    --T 1000
+    --T 980

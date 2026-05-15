@@ -194,7 +194,7 @@ def precompute_latents(base_dataset, bae_model, device):
     return (
         torch.stack(z_opts_list),     # [N, 9, latent_channels, latent_length]
         torch.stack(aoas_list),       # [N, 1]
-        torch.stack(params_list),     # [N, 4]
+        torch.stack(params_list),     # [N, 4+34]
         torch.stack(eta_ys_list),     # [N, 9, 1]
         torch.stack(pressures_list),  # [N, 9, 192]
         torch.stack(perfs_list),      # [N, 2]
@@ -352,6 +352,8 @@ def ensure_perf_regressor_fitted(
     z_opts, aoas, params_all, eta_ys, pressures, perfs = precompute_latents(
         base_dataset, lae_model.bae_model, cfg.device
     )
+    c_dim = len(lae_model.scaler_params.mean)
+    params_all = params_all[:, :c_dim]
     dataset = PrecomputedWingsDataset(
         z_opts, aoas, params_all, eta_ys, pressures, perfs,
         scaler_params=lae_model.scaler_params,

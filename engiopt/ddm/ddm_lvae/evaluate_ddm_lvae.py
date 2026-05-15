@@ -202,12 +202,14 @@ def generate_batch(ddm_model, bae_model, encoded_inits_batch, params_batch, devi
 # ---------------------------------------------------------------------------
 
 def precompute_test(test_dataset, initial_by_case, bae_model, ddm_model, device):
-    """Returns gt_coords, gt_aoas, gt_pressures, encoded_inits, params_scaled."""
+    """Returns gt_coords, gt_aoas, gt_pressures, encoded_inits, params_scaled, etas, te_shifts_list."""
     gt_coords_list    = []
     gt_aoas_list      = []
     gt_pressures_list = []
     encoded_inits     = []
     params_list       = []
+    etas_list         = []
+    te_shifts_list    = []
 
     lat_mean = ddm_model.latent_mean
     lat_std  = ddm_model.latent_std
@@ -259,7 +261,13 @@ def precompute_test(test_dataset, initial_by_case, bae_model, ddm_model, device)
             continue
 
         flow_params = [item["mach"], item["reynolds"], item["cl_target"], item["area_case_ratio"]]
-        geo_params  = item["geo_params"].tolist() if "geo_params" in item else []
+        # Use only as many params as the model's scaler was trained on (4 for flow-only
+        # models, 38 for models conditioned on geo params as well).
+        n_params = ddm_model.scaler_params.mean.shape[0]
+        if n_params > 4:
+            geo_params = item["geo_params"].tolist() if "geo_params" in item else []
+        else:
+            geo_params = []
         params = torch.tensor(
             flow_params + geo_params,
             dtype=torch.float32,
@@ -269,12 +277,14 @@ def precompute_test(test_dataset, initial_by_case, bae_model, ddm_model, device)
         gt_aoas_list.append(float(item["alpha"]))
         encoded_inits.append(z_init)
         params_list.append(params_scaled)
+        etas_list.append(item["transforms"].copy())  # [S] span positions η ∈ [0, 1]
+        te_shifts_list.append(te_shifts)             # [S] TE y-offsets for this wing
 
     gt_coords    = torch.stack(gt_coords_list)    # [N, S, 2, 192]
     gt_pressures = torch.stack(gt_pressures_list) # [N, S, 192]
     gt_aoas      = torch.tensor(gt_aoas_list)
 
-    return gt_coords, gt_aoas, gt_pressures, encoded_inits, params_list
+    return gt_coords, gt_aoas, gt_pressures, encoded_inits, params_list, etas_list, te_shifts_list
 
 
 # ---------------------------------------------------------------------------
@@ -344,7 +354,7 @@ def main():
 
     # Pre-compute ground truth
     print("Pre-computing ground truth...")
-    gt_coords, gt_aoas, gt_pressures, encoded_inits, params_list = precompute_test(
+    gt_coords, gt_aoas, gt_pressures, encoded_inits, params_list, _, _ = precompute_test(
         test_dataset, initial_by_case, bae_model, ddm_model, device
     )
     n_test = gt_coords.shape[0]

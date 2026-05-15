@@ -1,0 +1,24 @@
+{
+  "checkpoint": "results/ddm_newdata/ddm_newdata_v1.pth",
+  "n_samples": null,
+  "seed": null,
+  "n_test": 117,
+  "results": {
+    "shape_mse": {
+      "mean": 0.000877604741577266,
+      "std": 0.00013531735471255905
+    },
+    "aoa_mse": {
+      "mean": 3.105873870849609,
+      "std": 0.27320497542764516
+    },
+    "mmd": {
+      "mean": 0.08853411187107364,
+      "std": 0.00416150398272543
+    },
+    "vendi": {
+      "mean": 1.675242966695746,
+      "std": 0.02360470716033529
+    }
+  }
+}

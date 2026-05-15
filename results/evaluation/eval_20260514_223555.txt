@@ -1,0 +1,11 @@
+Checkpoint: results/ddm_newdata/ddm_newdata_v1.pth
+Test wings: 94
+Forward passes: 10
+Gammas: [0.5, 25, 50, 100]
+Batch size: 32
+
+RESULTS (mean ± std)
+Shape MSE : 5.66e-04 ± 7.97e-05
+AoA MSE   : 1.5375 ± 0.2072
+MMD       : 0.0444 ± 0.0023
+Vendi     : 1.5997 ± 0.0129

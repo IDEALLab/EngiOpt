@@ -62,7 +62,7 @@ class Config:
     w_dim: int = 15             # spanwise slices in the new dataset
     latent_channels: int = 3
     latent_length: int = 30
-    c_dim: int = 38             # DDM conditions on all params [4 flow + 34 geo]
+    c_dim: int = 4              # DDM conditions on flow params only [mach, reynolds, cl_target, area_ratio]
     batch_size: int = 32
     lr: float = 1e-3
     n_epochs: int = 20000
@@ -158,7 +158,7 @@ def precompute_latents_and_pressure(base_dataset, initial_by_case, bae_model, de
     -------
     z_opts    : [N, w_dim, 3, L]
     aoas      : [N, 1]
-    params    : [N, 38]  — full params [4 flow + 34 geo] (matches LVAE condition)
+    params    : [N, 4]   — flow params only [mach, reynolds, cl_target, area_ratio]
     z_inits   : [N, 3, L]
     pressures : [N, w_dim, 192]
     """
@@ -225,11 +225,10 @@ def precompute_latents_and_pressure(base_dataset, initial_by_case, bae_model, de
                 aoa = aoa.unsqueeze(0)
             aoas_list.append(aoa)
 
-            # Full 38-dim condition vector [4 flow + 34 geo] — matches LVAE
+            # 4-dim flow condition vector only — geo params are outputs, not inputs
             flow_params = [item["mach"], item["reynolds"],
                            item["cl_target"], item["area_case_ratio"]]
-            geo_params  = item["geo_params"].tolist()   # list of 34 floats
-            params_list.append(torch.tensor(flow_params + geo_params, dtype=torch.float32))
+            params_list.append(torch.tensor(flow_params, dtype=torch.float32))
 
             pressure = torch.tensor(
                 np.array(item["coef_pressure"]), dtype=torch.float32
@@ -441,6 +440,8 @@ def parse_args():
                         help="UNet down-channel widths, e.g. --unet_channels 64 64 128 256. "
                              "up-channels and middle are derived automatically. "
                              "Default: 32 64 128 256.")
+    parser.add_argument("--n_epochs", type=int, default=None,
+                        help="Number of training epochs (default: 20000).")
     parser.add_argument("--wandb", action="store_true",
                         help="Enable Weights & Biases logging.")
     parser.add_argument("--wandb_project", type=str, default="engiopt-lvae-ddm",
@@ -464,6 +465,8 @@ def main():
     cfg.smooth_reg_exp        = args.smooth_reg_exp
     if args.unet_channels is not None:
         cfg.unet_channels = tuple(args.unet_channels)
+    if args.n_epochs is not None:
+        cfg.n_epochs = args.n_epochs
 
     if args.model_name is not None:
         cfg.model_name = args.model_name
@@ -510,10 +513,9 @@ def main():
           f"{len(initial_by_case)} initial cases.")
     print(f"Val split  : {len(val_dataset)} final items.")
 
-    # 4. Normalisation stats — full 38-dim params [4 flow + 34 geo]
+    # 4. Normalisation stats — 4 flow params only
     all_params = np.array([
         [item["mach"], item["reynolds"], item["cl_target"], item["area_case_ratio"]]
-        + item["geo_params"].tolist()
         for item in base_dataset
     ])
     all_aoas = np.array([float(item["alpha"]) for item in base_dataset])

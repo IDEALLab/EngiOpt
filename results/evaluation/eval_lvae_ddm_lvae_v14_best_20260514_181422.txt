@@ -1,0 +1,9 @@
+Checkpoint : results/ddm_lvae/ddm_lvae_v14_best.pth
+Test wings : 94
+Passes     : 10
+
+shape_mse       : median 6.5266e-04  |  mean 6.5074e-04 ± 1.0215e-05
+aoa_mse         : median 6.0915e-01  |  mean 6.0815e-01 ± 8.7392e-02
+mmd             : median 1.0113e-01  |  mean 1.0142e-01 ± 1.1804e-03
+vendi           : median 2.3192e+00  |  mean 2.3148e+00 ± 1.7665e-02
+pressure_mse    : median 2.1650e-01  |  mean 2.1718e-01 ± 2.9504e-03

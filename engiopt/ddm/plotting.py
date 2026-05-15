@@ -284,12 +284,17 @@ def wing_3D_shape_plot(wing, cpw_mode=False, wing_len=2.25, ax=None, alpha=1.0, 
     ax.set_xlabel('x')
     ax.set_ylabel('z (span)')
     ax.set_zlabel('y')
+    all_y = np.concatenate([np.concatenate(upper_surfaces_y), np.concatenate(lower_surfaces_y)])
+    y_margin = 0.05
+    z_lo = float(np.nanmin(all_y)) - y_margin
+    z_hi = float(np.nanmax(all_y)) + y_margin
+    if not (np.isfinite(z_lo) and np.isfinite(z_hi)):
+        z_lo, z_hi = -0.3, 0.3
     ax.set_xlim(-0.1, 1.1)
     ax.set_ylim(0, wing_len)
-    ax.set_zlim(-0.3, 0.3)
-
-    # Set aspect ratio
-    ax.set_box_aspect([1.2, 1, 0.6])
+    ax.set_zlim(z_lo, z_hi)
+    ax.set_box_aspect([1.2, 1, max(0.3, (z_hi - z_lo) / 1.2)])
+    ax.view_init(elev=15, azim=-60)
 
     return ax
 
@@ -388,8 +393,16 @@ def wing_3D_pressure_plot(wing, pressure, ax=None, wing_len=2.25, alpha=1.0,
     plt.colorbar(sm, ax=ax, shrink=0.5, pad=0.1, label='Cp')
 
     ax.set_xlabel('x'); ax.set_ylabel('z (span)'); ax.set_zlabel('y')
-    ax.set_xlim(-0.1, 1.1); ax.set_ylim(0, wing_len); ax.set_zlim(-0.3, 0.3)
-    ax.set_box_aspect([1.2, 1, 0.6])
+    all_y = np.concatenate([UY.ravel(), LY.ravel()])
+    y_margin = 0.05
+    z_lo = float(np.nanmin(all_y)) - y_margin
+    z_hi = float(np.nanmax(all_y)) + y_margin
+    if not (np.isfinite(z_lo) and np.isfinite(z_hi)):
+        z_lo, z_hi = -0.3, 0.3
+    ax.set_xlim(-0.1, 1.1); ax.set_ylim(0, wing_len)
+    ax.set_zlim(z_lo, z_hi)
+    ax.set_box_aspect([1.2, 1, max(0.3, (z_hi - z_lo) / 1.2)])
+    ax.view_init(elev=15, azim=-60)
     return ax
 
 

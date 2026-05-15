@@ -33,6 +33,7 @@ class Config:
     latent_channels: int = 3     # BAE latent channels per slice
     latent_length: int = 30
     c_dim: int = 4
+    unet_channels: list = None   # set in main() from --unet_channels arg
     batch_size: int = 32
     lr: float = 1e-3
     n_epochs: int = 20000
@@ -194,17 +195,21 @@ def load_bae(cfg: Config) -> BezierAutoencoder:
 
 
 def build_unet(cfg: Config) -> Unet_AoAInit3D:
+    down_ch = cfg.unet_channels
+    mid_ch  = down_ch[-1] // 2
+    up_ch   = list(reversed(down_ch))
+    n_norms = len(down_ch) - 1
     return Unet_AoAInit3D(
         w_dim=cfg.w_dim,
         x_latent_channels_2D=cfg.latent_channels,
         N_dim=cfg.latent_length,
         tform_dim=3,
         c_dim=cfg.c_dim,
-        down_channels=[32, 64, 128, 256],
-        middle_channel=128,
-        up_channels=[256, 128, 64, 32],
+        down_channels=down_ch,
+        middle_channel=mid_ch,
+        up_channels=up_ch,
         upsampling_factor=2,
-        block_norms=[True, True, True],
+        block_norms=[True] * n_norms,
         droput=False,
     ).to(cfg.device)
 
@@ -252,6 +257,11 @@ def parse_args():
                         help="Number of training samples to use (default: all)")
     parser.add_argument("--seed", type=int, default=0,
                         help="Random seed (default: 0)")
+    parser.add_argument("--model_name", type=str, default=None,
+                        help="Override model name (default: ddm_newdata_v1)")
+    parser.add_argument("--unet_channels", type=int, nargs="+",
+                        default=[64, 64, 128, 256],
+                        help="UNet down-channel sizes (default: 64 64 128 256)")
     return parser.parse_args()
 
 
@@ -259,6 +269,11 @@ def main():
     args = parse_args()
     cfg = Config()
     cfg.seed = args.seed
+    cfg.unet_channels = args.unet_channels
+
+    if args.model_name is not None:
+        cfg.model_name = args.model_name
+        cfg.save_dir   = f"results/ddm_newdata"
 
     # Set model name and save dir based on ablation args
     if args.n_samples is not None:
