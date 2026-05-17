@@ -11,12 +11,12 @@ import numpy as np
 import pandas as pd
 import torch as th
 import tyro
+import wandb
 
 from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.diffusion_2d_cond.diffusion_2d_cond import beta_schedule
 from engiopt.diffusion_2d_cond.diffusion_2d_cond import DiffusionSampler
-import wandb
 
 
 @dataclasses.dataclass

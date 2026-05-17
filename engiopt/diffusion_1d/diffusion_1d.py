@@ -48,6 +48,12 @@ class Normalizer:
         return x * (self.max_val - self.min_val + self.eps) + self.min_val
 
 
+def _prepare_diffusion_batch(designs: th.Tensor, design_normalizer: Normalizer) -> th.Tensor:
+    """Normalize designs and add the channel dimension expected by GaussianDiffusion1D."""
+    designs = design_normalizer.normalize(designs)
+    return designs.view(designs.size(0), 1, -1)
+
+
 def prepare_data(problem: Problem, padding_size: int, device: th.device) -> tuple[th.utils.data.TensorDataset, Normalizer]:
     """Prepares the data for the generator and discriminator.
 
@@ -182,7 +188,7 @@ if __name__ == "__main__":
     diffusion = GaussianDiffusion1D(
         model,
         seq_length=np.prod(design_shape),
-        auto_normalize=True,
+        auto_normalize=args.auto_norm,
     ).to(device)
 
     # Configure data loader
@@ -206,9 +212,7 @@ if __name__ == "__main__":
         for i, data in enumerate(dataloader):
             designs = data[0]
 
-            designs_flat = designs.view(designs.size(0), 1, -1)  # flattens designs to a batch of 1D tensors with 1 channel
-            # Normalize the designs
-            designs = design_normalizer.normalize(designs)
+            designs_flat = _prepare_diffusion_batch(designs, design_normalizer)
 
             # Learning
             optimizer.zero_grad()

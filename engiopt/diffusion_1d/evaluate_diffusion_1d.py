@@ -13,11 +13,11 @@ import numpy as np
 import pandas as pd
 import torch as th
 import tyro
+import wandb
 
 from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.diffusion_1d.diffusion_1d import prepare_data
-import wandb
 
 
 @dataclasses.dataclass
@@ -113,7 +113,7 @@ if __name__ == "__main__":
     diffusion = GaussianDiffusion1D(
         model,
         seq_length=np.prod(design_shape),
-        auto_normalize=True,
+        auto_normalize=run.config.get("auto_norm", True),
     ).to(device)
 
     diffusion.load_state_dict(ckpt["model"])
