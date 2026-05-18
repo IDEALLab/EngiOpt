@@ -68,7 +68,7 @@ class Args:
     sample_interval: int = 400
     """interval between image samples"""
 
-    num_timesteps: int = 250
+    num_timesteps: int = 1000
     """Number of timesteps in the diffusion schedule"""
     layers_per_block: int = 2
     """Layers per U-NET block"""
@@ -186,9 +186,12 @@ class DiffusionSampler:
         noise_pred: th.Tensor,
         x_noisy: th.Tensor,
         t: th.Tensor,
-        device: th.device = th.device("cpu"),  # noqa: B008
+        device: th.device | None = None,
     ) -> th.Tensor:
         """Takes an image, noise and step; returns denoised image."""
+        if device is None:
+            device = x_noisy.device
+
         betas_t = get_index_from_list(self.betas, t, x_noisy.shape).to(device)
         sqrt_one_minus_alphas_cumprod_t = get_index_from_list(self.sqrt_one_minus_alphas_cumprod, t, x_noisy.shape).to(
             device
@@ -196,9 +199,10 @@ class DiffusionSampler:
         sqrt_recip_alphas_t = get_index_from_list(self.sqrt_recip_alphas, t, x_noisy.shape).to(device)
         model_mean = sqrt_recip_alphas_t * (x_noisy - betas_t * noise_pred / sqrt_one_minus_alphas_cumprod_t)
         posterior_variance_t = get_index_from_list(self.posterior_variance, t, x_noisy.shape).to(device)
+        t_mask = ((t != 0).float().view(-1, *([1] * (len(x_noisy.shape) - 1)))).to(device)
 
         # mean + variance
-        return (model_mean + th.sqrt(posterior_variance_t) * noise_pred).to(device)
+        return (model_mean + th.sqrt(posterior_variance_t) * th.randn_like(x_noisy) * t_mask).to(device)
 
     def lossfn_builder(self) -> Callable[[th.Tensor, th.Tensor], th.Tensor]:
         """Returns the loss function for the diffusion model."""
