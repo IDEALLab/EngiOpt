@@ -1,0 +1,30 @@
+program: engiopt/ddm/ddm_w/train_ddm_w.py
+method: grid
+name: ddm_w_waoa_sweep
+project: engiopt-ddm-w
+entity: adelbeke-
+
+parameters:
+  w_aoa:
+    values: [3, 5, 7, 9]
+
+command:
+  - python
+  - -u
+  - -m
+  - ${program}
+  - --lvae_checkpoint
+  - results/lvae/lae_dropout_0.25_flow_only_best.pth
+  - --n_epochs
+  - "20000"
+  - --w_pressure
+  - "1.0"
+  - --lr
+  - "1e-4"
+  - --grad_clip
+  - "1.0"
+  - --wandb
+  - --w_aoa
+  - ${w_aoa}
+  - --model_name
+  - ddm_w_waoa_${w_aoa}

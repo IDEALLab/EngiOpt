@@ -1,0 +1,8 @@
+Checkpoint : results/ddm_pca/ddm_pca_v1_best.pth
+n_passes   : 10
+n_test     : 94
+
+shape_mse: 0.000032
+aoa_mse: 0.426697
+mmd: 0.010125
+vendi: 0.778573

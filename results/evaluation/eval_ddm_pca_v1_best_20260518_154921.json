@@ -1,0 +1,9 @@
+{
+  "shape_mse": 3.246787006598121e-05,
+  "aoa_mse": 0.4266968071460724,
+  "mmd": 0.010125183003644149,
+  "vendi": 0.7785726770986556,
+  "checkpoint": "results/ddm_pca/ddm_pca_v1_best.pth",
+  "n_passes": 10,
+  "n_test": 94
+}

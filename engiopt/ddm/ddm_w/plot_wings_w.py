@@ -15,8 +15,9 @@ import os
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn as nn
 
-from engiopt.ddm.ddm_w.ddm_w import DDM_W, MLPDenoiser
+from engiopt.ddm.ddm_w.ddm_w import DDM_W, MLPDenoiser, MLPDenoiserV1
 from engiopt.ddm.ddm_w.train_ddm_w import Config, load_bae, load_lvae, build_sampler
 from engiopt.ddm.ddm_w.evaluate_ddm_w import precompute_test
 from engiopt.ddm.plotting import wing_3D_shape_plot, wing_3D_pressure_plot
@@ -50,9 +51,20 @@ def main():
     lvae_params_scaler = getattr(lvae_model, 'scaler_params', None)
 
     # Load DDM_W checkpoint
-    ckpt     = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
-    denoiser = MLPDenoiser(w_dim=cfg.lvae_lae_latent_dim, c_dim=cfg.c_dim).to(device)
-    sampler  = build_sampler(cfg)
+    ckpt    = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
+    sampler = build_sampler(cfg)
+
+    # Support both old (out_aoa) and new (aoa_head) MLPDenoiser architectures
+    saved = ckpt['denoiser']
+    if isinstance(saved, nn.Module):
+        denoiser = saved
+    else:
+        denoiser = MLPDenoiser(w_dim=cfg.lvae_lae_latent_dim, c_dim=cfg.c_dim)
+        try:
+            denoiser.load_state_dict(saved)
+        except RuntimeError:
+            denoiser = MLPDenoiserV1(w_dim=cfg.lvae_lae_latent_dim, c_dim=cfg.c_dim)
+            denoiser.load_state_dict(saved)
 
     pms = ckpt.get('params_mean_std')
     ams = ckpt.get('aoas_mean_std')
@@ -96,12 +108,8 @@ def main():
         T=args.T,
     )
 
-    # Re-apply te_shifts — from LVAE eta_y_pred (no GT hack!)
-    for i in range(n_wings):
-        shifts = gen_te_shifts[i]                       # [S]  predicted by LVAE decoder
-        gen_coords[i, :, 1, :] += shifts.unsqueeze(-1)
-        gt_shifts = te_shifts_list[i]
-        gt_coords[i,  :, 1, :] += gt_shifts.unsqueeze(-1)
+    # Both gen and GT coords are in BAE-centered space (TE at y=0).
+    # No te_shift re-application needed for either.
 
     # Flow params for display
     raw_flow = [
@@ -195,21 +203,20 @@ def main():
             row_gt  = row_gen + 1
             col     = s % n_cols
 
-            axes[row_gen, col].plot(gen_np[s, 0, :], gen_np[s, 1, :], 'steelblue', lw=1.5)
-            axes[row_gen, col].set_title(f"Gen  slice {s}", fontsize=7)
-            axes[row_gen, col].set_aspect('equal')
-            axes[row_gen, col].set_xlim(-0.05, 1.05)
-            axes[row_gen, col].set_ylim(-0.20, 0.20)
-            axes[row_gen, col].grid(True, lw=0.4)
-            axes[row_gen, col].tick_params(labelsize=6)
-
-            axes[row_gt, col].plot(gt_np[s, 0, :], gt_np[s, 1, :], 'coral', lw=1.5)
-            axes[row_gt, col].set_title(f"GT   slice {s}", fontsize=7)
-            axes[row_gt, col].set_aspect('equal')
-            axes[row_gt, col].set_xlim(-0.05, 1.05)
-            axes[row_gt, col].set_ylim(-0.20, 0.20)
-            axes[row_gt, col].grid(True, lw=0.4)
-            axes[row_gt, col].tick_params(labelsize=6)
+            n_pts = gen_np.shape[2]
+            half  = n_pts // 2
+            for ax, arr, color, label in [
+                (axes[row_gen, col], gen_np[s], 'steelblue', f"Gen  slice {s}"),
+                (axes[row_gt,  col], gt_np[s],  'coral',     f"GT   slice {s}"),
+            ]:
+                ax.plot(arr[0, :half],  arr[1, :half],  color=color, lw=1.5)
+                ax.plot(arr[0, half:],  arr[1, half:],  color=color, lw=1.5)
+                ax.set_title(label, fontsize=7)
+                ax.set_aspect('equal')
+                ax.set_xlim(-0.05, 1.05)
+                ax.set_ylim(-0.20, 0.20)
+                ax.grid(True, lw=0.4)
+                ax.tick_params(labelsize=6)
 
         for s in range(n_slices, n_rows_sp * n_cols):
             axes[(s // n_cols) * 2,     s % n_cols].set_visible(False)

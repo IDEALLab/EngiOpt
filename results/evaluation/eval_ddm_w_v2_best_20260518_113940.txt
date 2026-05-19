@@ -1,0 +1,9 @@
+Checkpoint : results/ddm_w/ddm_w_v2_best.pth
+n_passes   : 10
+n_test     : 94
+
+shape_mse: 0.000036
+aoa_mse: 10.661234
+mmd: 0.018379
+vendi: 0.658267
+pressure_mse: 0.009508

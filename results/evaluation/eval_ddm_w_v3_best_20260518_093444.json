@@ -1,0 +1,10 @@
+{
+  "shape_mse": 2.8701501408553063e-05,
+  "aoa_mse": 0.40993013978004456,
+  "mmd": 0.011739805899560451,
+  "vendi": 0.7647773527625251,
+  "pressure_mse": 0.008267702534794807,
+  "checkpoint": "results/ddm_w/ddm_w_v3_best.pth",
+  "n_passes": 10,
+  "n_test": 94
+}

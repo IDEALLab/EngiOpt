@@ -16,8 +16,9 @@ from datetime import datetime, timezone
 
 import numpy as np
 import torch
+import torch.nn as nn
 
-from engiopt.ddm.ddm_w.ddm_w import DDM_W, MLPDenoiser
+from engiopt.ddm.ddm_w.ddm_w import DDM_W, MLPDenoiser, MLPDenoiserV1
 from engiopt.ddm.ddm_w.train_ddm_w import (
     Config, load_bae, load_lvae, build_sampler, precompute_w,
 )
@@ -234,11 +235,22 @@ def main():
     # Load DDM_W checkpoint
     ckpt = torch.load(args.checkpoint, map_location='cpu', weights_only=False)
 
-    denoiser = MLPDenoiser(w_dim=cfg.lvae_lae_latent_dim, c_dim=cfg.c_dim).to(device)
-    sampler  = build_sampler(cfg)
+    sampler = build_sampler(cfg)
+    pms     = ckpt.get('params_mean_std')
+    ams     = ckpt.get('aoas_mean_std')
 
-    pms = ckpt.get('params_mean_std')
-    ams = ckpt.get('aoas_mean_std')
+    # Support both old (out_aoa) and new (aoa_head) MLPDenoiser architectures
+    saved = ckpt['denoiser']
+    if isinstance(saved, nn.Module):
+        denoiser = saved
+    else:
+        denoiser = MLPDenoiser(w_dim=cfg.lvae_lae_latent_dim, c_dim=cfg.c_dim)
+        try:
+            denoiser.load_state_dict(saved)
+        except RuntimeError:
+            # Old checkpoint has out_aoa instead of aoa_head — rebuild with legacy arch
+            denoiser = MLPDenoiserV1(w_dim=cfg.lvae_lae_latent_dim, c_dim=cfg.c_dim)
+            denoiser.load_state_dict(saved)
 
     ddm_w = DDM_W(
         denoiser=denoiser, lvae_model=lvae_model, bae_model=bae_model,
@@ -295,12 +307,8 @@ def main():
     gen_pressures = torch.stack(all_pressures, dim=0).mean(0)  # [N, S, 192]
     gen_te_shifts = torch.stack(all_te_shifts, dim=0).mean(0)  # [N, S]
 
-    # Re-apply te_shifts to both gen and GT coords for fair comparison
-    for i in range(N):
-        shifts = gen_te_shifts[i]               # [S]  — from LVAE eta_y_pred
-        gen_coords[i, :, 1, :] += shifts.unsqueeze(-1)
-        gt_shifts = te_shifts_list[i]
-        gt_coords[i,  :, 1, :] += gt_shifts.unsqueeze(-1)
+    # Both gen and GT coords are in BAE-centered space (TE at y=0).
+    # No te_shift re-application needed for either.
 
     metrics = compute_metrics(
         gen_coords, gt_coords, gen_aoas, gt_aoas,

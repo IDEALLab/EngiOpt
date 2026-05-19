@@ -10,6 +10,8 @@ At training time:
   - Wings are encoded: BAE → z_opt [B, S, 3, 30] → frozen LVAE encoder → w [B, 64]
   - The DDM learns to denoise w vectors, conditioned on flow params and w_init
     (the LVAE encoding of the initial/unoptimised wing)
+  - AoA is denoised by a separate head that takes [h, aoa_noisy, params, t_emb]
+    so it has a dedicated gradient path and is not drowned out by the 64-dim w signal
   - Loss: MSE on denoised w + AoA + optional pressure (via frozen LVAE decoder)
 
 At inference time:
@@ -29,13 +31,51 @@ from torch.optim import Adam
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 
+class MLPDenoiserV1(nn.Module):
+    """Legacy MLPDenoiser (v1/v2): backbone=[w_noisy, w_init, params, t_emb], out_aoa linear."""
+
+    def __init__(self, w_dim: int = 64, c_dim: int = 4,
+                 hidden_dims: tuple = (512, 512, 512, 512),
+                 t_embed_dim: int = 128, dropout: float = 0.0):
+        super().__init__()
+        self.w_dim = w_dim; self.c_dim = c_dim; self.t_embed_dim = t_embed_dim
+        self.t_mlp = nn.Sequential(
+            nn.Linear(t_embed_dim, t_embed_dim * 2), nn.SiLU(),
+            nn.Linear(t_embed_dim * 2, t_embed_dim),
+        )
+        in_dim = w_dim + w_dim + c_dim + t_embed_dim  # 64+64+4+128 = 260
+        layers, prev = [], in_dim
+        for h in hidden_dims:
+            layers += [nn.Linear(prev, h), nn.SiLU()]
+            if dropout > 0: layers.append(nn.Dropout(dropout))
+            prev = h
+        self.net     = nn.Sequential(*layers)
+        self.out_w   = nn.Linear(prev, w_dim)
+        self.out_aoa = nn.Linear(prev, 1)
+
+    def _sinusoidal_embedding(self, t):
+        half = self.t_embed_dim // 2
+        freqs = torch.exp(-torch.arange(half, device=t.device, dtype=torch.float32) * (np.log(10000) / (half - 1)))
+        args = t.float().unsqueeze(1) * freqs.unsqueeze(0)
+        return torch.cat([torch.sin(args), torch.cos(args)], dim=1)
+
+    def forward(self, w_noisy, aoa_noisy, params, w_init, t):
+        t_emb = self.t_mlp(self._sinusoidal_embedding(t))
+        x = torch.cat([w_noisy, w_init, params, t_emb], dim=1)
+        h = self.net(x)
+        return self.out_w(h), self.out_aoa(h)
+
+
 class MLPDenoiser(nn.Module):
-    """Small MLP that denoises a flat w vector.
+    """MLP that denoises w vectors and AoA with separate heads.
 
-    Input:  [B, w_dim + w_dim + c_dim + 1]  (noisy_w, w_init, params, t_emb)
-    Output: [B, w_dim]  (predicted noise in w-space)
+    Backbone input:  [B, w_dim + w_dim + c_dim + t_embed_dim]
+                     (noisy_w, w_init, params, t_emb)
+    AoA head input:  [B, hidden + 1 + c_dim + t_embed_dim]
+                     (h, aoa_noisy, params, t_emb)
 
-    Also predicts AoA noise as a scalar.
+    aoa_noisy is kept out of the backbone so it has a dedicated gradient
+    path and cannot be ignored in favour of the 64-dim w signal.
     """
 
     def __init__(self, w_dim: int = 64, c_dim: int = 4,
@@ -47,14 +87,15 @@ class MLPDenoiser(nn.Module):
         self.c_dim       = c_dim
         self.t_embed_dim = t_embed_dim
 
-        # Sinusoidal time embedding
+        # Sinusoidal time embedding (shared)
         self.t_mlp = nn.Sequential(
             nn.Linear(t_embed_dim, t_embed_dim * 2),
             nn.SiLU(),
             nn.Linear(t_embed_dim * 2, t_embed_dim),
         )
 
-        in_dim = w_dim + w_dim + c_dim + t_embed_dim  # noisy_w + w_init + params + t
+        # Backbone: w_noisy + w_init + params + t_emb  (no aoa_noisy)
+        in_dim = w_dim + w_dim + c_dim + t_embed_dim
 
         layers = []
         prev = in_dim
@@ -64,19 +105,25 @@ class MLPDenoiser(nn.Module):
                 layers.append(nn.Dropout(dropout))
             prev = h
 
-        self.net = nn.Sequential(*layers)
-        self.out_w   = nn.Linear(prev, w_dim)   # noise in w
-        self.out_aoa = nn.Linear(prev, 1)        # noise in AoA
+        self.net   = nn.Sequential(*layers)
+        self.out_w = nn.Linear(prev, w_dim)
+
+        # AoA head: h + aoa_noisy + params + t_emb → scalar noise
+        aoa_in = prev + 1 + c_dim + t_embed_dim
+        self.aoa_head = nn.Sequential(
+            nn.Linear(aoa_in, 128),
+            nn.SiLU(),
+            nn.Linear(128, 1),
+        )
 
     def _sinusoidal_embedding(self, t: torch.Tensor) -> torch.Tensor:
-        """t: [B] integer timesteps → [B, t_embed_dim]."""
         half = self.t_embed_dim // 2
         freqs = torch.exp(
             -torch.arange(half, device=t.device, dtype=torch.float32)
             * (np.log(10000) / (half - 1))
         )
-        args = t.float().unsqueeze(1) * freqs.unsqueeze(0)  # [B, half]
-        return torch.cat([torch.sin(args), torch.cos(args)], dim=1)  # [B, t_embed_dim]
+        args = t.float().unsqueeze(1) * freqs.unsqueeze(0)
+        return torch.cat([torch.sin(args), torch.cos(args)], dim=1)
 
     def forward(self, w_noisy: torch.Tensor, aoa_noisy: torch.Tensor,
                 params: torch.Tensor, w_init: torch.Tensor,
@@ -85,15 +132,20 @@ class MLPDenoiser(nn.Module):
         w_noisy  : [B, w_dim]
         aoa_noisy: [B, 1]
         params   : [B, c_dim]
-        w_init   : [B, w_dim]  — LVAE encoding of initial wing (conditioning)
-        t        : [B]         — diffusion timestep
+        w_init   : [B, w_dim]
+        t        : [B]
         Returns  : (w_noise_pred [B, w_dim], aoa_noise_pred [B, 1])
         """
-        t_emb = self._sinusoidal_embedding(t)         # [B, t_embed_dim]
-        t_emb = self.t_mlp(t_emb)                     # [B, t_embed_dim]
+        t_emb = self._sinusoidal_embedding(t)
+        t_emb = self.t_mlp(t_emb)                                        # [B, t_embed_dim]
+
         x = torch.cat([w_noisy, w_init, params, t_emb], dim=1)
-        h = self.net(x)
-        return self.out_w(h), self.out_aoa(h)
+        h = self.net(x)                                                   # [B, hidden]
+
+        w_pred   = self.out_w(h)                                          # [B, w_dim]
+        aoa_pred = self.aoa_head(torch.cat([h, aoa_noisy, params, t_emb], dim=1))  # [B, 1]
+
+        return w_pred, aoa_pred
 
 
 class DDM_W:
@@ -403,7 +455,7 @@ class DDM_W:
         os.makedirs(save_dir, exist_ok=True)
         path = os.path.join(save_dir, f"{self.name}{suffix}.pth")
         torch.save({
-            'denoiser':         self.denoiser.state_dict(),
+            'denoiser':         self.denoiser,
             'optimizer':        self.optimizer.state_dict(),
             'stats':            self.stats,
             'w_mean':           self.w_mean,
@@ -422,7 +474,11 @@ class DDM_W:
 
     def load(self, path: str, train_mode: bool = False):
         ckpt = torch.load(path, map_location='cpu', weights_only=False)
-        self.denoiser.load_state_dict(ckpt['denoiser'])
+        saved = ckpt['denoiser']
+        if isinstance(saved, nn.Module):
+            self.denoiser = saved
+        else:
+            self.denoiser.load_state_dict(saved)
         if 'optimizer' in ckpt and train_mode:
             self.optimizer.load_state_dict(ckpt['optimizer'])
         self.stats    = ckpt.get('stats', self.stats)
