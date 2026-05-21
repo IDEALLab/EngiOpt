@@ -25,6 +25,9 @@ from engiopt.reproducibility import seed_training
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+DIFFUSION_SAMPLE_MIN = -1.0
+DIFFUSION_SAMPLE_MAX = 1.0
+
 
 @dataclass
 class Args:
@@ -125,6 +128,27 @@ def get_index_from_list(vals: th.Tensor, t: th.Tensor, x_shape: tuple[int, ...])
     return out.reshape(batch_size, *((1,) * (len(x_shape) - 1))).to(t.device)
 
 
+def normalize_designs_to_diffusion_range(
+    designs: th.Tensor,
+    design_min: th.Tensor,
+    design_max: th.Tensor,
+) -> th.Tensor:
+    """Map designs from their observed training bounds to [-1, 1]."""
+    denom = th.clamp(design_max - design_min, min=th.finfo(designs.dtype).eps)
+    designs_01 = (designs - design_min) / denom
+    return designs_01 * (DIFFUSION_SAMPLE_MAX - DIFFUSION_SAMPLE_MIN) + DIFFUSION_SAMPLE_MIN
+
+
+def denormalize_designs_from_diffusion_range(
+    designs: th.Tensor,
+    design_min: th.Tensor,
+    design_max: th.Tensor,
+) -> th.Tensor:
+    """Map designs from [-1, 1] back to their original training-data scale."""
+    designs_01 = (designs - DIFFUSION_SAMPLE_MIN) / (DIFFUSION_SAMPLE_MAX - DIFFUSION_SAMPLE_MIN)
+    return designs_01 * (design_max - design_min) + design_min
+
+
 class DiffusionSampler:
     # Precompute the sqrt alphas and sqrt one minus alphas
     def __init__(self, t: int, betas: th.Tensor):
@@ -137,6 +161,22 @@ class DiffusionSampler:
         self.sqrt_alphas_cumprod = th.sqrt(self.alphas_cumprod)
         self.sqrt_one_minus_alphas_cumprod = th.sqrt(1.0 - self.alphas_cumprod)
         self.posterior_variance = self.betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+        self.posterior_mean_coef1 = self.betas * th.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+        self.posterior_mean_coef2 = (1.0 - self.alphas_cumprod_prev) * th.sqrt(self.alphas) / (1.0 - self.alphas_cumprod)
+
+    def _posterior_mean(self, noise_pred: th.Tensor, x_noisy: th.Tensor, t: th.Tensor) -> th.Tensor:
+        sqrt_alphas_cumprod_t = get_index_from_list(self.sqrt_alphas_cumprod, t, x_noisy.shape)
+        sqrt_one_minus_alphas_cumprod_t = get_index_from_list(
+            self.sqrt_one_minus_alphas_cumprod,
+            t,
+            x_noisy.shape,
+        )
+        pred_original_sample = (x_noisy - sqrt_one_minus_alphas_cumprod_t * noise_pred) / sqrt_alphas_cumprod_t
+        pred_original_sample = pred_original_sample.clamp(DIFFUSION_SAMPLE_MIN, DIFFUSION_SAMPLE_MAX)
+
+        posterior_mean_coef1_t = get_index_from_list(self.posterior_mean_coef1, t, x_noisy.shape)
+        posterior_mean_coef2_t = get_index_from_list(self.posterior_mean_coef2, t, x_noisy.shape)
+        return posterior_mean_coef1_t * pred_original_sample + posterior_mean_coef2_t * x_noisy
 
     def forward_diffusion_sample(
         self,
@@ -192,12 +232,7 @@ class DiffusionSampler:
         if device is None:
             device = x_noisy.device
 
-        betas_t = get_index_from_list(self.betas, t, x_noisy.shape).to(device)
-        sqrt_one_minus_alphas_cumprod_t = get_index_from_list(self.sqrt_one_minus_alphas_cumprod, t, x_noisy.shape).to(
-            device
-        )
-        sqrt_recip_alphas_t = get_index_from_list(self.sqrt_recip_alphas, t, x_noisy.shape).to(device)
-        model_mean = sqrt_recip_alphas_t * (x_noisy - betas_t * noise_pred / sqrt_one_minus_alphas_cumprod_t)
+        model_mean = self._posterior_mean(noise_pred, x_noisy, t).to(device)
         posterior_variance_t = get_index_from_list(self.posterior_variance, t, x_noisy.shape).to(device)
         t_mask = ((t != 0).float().view(-1, *([1] * (len(x_noisy.shape) - 1)))).to(device)
 
@@ -226,13 +261,9 @@ class DiffusionSampler:
         """
         model.eval()
         with th.no_grad():
-            betas_t = get_index_from_list(self.betas, t, x.shape)
-            sqrt_one_minus_alphas_cumprod_t = get_index_from_list(self.sqrt_one_minus_alphas_cumprod, t, x.shape)
-            sqrt_recip_alphas_t = get_index_from_list(self.sqrt_recip_alphas, t, x.shape)
-
             # Call model (current image - noise prediction)
             noise_pred = model(x, t, encoder_hidden_states).sample
-            model_mean = sqrt_recip_alphas_t * (x - betas_t * noise_pred / sqrt_one_minus_alphas_cumprod_t)
+            model_mean = self._posterior_mean(noise_pred, x, t)
 
             posterior_variance_t = get_index_from_list(self.posterior_variance, t, x.shape)
             if t_mask is None:
@@ -298,7 +329,7 @@ if __name__ == "__main__":
         filtered_ds[i] = training_ds[i]["optimal_design"][:].reshape(1, design_shape[0], design_shape[1])
     filtered_ds_max = filtered_ds.max()
     filtered_ds_min = filtered_ds.min()
-    filtered_ds_norm = (filtered_ds - filtered_ds_min) / (filtered_ds_max - filtered_ds_min)
+    filtered_ds_norm = normalize_designs_to_diffusion_range(filtered_ds, filtered_ds_min, filtered_ds_max)
     training_ds = th.utils.data.TensorDataset(
         filtered_ds_norm.flatten(1), *[training_ds[key][:] for key in problem.conditions_keys]
     )
@@ -418,7 +449,8 @@ if __name__ == "__main__":
 
                     # Plot the image created by each output
                     for j, tensor in enumerate(designs):
-                        img = tensor.cpu().numpy()  # Extract x and y coordinates
+                        design = denormalize_designs_from_diffusion_range(tensor, filtered_ds_min, filtered_ds_max)
+                        img = design.cpu().numpy()  # Extract x and y coordinates
                         dc = hidden_states[j, 0, :].cpu()
                         axes[j].imshow(img[0])  # image plot
                         title = [(problem.conditions_keys[i], f"{dc[i]:.2f}") for i in range(len(problem.conditions_keys))]
@@ -443,6 +475,10 @@ if __name__ == "__main__":
                         "model": model.state_dict(),
                         "optimizer_generator": optimizer.state_dict(),
                         "loss": loss.item(),
+                        "design_min": filtered_ds_min.detach().cpu(),
+                        "design_max": filtered_ds_max.detach().cpu(),
+                        "diffusion_sample_min": DIFFUSION_SAMPLE_MIN,
+                        "diffusion_sample_max": DIFFUSION_SAMPLE_MAX,
                     }
 
                     th.save(ckpt_model, "model.pth")
