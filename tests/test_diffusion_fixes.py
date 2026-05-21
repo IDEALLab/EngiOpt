@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from types import SimpleNamespace
+
 import pytest
 
 
@@ -56,6 +58,25 @@ def test_diffusion_2d_normalizer_round_trips_arbitrary_bounds() -> None:
     assert normalized.min().item() == pytest.approx(-1.0)
     assert normalized.max().item() == pytest.approx(1.0)
     assert th.allclose(restored, designs)
+
+
+def test_diffusion_2d_uses_problem_design_bounds_when_available() -> None:
+    """EngiBench design_space bounds should be the normalization source of truth."""
+    th = pytest.importorskip("torch")
+    diffusion_2d = pytest.importorskip("engiopt.diffusion_2d_cond.diffusion_2d_cond")
+
+    fallback_designs = th.tensor([[0.2, 0.8]])
+    problem = SimpleNamespace(
+        design_space=SimpleNamespace(
+            low=th.tensor([-2.0, -1.0]).numpy(),
+            high=th.tensor([2.0, 3.0]).numpy(),
+        ),
+    )
+
+    design_min, design_max = diffusion_2d.get_design_bounds(problem, fallback_designs, th.device("cpu"))
+
+    assert th.allclose(design_min, th.tensor([-2.0, -1.0]))
+    assert th.allclose(design_max, th.tensor([2.0, 3.0]))
 
 
 def test_diffusion_step_sample_uses_fresh_noise(monkeypatch: pytest.MonkeyPatch) -> None:

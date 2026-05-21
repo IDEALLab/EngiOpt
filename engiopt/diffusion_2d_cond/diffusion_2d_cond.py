@@ -133,7 +133,7 @@ def normalize_designs_to_diffusion_range(
     design_min: th.Tensor,
     design_max: th.Tensor,
 ) -> th.Tensor:
-    """Map designs from their observed training bounds to [-1, 1]."""
+    """Map designs from their problem bounds to [-1, 1]."""
     denom = th.clamp(design_max - design_min, min=th.finfo(designs.dtype).eps)
     designs_01 = (designs - design_min) / denom
     return designs_01 * (DIFFUSION_SAMPLE_MAX - DIFFUSION_SAMPLE_MIN) + DIFFUSION_SAMPLE_MIN
@@ -144,9 +144,23 @@ def denormalize_designs_from_diffusion_range(
     design_min: th.Tensor,
     design_max: th.Tensor,
 ) -> th.Tensor:
-    """Map designs from [-1, 1] back to their original training-data scale."""
+    """Map designs from [-1, 1] back to the original problem scale."""
     designs_01 = (designs - DIFFUSION_SAMPLE_MIN) / (DIFFUSION_SAMPLE_MAX - DIFFUSION_SAMPLE_MIN)
     return designs_01 * (design_max - design_min) + design_min
+
+
+def get_design_bounds(
+    problem,
+    fallback_designs: th.Tensor,
+    device: th.device,
+) -> tuple[th.Tensor, th.Tensor]:
+    """Get finite design bounds from the EngiBench problem definition."""
+    design_min = th.as_tensor(problem.design_space.low, dtype=fallback_designs.dtype, device=device)
+    design_max = th.as_tensor(problem.design_space.high, dtype=fallback_designs.dtype, device=device)
+    if th.isfinite(design_min).all() and th.isfinite(design_max).all() and th.all(design_max > design_min):
+        return design_min, design_max
+
+    return fallback_designs.min(), fallback_designs.max()
 
 
 class DiffusionSampler:
@@ -327,8 +341,7 @@ if __name__ == "__main__":
     filtered_ds = th.zeros(len(training_ds), design_shape[0], design_shape[1], device=device)
     for i in range(len(training_ds)):
         filtered_ds[i] = training_ds[i]["optimal_design"][:].reshape(1, design_shape[0], design_shape[1])
-    filtered_ds_max = filtered_ds.max()
-    filtered_ds_min = filtered_ds.min()
+    filtered_ds_min, filtered_ds_max = get_design_bounds(problem, filtered_ds, device)
     filtered_ds_norm = normalize_designs_to_diffusion_range(filtered_ds, filtered_ds_min, filtered_ds_max)
     training_ds = th.utils.data.TensorDataset(
         filtered_ds_norm.flatten(1), *[training_ds[key][:] for key in problem.conditions_keys]
