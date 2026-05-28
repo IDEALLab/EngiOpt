@@ -829,7 +829,6 @@ if __name__ == "__main__":
                 checkpoint_files={"multiview_3d_vaegan.pth": "multiview_3d_vaegan.pth"},
                 run_config=vars(args),
                 primary_files=["multiview_3d_vaegan.pth"],
-                wandb_artifacts={f"{args.problem_id}_{args.algo}_models": "multiview_3d_vaegan.pth"},
             )
 
             print("3D vae models saved successfully!")

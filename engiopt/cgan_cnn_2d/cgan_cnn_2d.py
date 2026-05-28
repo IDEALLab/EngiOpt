@@ -437,10 +437,6 @@ if __name__ == "__main__":
                         },
                         run_config=vars(args),
                         primary_files=["generator.pth"],
-                        wandb_artifacts={
-                            f"{args.problem_id}_{args.algo}_generator": "generator.pth",
-                            f"{args.problem_id}_{args.algo}_discriminator": "discriminator.pth",
-                        },
                     )
 
     wandb.finish()

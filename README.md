@@ -82,19 +82,14 @@ python engiopt/cgan_cnn_2d/cgan_cnn_2d.py --problem-id "beams2d" --track --wandb
 
 This will run a CGAN 2D using CNN model on the beams2d problem. `--track` will track the run on wandb, `--wandb-entity None` will use the default wandb entity, `--save-model` will save the model, `--n-epochs 200` will run for 200 epochs, and `--seed 1` will set the random seed.
 
-By default, `--save-model` now stores a self-contained checkpoint package on the Hugging Face Hub. The default backend is:
+By default, `--save-model` stores a self-contained checkpoint package on the Hugging Face Hub. The supported backends are:
 ```
---checkpoint-backend hf
+--checkpoint-backend hf    # default: upload to HF
+--checkpoint-backend none  # skip remote upload (local-only, for testing)
 ```
-You can still force legacy or hybrid behavior when needed:
-```
---checkpoint-backend wandb
---checkpoint-backend both
---checkpoint-backend none
-```
+W&B is no longer a checkpoint storage backend. W&B continues to be used for media, scalars, and run tracking; the W&B run summary records the HF repo, the seed-based convenience path, the exact uploaded HF revision, and an immutable run-specific HF package path for traceability.
 
 All HF-backed checkpoint packages contain the model files together with `run_config.json` and `metadata.json`, so evaluation does not depend on live WandB run config state.
-When W&B tracking is active, the HF package metadata also records the originating W&B run identity, and the W&B run summary records the HF repo, the seed-based convenience path, the exact uploaded HF revision, and an immutable run-specific HF package path.
 
 For reproducible debugging runs, you can additionally enable strict deterministic mode:
 ```
@@ -122,14 +117,14 @@ Evaluation now defaults to:
 ```
 In `auto` mode, EngiOpt tries to resolve checkpoints in this order:
 1. Hugging Face package for the model family, problem, and seed
-2. Legacy WandB model artifact
+2. Legacy WandB model artifact (kept as a safety net for runs trained before the HF cutover; will be removed once all in-use artifacts are migrated)
 3. Explicit local checkpoint package directory if you pass `--local-model-dir`
 
 For new HF-backed runs, EngiOpt maintains both:
 - a seed-based convenience path such as `beams2d/seed_1`
 - an immutable run-specific path such as `beams2d/seed_1/run_<wandb_run_id>`
 
-You can force legacy WandB loading for historical runs:
+You can force legacy WandB loading for historical runs (while the fallback is still present):
 ```
 python engiopt/cgan_cnn_2d/evaluate_cgan_cnn_2d.py --problem-id "beams2d" --seed 1 --model-source wandb
 ```

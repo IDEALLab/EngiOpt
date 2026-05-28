@@ -912,7 +912,6 @@ if __name__ == "__main__":
                         checkpoint_files={"model.pth": "model.pth"},
                         run_config=vars(args),
                         primary_files=["model.pth"],
-                        wandb_artifacts={f"{args.problem_id}_{args.algo}_model": "model.pth"},
                     )
 
     wandb.finish()

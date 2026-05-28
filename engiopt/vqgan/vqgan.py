@@ -1000,7 +1000,6 @@ if __name__ == "__main__":
                             run_config=vars(args),
                             metadata={"stage": "cvqgan"},
                             primary_files=["cvqgan.pth"],
-                            wandb_artifacts={f"{args.problem_id}_{args.algo}_cvqgan": "cvqgan.pth"},
                         )
 
         # Freeze CVQGAN for later use in Stage 2 Transformer
@@ -1120,10 +1119,6 @@ if __name__ == "__main__":
                         run_config=vars(args),
                         metadata={"stage": "vqgan"},
                         primary_files=["vqgan.pth"],
-                        wandb_artifacts={
-                            f"{args.problem_id}_{args.algo}_vqgan": "vqgan.pth",
-                            f"{args.problem_id}_{args.algo}_discriminator": "discriminator.pth",
-                        },
                     )
 
     # Freeze VQGAN for later use in Stage 2 Transformer
@@ -1265,7 +1260,6 @@ if __name__ == "__main__":
             run_config=vars(args),
             metadata={"stage": "transformer"},
             primary_files=["transformer.pth"],
-            wandb_artifacts={f"{args.problem_id}_{args.algo}_transformer": "transformer.pth"},
         )
 
     wandb.finish()

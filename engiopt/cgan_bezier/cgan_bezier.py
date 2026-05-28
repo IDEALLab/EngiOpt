@@ -664,10 +664,6 @@ if __name__ == "__main__":
                     },
                     run_config=vars(args),
                     primary_files=["bezier_generator.pth"],
-                    wandb_artifacts={
-                        f"{args.problem_id}_{args.algo}_generator": "bezier_generator.pth",
-                        f"{args.problem_id}_{args.algo}_discriminator": "bezier_discriminator.pth",
-                    },
                 )
 
     if args.track:

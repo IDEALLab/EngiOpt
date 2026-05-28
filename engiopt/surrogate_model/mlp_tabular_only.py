@@ -369,7 +369,6 @@ def main(args: Args) -> float:  # noqa: PLR0915
             metadata={"target_col": args.target_col},
             primary_files=[os.path.basename(pipeline_filename)],
             extra_path_parts=[args.target_col],
-            wandb_artifacts={f"{run_name}_model": pipeline_filename},
         )
         if args.track:
             print("[INFO] Uploaded model artifact to configured checkpoint backend(s).")

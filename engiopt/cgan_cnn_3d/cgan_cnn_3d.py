@@ -702,10 +702,6 @@ if __name__ == "__main__":
                 checkpoint_files={"generator_3d.pth": "generator_3d.pth", "discriminator_3d.pth": "discriminator_3d.pth"},
                 run_config=vars(args),
                 primary_files=["generator_3d.pth"],
-                wandb_artifacts={
-                    f"{args.problem_id}_{args.algo}_generator_3d": "generator_3d.pth",
-                    f"{args.problem_id}_{args.algo}_discriminator_3d": "discriminator_3d.pth",
-                },
             )
 
             print("3D models saved successfully!")
