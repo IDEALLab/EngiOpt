@@ -12,7 +12,6 @@ import torch as th
 import tyro
 
 from engiopt import metrics
-from engiopt.checkpoint_store import ModelSource
 from engiopt.checkpoint_store import resolve_named_checkpoint
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.transforms import drop_constant
@@ -34,14 +33,10 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
-    model_source: ModelSource = "auto"
-    """Where to load the checkpoint package from."""
     hf_entity: str = "IDEALLab"
     """HF organization or user for checkpoint storage."""
     hf_repo_prefix: str = "engiopt"
     """HF repo prefix used to build per-family model repos."""
-    local_model_dir: str | None = None
-    """Optional local checkpoint package directory."""
     n_samples: int = 50
     """Number of generated samples per seed."""
     sigma: float = 10.0
@@ -72,7 +67,7 @@ if __name__ == "__main__":
     ### Set Up Transformer ###
 
     resolved = resolve_named_checkpoint(
-        model_source=args.model_source,
+        model_source="auto",
         problem_id=args.problem_id,
         algo="vqgan",
         seed=seed,
@@ -86,14 +81,13 @@ if __name__ == "__main__":
             "transformer.pth": f"{args.problem_id}_vqgan_transformer",
         },
         wandb_config_artifact_name=f"{args.problem_id}_vqgan_transformer",
-        local_model_dir=args.local_model_dir,
     )
     run_config = resolved.run_config
 
     ckpt_path_cvqgan = os.path.join(resolved.root_dir, "cvqgan.pth")
     if run_config["conditional"] and not os.path.exists(ckpt_path_cvqgan):
         cvqgan_resolved = resolve_named_checkpoint(
-            model_source="wandb" if args.model_source == "wandb" else "auto",
+            model_source="auto",
             problem_id=args.problem_id,
             algo="vqgan",
             seed=seed,
@@ -104,7 +98,6 @@ if __name__ == "__main__":
             wandb_entity=args.wandb_entity,
             wandb_artifact_names={"cvqgan.pth": f"{args.problem_id}_vqgan_cvqgan"},
             wandb_config_artifact_name=f"{args.problem_id}_vqgan_transformer",
-            local_model_dir=args.local_model_dir,
         )
         ckpt_path_cvqgan = cvqgan_resolved.files["cvqgan.pth"]
 

@@ -36,7 +36,6 @@ from pymoo.termination import get_termination
 import tyro
 import wandb
 
-from engiopt.checkpoint_store import ModelSource
 from engiopt.checkpoint_store import resolve_checkpoint_reference
 from engiopt.surrogate_model.model_pipeline import ModelPipeline
 from engiopt.surrogate_model.pymoo_pe_problem import PymooPowerElecProblem
@@ -61,8 +60,6 @@ class Args:
     # Optimisation hyperparameters
     seed: int
     """Random seed for the optimization, must match the seed used to train the models."""
-    model_source: ModelSource = "auto"
-    """Where to load the surrogate pipelines from."""
     pop_size: int = 500
     n_gen: int = 100
 
@@ -178,21 +175,19 @@ def save_front(res: Result, output_dir: str) -> tuple[str, str, str, str, str]:
 def load_model_from_reference(
     model_ref: str,
     *,
-    model_source: ModelSource,
     active_wandb_run: wandb.sdk.wandb_run.Run | None,
 ) -> ModelPipeline:
     """Load a model pipeline from a W&B artifact, HF package, or local directory.
 
     Args:
         model_ref: Reference to the stored model package or artifact.
-        model_source: Checkpoint backend to use when resolving the reference.
         active_wandb_run: Optional active W&B run for artifact access.
 
     Returns:
         Loaded model pipeline.
     """
     resolved = resolve_checkpoint_reference(
-        model_source=model_source,
+        model_source="auto",
         model_ref=model_ref,
         required_files=[],
         active_wandb_run=active_wandb_run,
@@ -224,12 +219,12 @@ def main(args: Args) -> None:
     active_wandb_run = wandb.run if args.track else None
     pipeline_g = load_model_from_reference(
         args.model_gain_path,
-        model_source=args.model_source,
+        model_source="auto",
         active_wandb_run=active_wandb_run,
     )
     pipeline_r = load_model_from_reference(
         args.model_ripple_path,
-        model_source=args.model_source,
+        model_source="auto",
         active_wandb_run=active_wandb_run,
     )
 

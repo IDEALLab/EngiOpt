@@ -12,7 +12,6 @@ import torch as th
 import tyro
 
 from engiopt import metrics
-from engiopt.checkpoint_store import ModelSource
 from engiopt.checkpoint_store import resolve_named_checkpoint
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.gan_cnn_2d.gan_cnn_2d import Generator
@@ -30,14 +29,10 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name (if any)."""
-    model_source: ModelSource = "auto"
-    """Where to load the checkpoint package from."""
     hf_entity: str = "IDEALLab"
     """HF org/user where checkpoints are stored."""
     hf_repo_prefix: str = "engiopt"
     """HF repo prefix used for model-family repositories."""
-    local_model_dir: str | None = None
-    """Optional local checkpoint package directory."""
     n_samples: int = 50
     """Number of generated samples per seed."""
     sigma: float = 10.0
@@ -76,7 +71,7 @@ if __name__ == "__main__":
     ### Set Up Generator ###
 
     resolved = resolve_named_checkpoint(
-        model_source=args.model_source,
+        model_source="auto",
         problem_id=args.problem_id,
         algo="gan_cnn_2d",
         seed=seed,
@@ -86,7 +81,6 @@ if __name__ == "__main__":
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
         wandb_artifact_names={"generator.pth": f"{args.problem_id}_gan_cnn_2d_generator"},
-        local_model_dir=args.local_model_dir,
     )
     run_config = resolved.run_config
 
