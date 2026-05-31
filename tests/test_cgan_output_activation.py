@@ -1,7 +1,5 @@
 """Focused checks for configurable cGAN generator output activations."""
 
-from __future__ import annotations
-
 import pytest
 
 

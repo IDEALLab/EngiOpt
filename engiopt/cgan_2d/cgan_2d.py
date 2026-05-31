@@ -117,11 +117,14 @@ class Generator(nn.Module):
 
 
 def _make_output_activation(activation: GeneratorOutputActivation) -> nn.Module:
-    if activation == "tanh":
-        return nn.Tanh()
-    if activation == "sigmoid":
-        return nn.Sigmoid()
-    raise ValueError(f"Unsupported generator output activation: {activation}")
+    activations: dict[str, type[nn.Module]] = {
+        "tanh": nn.Tanh,
+        "sigmoid": nn.Sigmoid,
+    }
+    try:
+        return activations[activation]()
+    except KeyError:
+        raise ValueError(f"Unsupported generator output activation: {activation}") from None
 
 
 class Discriminator(nn.Module):
