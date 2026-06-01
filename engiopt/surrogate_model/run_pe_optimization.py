@@ -219,12 +219,10 @@ def main(args: Args) -> None:
     active_wandb_run = wandb.run if args.track else None
     pipeline_g = load_model_from_reference(
         args.model_gain_path,
-        model_source="auto",
         active_wandb_run=active_wandb_run,
     )
     pipeline_r = load_model_from_reference(
         args.model_ripple_path,
-        model_source="auto",
         active_wandb_run=active_wandb_run,
     )
 
