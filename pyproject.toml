@@ -127,6 +127,7 @@ ignore = [
   "EM102",    # f-string-in-exception
   "E741",     # ambiguous-variable-name
   "FIX002",   # flake8-fixme (flake8-todos is enough)
+  "PLR0913",  # too-many-arguments (common in scientific/ML configs)
   "PTH",      # flake8-use-pathlib
   "S101",     # flake8-bandit: assert
   "S301",     # suspicious-pickle-usage

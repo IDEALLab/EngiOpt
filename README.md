@@ -83,6 +83,11 @@ python engiopt/cgan_cnn_2d/cgan_cnn_2d.py --problem-id "beams2d" --seed 1 --stri
 ```
 This enables stricter PyTorch deterministic settings and deterministic data shuffling while keeping the default behavior unchanged when the flag is omitted.
 
+For new cGAN density-field runs, you can emit designs natively in the EngiBench `[0, 1]` density range while preserving older `tanh` checkpoint behavior by default:
+```
+python engiopt/cgan_cnn_2d/cgan_cnn_2d.py --problem-id "beams2d" --generator-output-activation sigmoid
+```
+
 You can always check the help for more options:
 ```
 python engiopt/cgan_cnn_2d/cgan_cnn_2d.py -h

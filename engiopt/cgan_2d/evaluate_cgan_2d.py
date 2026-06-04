@@ -10,11 +10,11 @@ import numpy as np
 import pandas as pd
 import torch as th
 import tyro
+import wandb
 
 from engiopt import metrics
 from engiopt.cgan_2d.cgan_2d import Generator
 from engiopt.dataset_sample_conditions import sample_conditions
-import wandb
 
 
 @dataclasses.dataclass
@@ -90,6 +90,7 @@ if __name__ == "__main__":
         latent_dim=run.config["latent_dim"],
         n_conds=len(problem.conditions_keys),
         design_shape=problem.design_space.shape,
+        generator_output_activation=run.config.get("generator_output_activation", "tanh"),
     ).to(device)
     model.load_state_dict(ckpt["generator"])
     model.eval()
