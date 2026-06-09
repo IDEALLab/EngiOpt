@@ -515,6 +515,117 @@ def generate_designs(
     return ((raw.cpu().numpy() + 1.0) / 2.0).clip(0, 1)
 
 
+def rebuild_notebook01_artifacts(
+    problem,
+    artifact_dir,
+    *,
+    device,
+    seed: int,
+    n_samples: int = 24,
+    latent_dim: int = 32,
+    epochs: int = 10,
+) -> None:
+    """Recreate the Simple Notebook 01 train/generate/export path.
+
+    Trains the same lightweight workshop CGAN-CNN for a short run, generates
+    ``n_samples`` designs on held-out test scenarios, and writes the three
+    artifact files (``generated_designs.npy``, ``baseline_designs.npy``,
+    ``conditions.json``) into ``artifact_dir``.  This is boilerplate so that
+    Notebook 02 can stand alone in a fresh Colab runtime; the pedagogy lives in
+    the cells that follow, not here.
+    """
+    from pathlib import Path
+
+    from engiopt.cgan_cnn_2d.cgan_cnn_2d import Generator as CGAN2DGenerator
+
+    artifact_dir = Path(artifact_dir)
+    print("Rebuilding Notebook 01 artifacts in this runtime.")
+    print("This trains the same lightweight workshop generator and may take a few minutes.")
+
+    set_global_seed(seed)
+    if th.cuda.is_available():
+        th.cuda.manual_seed_all(seed)
+
+    train_ds = problem.dataset["train"]
+    test_ds = problem.dataset["test"]
+    condition_keys = problem.conditions_keys
+    design_shape = problem.design_space.shape
+    n_conds = len(condition_keys)
+
+    conds_np = np.stack([np.array(train_ds[k]).astype(np.float32) for k in condition_keys], axis=1)
+    designs_np = np.array(train_ds["optimal_design"]).astype(np.float32)
+    targets_np = designs_np * 2.0 - 1.0
+
+    rng = np.random.default_rng(seed)
+
+    cnn_gen = CGAN2DGenerator(latent_dim=latent_dim, n_conds=n_conds, design_shape=design_shape)
+    model = WorkshopGenerator(cnn_gen).to(device)
+
+    train_cfg = TrainingConfig(
+        latent_dim=latent_dim,
+        epochs=epochs,
+        batch_size=64,
+        lr=2e-4,
+        device=device,
+        snapshot_at_epochs=[],
+        verbose=True,
+    )
+    result = train_supervised_generator(model, conds_np, targets_np, config=train_cfg, snapshot_conditions=None)
+    print(f"Final rebuild loss after {epochs} epochs: {result['losses'][-1]:.5f}")
+
+    test_idx = rng.choice(len(test_ds), size=n_samples, replace=False)
+    test_conds_np = np.stack([np.array(test_ds[k])[test_idx].astype(np.float32) for k in condition_keys], axis=1)
+    baseline_designs = np.array(test_ds["optimal_design"])[test_idx].astype(np.float32)
+    gen_designs = generate_designs(model, test_conds_np, latent_dim=latent_dim, device=device)
+    conditions_records = [
+        {k: float(test_conds_np[i, j]) for j, k in enumerate(condition_keys)} for i in range(n_samples)
+    ]
+
+    np.save(artifact_dir / "generated_designs.npy", gen_designs)
+    np.save(artifact_dir / "baseline_designs.npy", baseline_designs)
+    with open(artifact_dir / "conditions.json", "w") as f:
+        json.dump(conditions_records, f, indent=2)
+    print(f"Rebuilt artifacts in {artifact_dir}.")
+
+
+def show_design_set(
+    designs: np.ndarray,
+    conditions: list[dict] | None = None,
+    n: int = 8,
+    title: str = "Generated designs",
+    annotate_key: str | None = "volfrac",
+) -> None:
+    """Show a grid of designs as images, optionally annotated with a condition.
+
+    Use this to *look at the designs first* before computing any metric on
+    them.  Darker pixels = more material (``gray_r`` colourmap).  If
+    ``conditions`` is supplied, each panel is labelled with the value of
+    ``annotate_key`` (e.g. the requested volume fraction) for that scenario.
+    """
+    n = min(n, len(designs))
+    ncols = min(4, n)
+    nrows = (n + ncols - 1) // ncols
+    fig, axes = plt.subplots(nrows, ncols, figsize=(3.2 * ncols, 2.0 * nrows))
+    axes = np.atleast_2d(axes)
+
+    for i in range(n):
+        ax = axes[i // ncols, i % ncols]
+        ax.imshow(designs[i], cmap="gray_r", vmin=0, vmax=1)
+        ax.axis("off")
+        label = f"#{i}"
+        if conditions is not None and annotate_key in conditions[i]:
+            label += f"\n{annotate_key}={conditions[i][annotate_key]:.2f}"
+        ax.set_title(label, fontsize=9)
+
+    for i in range(n, nrows * ncols):
+        axes[i // ncols, i % ncols].axis("off")
+
+    fig.suptitle(title, fontsize=13, y=1.01)
+    fig.tight_layout()
+    plt.show()
+    plt.close(fig)
+
+
 def show_training_progression(
     snapshots: list[tuple[int, np.ndarray]],
     baseline_designs: np.ndarray | None = None,
@@ -983,41 +1094,95 @@ def show_mmd_comparison_bar(
 
 def show_pairwise_distance_heatmap(
     designs: np.ndarray,
+    reference: np.ndarray | None = None,
     title: str = "Pairwise L2 distance among generated designs",
+    labels: tuple[str, str] = ("Generated", "Baseline (same conditions)"),
 ) -> None:
-    """Heatmap of pairwise L2 distances — visual proxy for diversity.
+    """Compare generated diversity against a same-condition reference set.
 
-    A uniform warm colour off-diagonal means all designs differ roughly
-    equally (good diversity).  Cool/dark blocks reveal clusters of
-    near-identical designs (partial mode collapse).
+    A heatmap of the generated set *alone* is hard to read: designs differ
+    partly because the model is diverse and partly because the conditions
+    (volume fraction, load) differ across scenarios.  The fix is to compute
+    the same pairwise distances for the baseline/dataset designs drawn from
+    the *same* conditions and put the two side by side on a shared colour
+    scale.  Now the only difference between the two heatmaps is the model —
+    if the generated block is systematically darker (smaller distances) than
+    the reference, that is partial mode collapse, not just similar scenarios.
+
+    If *reference* is ``None`` this falls back to a single-set heatmap.
+
+    Args:
+        designs: Generated designs, shape ``(N, ...)``.
+        reference: Baseline/dataset designs from the *same* conditions, same
+            length and ordering as ``designs``. If ``None``, only the
+            generated set is shown.
+        title: Plot title.
+        labels: Legend/title labels for ``(designs, reference)``.
     """
     flat = designs.reshape(designs.shape[0], -1)
     dists = cdist(flat, flat, "euclidean")
+    triu = np.triu_indices(len(designs), k=1)
+    off_diag = dists[triu]
 
-    fig, (ax, ax_hist) = plt.subplots(
-        1,
-        2,
-        figsize=(11, 5),
-        gridspec_kw={"width_ratios": [1.2, 1]},
-    )
+    # Single-set fallback -------------------------------------------------
+    if reference is None:
+        fig, (ax, ax_hist) = plt.subplots(
+            1, 2, figsize=(11, 5), gridspec_kw={"width_ratios": [1.2, 1]}
+        )
+        im = ax.imshow(dists, cmap="viridis")
+        ax.set_xlabel("Design index")
+        ax.set_ylabel("Design index")
+        ax.set_title(title, fontsize=11)
+        fig.colorbar(im, ax=ax, label="L2 distance", fraction=0.046, pad=0.04)
+        ax_hist.hist(off_diag, bins=25, edgecolor="white", color="#4C72B0", alpha=0.8)
+        ax_hist.axvline(
+            off_diag.mean(), color="#C44E52", linewidth=2, linestyle="--", label=f"Mean = {off_diag.mean():.1f}"
+        )
+        ax_hist.set_xlabel("Pairwise L2 distance")
+        ax_hist.set_ylabel("Count")
+        ax_hist.set_title("Distribution of pairwise distances", fontsize=11)
+        ax_hist.legend(fontsize=9)
+        fig.tight_layout()
+        plt.show()
+        plt.close(fig)
+        return
 
-    im = ax.imshow(dists, cmap="viridis")
-    ax.set_xlabel("Design index")
-    ax.set_ylabel("Design index")
-    ax.set_title(title, fontsize=11)
-    fig.colorbar(im, ax=ax, label="L2 distance", fraction=0.046, pad=0.04)
+    # Same-condition comparison ------------------------------------------
+    ref_flat = reference.reshape(reference.shape[0], -1)
+    ref_dists = cdist(ref_flat, ref_flat, "euclidean")
+    ref_triu = np.triu_indices(len(reference), k=1)
+    ref_off_diag = ref_dists[ref_triu]
 
-    # Histogram of off-diagonal distances
-    triu_idx = np.triu_indices(len(designs), k=1)
-    off_diag = dists[triu_idx]
-    ax_hist.hist(off_diag, bins=25, edgecolor="white", color="#4C72B0", alpha=0.8)
-    ax_hist.axvline(off_diag.mean(), color="#C44E52", linewidth=2, linestyle="--", label=f"Mean = {off_diag.mean():.1f}")
+    # Shared colour scale so the two heatmaps are directly comparable.
+    vmax = float(max(dists.max(), ref_dists.max()))
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5), gridspec_kw={"width_ratios": [1, 1, 1]})
+    ax_gen, ax_ref, ax_hist = axes
+
+    im = ax_gen.imshow(dists, cmap="viridis", vmin=0, vmax=vmax)
+    ax_gen.set_title(f"{labels[0]}\n(mean off-diag = {off_diag.mean():.1f})", fontsize=11)
+    ax_gen.set_xlabel("Design index")
+    ax_gen.set_ylabel("Design index")
+
+    ax_ref.imshow(ref_dists, cmap="viridis", vmin=0, vmax=vmax)
+    ax_ref.set_title(f"{labels[1]}\n(mean off-diag = {ref_off_diag.mean():.1f})", fontsize=11)
+    ax_ref.set_xlabel("Design index")
+    ax_ref.set_ylabel("Design index")
+
+    fig.colorbar(im, ax=[ax_gen, ax_ref], label="L2 distance", fraction=0.046, pad=0.04)
+
+    bins = np.linspace(0, vmax, 26)
+    ax_hist.hist(ref_off_diag, bins=bins, color="#DD8452", alpha=0.6, edgecolor="white", label=labels[1])
+    ax_hist.hist(off_diag, bins=bins, color="#4C72B0", alpha=0.6, edgecolor="white", label=labels[0])
+    ax_hist.axvline(ref_off_diag.mean(), color="#DD8452", linewidth=2, linestyle="--")
+    ax_hist.axvline(off_diag.mean(), color="#4C72B0", linewidth=2, linestyle="--")
+    ratio = off_diag.mean() / ref_off_diag.mean() if ref_off_diag.mean() else float("nan")
     ax_hist.set_xlabel("Pairwise L2 distance")
     ax_hist.set_ylabel("Count")
-    ax_hist.set_title("Distribution of pairwise distances", fontsize=11)
+    ax_hist.set_title(f"Distance distributions\n(gen / ref diversity = {ratio:.2f})", fontsize=11)
     ax_hist.legend(fontsize=9)
 
-    fig.tight_layout()
+    fig.suptitle(title, fontsize=13, y=1.02)
     plt.show()
     plt.close(fig)
 
