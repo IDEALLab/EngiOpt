@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 import os
+from pathlib import Path
 import random
 from typing import Any
 
@@ -21,6 +22,8 @@ from scipy.spatial.distance import cdist
 import torch as th
 from torch.utils.data import DataLoader
 from torch.utils.data import TensorDataset
+
+from engiopt.cgan_cnn_2d.cgan_cnn_2d import Generator as CGAN2DGenerator
 
 try:
     import ipywidgets as widgets
@@ -534,10 +537,6 @@ def rebuild_notebook01_artifacts(  # noqa: PLR0913
     Notebook 02 can stand alone in a fresh Colab runtime; the pedagogy lives in
     the cells that follow, not here.
     """
-    from pathlib import Path
-
-    from engiopt.cgan_cnn_2d.cgan_cnn_2d import Generator as CGAN2DGenerator
-
     artifact_dir = Path(artifact_dir)
     print("Rebuilding Notebook 01 artifacts in this runtime.")
     print("This trains the same lightweight workshop generator and may take a few minutes.")
