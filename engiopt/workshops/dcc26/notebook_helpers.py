@@ -515,7 +515,7 @@ def generate_designs(
     return ((raw.cpu().numpy() + 1.0) / 2.0).clip(0, 1)
 
 
-def rebuild_notebook01_artifacts(
+def rebuild_notebook01_artifacts(  # noqa: PLR0913
     problem,
     artifact_dir,
     *,
@@ -577,9 +577,7 @@ def rebuild_notebook01_artifacts(
     test_conds_np = np.stack([np.array(test_ds[k])[test_idx].astype(np.float32) for k in condition_keys], axis=1)
     baseline_designs = np.array(test_ds["optimal_design"])[test_idx].astype(np.float32)
     gen_designs = generate_designs(model, test_conds_np, latent_dim=latent_dim, device=device)
-    conditions_records = [
-        {k: float(test_conds_np[i, j]) for j, k in enumerate(condition_keys)} for i in range(n_samples)
-    ]
+    conditions_records = [{k: float(test_conds_np[i, j]) for j, k in enumerate(condition_keys)} for i in range(n_samples)]
 
     np.save(artifact_dir / "generated_designs.npy", gen_designs)
     np.save(artifact_dir / "baseline_designs.npy", baseline_designs)
@@ -1126,9 +1124,7 @@ def show_pairwise_distance_heatmap(
 
     # Single-set fallback -------------------------------------------------
     if reference is None:
-        fig, (ax, ax_hist) = plt.subplots(
-            1, 2, figsize=(11, 5), gridspec_kw={"width_ratios": [1.2, 1]}
-        )
+        fig, (ax, ax_hist) = plt.subplots(1, 2, figsize=(11, 5), gridspec_kw={"width_ratios": [1.2, 1]})
         im = ax.imshow(dists, cmap="viridis")
         ax.set_xlabel("Design index")
         ax.set_ylabel("Design index")
