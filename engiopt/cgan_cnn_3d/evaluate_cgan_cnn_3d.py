@@ -13,7 +13,6 @@ import tyro
 
 from engiopt import metrics
 from engiopt.cgan_cnn_3d.cgan_cnn_3d import Generator3D
-from engiopt.checkpoint_store import ModelSource
 from engiopt.checkpoint_store import resolve_named_checkpoint
 from engiopt.dataset_sample_conditions import sample_conditions
 
@@ -30,14 +29,10 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
-    model_source: ModelSource = "auto"
-    """Where to load the checkpoint package from."""
     hf_entity: str = "IDEALLab"
     """HF org/user where checkpoints are stored."""
     hf_repo_prefix: str = "engiopt"
     """HF repo prefix used for model-family repositories."""
-    local_model_dir: str | None = None
-    """Optional local checkpoint package directory."""
     n_samples: int = 50
     """Number of generated samples per seed."""
     sigma: float = 10.0
@@ -77,7 +72,7 @@ if __name__ == "__main__":
     ### Set Up Generator ###
 
     resolved = resolve_named_checkpoint(
-        model_source=args.model_source,
+        model_source="auto",
         problem_id=args.problem_id,
         algo="cgan_cnn_3d",
         seed=seed,
@@ -87,7 +82,6 @@ if __name__ == "__main__":
         wandb_project=args.wandb_project,
         wandb_entity=args.wandb_entity,
         wandb_artifact_names={"generator_3d.pth": f"{args.problem_id}_cgan_cnn_3d_generator_3d"},
-        local_model_dir=args.local_model_dir,
     )
     run_config = resolved.run_config
 

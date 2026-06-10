@@ -80,64 +80,27 @@ To train a model, you can run (for example):
 python engiopt/cgan_cnn_2d/cgan_cnn_2d.py --problem-id "beams2d" --track --wandb-entity None --save-model --n-epochs 200 --seed 1
 ```
 
-This will run a CGAN 2D using CNN model on the beams2d problem. `--track` will track the run on wandb, `--wandb-entity None` will use the default wandb entity, `--save-model` will save the model, `--n-epochs 200` will run for 200 epochs, and `--seed 1` will set the random seed.
+This trains a CGAN 2D w/ CNN on `beams2d`. The flags mirror W&B's: `--track` enables W&B logging, `--wandb-entity`/`--wandb-project` say where the run goes, `--save-model` uploads the checkpoint to HuggingFace, and `--hf-entity`/`--hf-repo-prefix` say where the checkpoint goes.
 
-By default, `--save-model` now stores a self-contained checkpoint package on the Hugging Face Hub. The default backend is:
+W&B holds media, scalars, and run history. HuggingFace holds the model weights. One log-in per service:
+
 ```
---checkpoint-backend hf
-```
-You can still force legacy or hybrid behavior when needed:
-```
---checkpoint-backend wandb
---checkpoint-backend both
---checkpoint-backend none
+wandb login              # for tracking
+huggingface-cli login    # for checkpoints (or: export HF_TOKEN=...)
 ```
 
-All HF-backed checkpoint packages contain the model files together with `run_config.json` and `metadata.json`, so evaluation does not depend on live WandB run config state.
-When W&B tracking is active, the HF package metadata also records the originating W&B run identity, and the W&B run summary records the HF repo, the seed-based convenience path, the exact uploaded HF revision, and an immutable run-specific HF package path.
+The defaults (`--hf-entity IDEALLab --hf-repo-prefix engiopt`) push to `huggingface.co/IDEALLab/engiopt-cgan-cnn-2d/beams2d/seed_1/`. The W&B run summary records the HF path for traceability. Each checkpoint package contains the model files plus `run_config.json` and `metadata.json`, so evaluation needs no live W&B state.
 
 For reproducible debugging runs, you can additionally enable strict deterministic mode:
 ```
 python engiopt/cgan_cnn_2d/cgan_cnn_2d.py --problem-id "beams2d" --seed 1 --strict-determinism
 ```
-This enables stricter PyTorch deterministic settings and deterministic data shuffling while keeping the default behavior unchanged when the flag is omitted.
 
-You can always check the help for more options:
+Then evaluate:
 ```
-python engiopt/cgan_cnn_2d/cgan_cnn_2d.py -h
+python engiopt/cgan_cnn_2d/evaluate_cgan_cnn_2d.py --problem-id "beams2d" --seed 1 --n-samples 10
 ```
-
-There are other available models in the `engiopt/` folder.
-
-Then you can restore a trained model and evaluate it:
-
-```
-python engiopt/cgan_cnn_2d/evaluate_cgan_cnn_2d.py --problem-id "beams2d" --wandb-entity None --seed 1 --n-samples 10
-```
-This will generate 10 designs from the trained model and run some [metrics](https://github.com/IDEALLab/EngiOpt/blob/main/engiopt/metrics.py) on them. This is what we used to generate the results in the paper.
-
-Evaluation now defaults to:
-```
---model-source auto
-```
-In `auto` mode, EngiOpt tries to resolve checkpoints in this order:
-1. Hugging Face package for the model family, problem, and seed
-2. Legacy WandB model artifact
-3. Explicit local checkpoint package directory if you pass `--local-model-dir`
-
-For new HF-backed runs, EngiOpt maintains both:
-- a seed-based convenience path such as `beams2d/seed_1`
-- an immutable run-specific path such as `beams2d/seed_1/run_<wandb_run_id>`
-
-You can force legacy WandB loading for historical runs:
-```
-python engiopt/cgan_cnn_2d/evaluate_cgan_cnn_2d.py --problem-id "beams2d" --seed 1 --model-source wandb
-```
-
-You can also point evaluation at a local package directory:
-```
-python engiopt/cgan_cnn_2d/evaluate_cgan_cnn_2d.py --problem-id "beams2d" --seed 1 --model-source local --local-model-dir /path/to/package
-```
+Evaluation pulls the checkpoint from HF automatically. For runs trained before the HF cutover, evaluation transparently falls back to the legacy W&B artifact. Pass `--hf-entity` / `--hf-repo-prefix` to point at a different HF repo.
 
 ### Surrogate model
 

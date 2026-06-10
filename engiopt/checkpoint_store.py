@@ -15,7 +15,7 @@ from huggingface_hub import snapshot_download
 
 import wandb
 
-CheckpointBackend = Literal["hf", "wandb", "both", "none"]
+CheckpointBackend = Literal["hf", "none"]
 ModelSource = Literal["auto", "hf", "wandb", "local"]
 
 
@@ -66,9 +66,12 @@ def save_checkpoint_package(  # noqa: PLR0913
     metadata: dict[str, Any] | None = None,
     primary_files: list[str] | None = None,
     extra_path_parts: list[str] | None = None,
-    wandb_artifacts: dict[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Save a checkpoint package to the configured remote backends."""
+    """Save a checkpoint package to HuggingFace.
+
+    W&B is no longer a checkpoint storage backend; the active W&B run still
+    receives a summary pointing at the HF package for traceability.
+    """
     info: dict[str, Any] = {
         "checkpoint_backend": checkpoint_backend,
         "hf_repo_id": None,
@@ -88,7 +91,7 @@ def save_checkpoint_package(  # noqa: PLR0913
     )
     metadata_payload.update(_build_wandb_run_metadata())
 
-    if checkpoint_backend in {"hf", "both"}:
+    if checkpoint_backend == "hf":
         repo_id = build_hf_repo_id(hf_entity, hf_repo_prefix, algo)
         package_path = build_hf_package_path(problem_id, seed, extra_path_parts)
         info["hf_repo_id"] = repo_id
@@ -124,12 +127,6 @@ def save_checkpoint_package(  # noqa: PLR0913
         info["hf_revision"] = revision
         metadata_payload["hf_revision"] = revision
 
-    if checkpoint_backend in {"wandb", "both"} and wandb_artifacts and wandb.run is not None:
-        for artifact_name, file_path in wandb_artifacts.items():
-            artifact = wandb.Artifact(artifact_name, type="model", metadata=metadata_payload)
-            artifact.add_file(file_path)
-            wandb.log_artifact(artifact, aliases=[f"seed_{seed}"])
-
     if wandb.run is not None:
         _log_checkpoint_summary_to_wandb(metadata_payload, info)
 
@@ -149,10 +146,18 @@ def resolve_named_checkpoint(  # noqa: PLR0913
     wandb_entity: str | None,
     wandb_artifact_names: dict[str, str],
     wandb_config_artifact_name: str | None = None,
+    wandb_artifact_alias: str | None = None,
     local_model_dir: str | None = None,
     extra_path_parts: list[str] | None = None,
 ) -> ResolvedCheckpoint:
-    """Resolve a checkpoint package by the standard EngiOpt problem/algo/seed naming."""
+    """Resolve a checkpoint package by the standard EngiOpt problem/algo/seed naming.
+
+    ``wandb_artifact_alias`` overrides the default ``f"seed_{seed}"`` alias used when
+    falling back to legacy W&B artifacts. Callers with custom alias schemes (e.g.
+    ``f"seed_{seed}_rec{r}_perf{p}"``) pass it here so the read-fallback resolves
+    historical artifacts that pre-date the HF cutover.
+    """
+    alias = wandb_artifact_alias or f"seed_{seed}"
     errors: list[str] = []
     if model_source in {"auto", "hf"}:
         try:
@@ -173,7 +178,7 @@ def resolve_named_checkpoint(  # noqa: PLR0913
                 artifact_names=wandb_artifact_names,
                 wandb_project=wandb_project,
                 wandb_entity=wandb_entity,
-                seed=seed,
+                alias=alias,
                 config_artifact_name=wandb_config_artifact_name,
             )
         except Exception as exc:
@@ -280,7 +285,7 @@ def _resolve_wandb_package(
     artifact_names: dict[str, str],
     wandb_project: str,
     wandb_entity: str | None,
-    seed: int,
+    alias: str,
     config_artifact_name: str | None,
 ) -> ResolvedCheckpoint:
     api = wandb.Api()
@@ -290,7 +295,7 @@ def _resolve_wandb_package(
             artifact_name=artifact_name,
             wandb_project=wandb_project,
             wandb_entity=wandb_entity,
-            seed=seed,
+            alias=alias,
         )
         artifact = api.artifact(artifact_path, type="model")
         artifact_dir = artifact.download()
@@ -301,7 +306,7 @@ def _resolve_wandb_package(
         artifact_name=config_artifact,
         wandb_project=wandb_project,
         wandb_entity=wandb_entity,
-        seed=seed,
+        alias=alias,
     )
     artifact = api.artifact(config_artifact_path, type="model")
     run = artifact.logged_by()
@@ -320,7 +325,7 @@ def _resolve_wandb_package(
                     artifact_name=artifact_name,
                     wandb_project=wandb_project,
                     wandb_entity=wandb_entity,
-                    seed=seed,
+                    alias=alias,
                 )
                 for file_name, artifact_name in artifact_names.items()
             },
@@ -417,10 +422,10 @@ def _build_wandb_artifact_path(
     artifact_name: str,
     wandb_project: str,
     wandb_entity: str | None,
-    seed: int,
+    alias: str,
 ) -> str:
     project_path = f"{wandb_entity}/{wandb_project}" if wandb_entity is not None else wandb_project
-    return f"{project_path}/{artifact_name}:seed_{seed}"
+    return f"{project_path}/{artifact_name}:{alias}"
 
 
 def _build_metadata(  # noqa: PLR0913
