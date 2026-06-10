@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import time
+from typing import Literal
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import matplotlib.pyplot as plt
@@ -22,6 +23,8 @@ from engiopt.checkpoint_store import save_checkpoint_package
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
+
+GeneratorOutputActivation = Literal["tanh", "sigmoid"]
 
 
 @dataclass
@@ -69,6 +72,8 @@ class Args:
     """number of cpu threads to use during batch generation"""
     latent_dim: int = 32
     """dimensionality of the latent space"""
+    generator_output_activation: GeneratorOutputActivation = "tanh"
+    """Generator output activation; use sigmoid for new density-field runs in [0, 1]."""
     sample_interval: int = 400
     """interval between image samples"""
 
@@ -94,6 +99,7 @@ class Generator(nn.Module):
         design_shape: tuple[int, int],
         num_filters: list[int] = [256, 128, 64, 32],  # noqa: B006
         out_channels: int = 1,
+        generator_output_activation: GeneratorOutputActivation = "tanh",
     ):
         super().__init__()
         self.design_shape = design_shape  # Store design shape
@@ -128,7 +134,7 @@ class Generator(nn.Module):
             nn.ReLU(inplace=True),
             # 50x50 -> 100x100 (kernel=4, stride=2, pad=1)
             nn.ConvTranspose2d(num_filters[3], out_channels, kernel_size=4, stride=2, padding=1, bias=False),
-            nn.Tanh(),
+            _make_output_activation(generator_output_activation),
         )
 
     def forward(self, z: th.Tensor, c: th.Tensor) -> th.Tensor:
@@ -152,6 +158,17 @@ class Generator(nn.Module):
 
         # Resize Image
         return transforms.Resize((self.design_shape[0], self.design_shape[1]))(out)
+
+
+def _make_output_activation(activation: GeneratorOutputActivation) -> nn.Module:
+    activations: dict[str, type[nn.Module]] = {
+        "tanh": nn.Tanh,
+        "sigmoid": nn.Sigmoid,
+    }
+    try:
+        return activations[activation]()
+    except KeyError:
+        raise ValueError(f"Unsupported generator output activation: {activation}") from None
 
 
 class Discriminator(nn.Module):
@@ -269,7 +286,12 @@ if __name__ == "__main__":
     adversarial_loss = th.nn.BCELoss()
 
     # Initialize generator and discriminator
-    generator = Generator(latent_dim=args.latent_dim, n_conds=n_conds, design_shape=design_shape)
+    generator = Generator(
+        latent_dim=args.latent_dim,
+        n_conds=n_conds,
+        design_shape=design_shape,
+        generator_output_activation=args.generator_output_activation,
+    )
     discriminator = Discriminator(n_conds)
 
     generator.to(device)

@@ -90,6 +90,7 @@ if __name__ == "__main__":
         latent_dim=run_config["latent_dim"],
         n_conds=len(problem.conditions_keys),
         design_shape=problem.design_space.shape,
+        generator_output_activation=run_config.get("generator_output_activation", "tanh"),
     )
     model.load_state_dict(ckpt["generator"])
     model.eval()  # Set to evaluation mode

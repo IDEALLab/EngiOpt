@@ -114,7 +114,7 @@ if __name__ == "__main__":
     diffusion = GaussianDiffusion1D(
         model,
         seq_length=np.prod(design_shape),
-        auto_normalize=True,
+        auto_normalize=run_config.get("auto_norm", True),
     ).to(device)
 
     diffusion.load_state_dict(ckpt["model"])

@@ -11,11 +11,13 @@ import numpy as np
 import pandas as pd
 import torch as th
 import tyro
+import wandb
 
 from engiopt import metrics
 from engiopt.checkpoint_store import resolve_named_checkpoint
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.diffusion_2d_cond.diffusion_2d_cond import beta_schedule
+from engiopt.diffusion_2d_cond.diffusion_2d_cond import denormalize_designs_from_diffusion_range
 from engiopt.diffusion_2d_cond.diffusion_2d_cond import DiffusionSampler
 
 
@@ -133,8 +135,17 @@ if __name__ == "__main__":
         gen_designs = ddm_sampler.sample_timestep(model, gen_designs, t, conditions_tensor)
 
     gen_designs = gen_designs.squeeze(1)
+    if "design_min" in ckpt and "design_max" in ckpt:
+        design_min = ckpt["design_min"].to(device)
+        design_max = ckpt["design_max"].to(device)
+        gen_designs = denormalize_designs_from_diffusion_range(gen_designs, design_min, design_max)
     gen_designs_np = gen_designs.detach().cpu().numpy().reshape(args.n_samples, *problem.design_space.shape)
-    gen_designs_np = np.clip(gen_designs_np, 1e-3, 1.0)
+    if "design_min" in ckpt and "design_max" in ckpt:
+        design_min_np = ckpt["design_min"].detach().cpu().numpy()
+        design_max_np = ckpt["design_max"].detach().cpu().numpy()
+        gen_designs_np = np.clip(gen_designs_np, design_min_np, design_max_np)
+    else:
+        gen_designs_np = np.clip(gen_designs_np, 1e-3, 1.0)
 
     # Compute metrics
     metrics_dict = metrics.metrics(
