@@ -14,6 +14,7 @@ import tyro
 import wandb
 
 from engiopt import metrics
+from engiopt.checkpoint_store import resolve_named_checkpoint
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.diffusion_2d_cond.diffusion_2d_cond import beta_schedule
 from engiopt.diffusion_2d_cond.diffusion_2d_cond import denormalize_designs_from_diffusion_range
@@ -32,6 +33,10 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
+    hf_entity: str = "IDEALLab"
+    """HF org/user where checkpoints are stored."""
+    hf_repo_prefix: str = "engiopt"
+    """HF repo prefix used for model-family repositories."""
     n_samples: int = 50
     """Number of generated samples per seed."""
     sigma: float = 10.0
@@ -71,24 +76,21 @@ if __name__ == "__main__":
     conditions_tensor = conditions_tensor.unsqueeze(1)
 
     ### Set Up Diffusion Model ###
-    if args.wandb_entity is not None:
-        artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_diffusion_2d_cond_model:seed_{seed}"
-    else:
-        artifact_path = f"{args.wandb_project}/{args.problem_id}_diffusion_2d_cond_model:seed_{seed}"
+    resolved = resolve_named_checkpoint(
+        model_source="auto",
+        problem_id=args.problem_id,
+        algo="diffusion_2d_cond",
+        seed=seed,
+        hf_entity=args.hf_entity,
+        hf_repo_prefix=args.hf_repo_prefix,
+        required_files=["model.pth"],
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_artifact_names={"model.pth": f"{args.problem_id}_diffusion_2d_cond_model"},
+    )
+    run_config = resolved.run_config
 
-    api = wandb.Api()
-    artifact = api.artifact(artifact_path, type="model")
-
-    class RunRetrievalError(ValueError):
-        def __init__(self):
-            super().__init__("Failed to retrieve the run")
-
-    run = artifact.logged_by()
-    if run is None or not hasattr(run, "config"):
-        raise RunRetrievalError
-
-    artifact_dir = artifact.download()
-    ckpt_path = os.path.join(artifact_dir, "model.pth")
+    ckpt_path = resolved.files["model.pth"]
     ckpt = th.load(ckpt_path, map_location=device)
 
     # Build UNet
@@ -100,7 +102,7 @@ if __name__ == "__main__":
         block_out_channels=(32, 64, 128, 256),
         down_block_types=("CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "CrossAttnDownBlock2D", "DownBlock2D"),
         up_block_types=("UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D"),
-        layers_per_block=run.config["layers_per_block"],
+        layers_per_block=run_config["layers_per_block"],
         transformer_layers_per_block=1,
         encoder_hid_dim=len(problem.conditions_keys),
         only_cross_attention=True,
@@ -108,18 +110,18 @@ if __name__ == "__main__":
 
     # Noise schedule
     options = {
-        "cosine": run.config["noise_schedule"] == "cosine",
-        "exp_biasing": run.config["noise_schedule"] == "exp",
+        "cosine": run_config["noise_schedule"] == "cosine",
+        "exp_biasing": run_config["noise_schedule"] == "exp",
         "exp_bias_factor": 1,
     }
     betas = beta_schedule(
-        t=run.config["num_timesteps"],
+        t=run_config["num_timesteps"],
         start=1e-4,
         end=0.02,
         scale=1.0,
         options=options,
     )
-    ddm_sampler = DiffusionSampler(run.config["num_timesteps"], betas)
+    ddm_sampler = DiffusionSampler(run_config["num_timesteps"], betas)
 
     model.load_state_dict(ckpt["model"])
     model.eval()
@@ -127,8 +129,8 @@ if __name__ == "__main__":
     # Generate and reshape
     design_shape: tuple = problem.design_space.shape
     gen_designs = th.randn((args.n_samples, 1, *design_shape), device=device)
-    assert run.config["num_timesteps"] is not None
-    for i in reversed(range(run.config["num_timesteps"])):
+    assert run_config["num_timesteps"] is not None
+    for i in reversed(range(run_config["num_timesteps"])):
         t = th.full((args.n_samples,), i, device=device, dtype=th.long)
         gen_designs = ddm_sampler.sample_timestep(model, gen_designs, t, conditions_tensor)
 

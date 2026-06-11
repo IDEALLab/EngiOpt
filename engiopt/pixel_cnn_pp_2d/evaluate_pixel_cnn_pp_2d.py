@@ -10,9 +10,9 @@ import numpy as np
 import pandas as pd
 import torch as th
 import tyro
-import wandb
 
 from engiopt import metrics
+from engiopt.checkpoint_store import resolve_named_checkpoint
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.pixel_cnn_pp_2d.pixel_cnn_pp_2d import PixelCNNpp
 from engiopt.pixel_cnn_pp_2d.pixel_cnn_pp_2d import sample_from_discretized_mix_logistic
@@ -32,6 +32,10 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
+    hf_entity: str = "IDEALLab"
+    """HF org/user where checkpoints are stored."""
+    hf_repo_prefix: str = "engiopt"
+    """HF repo prefix used for model-family repositories."""
     n_samples: int = 50
     """Number of generated samples per seed."""
     sigma: float = 10.0
@@ -73,32 +77,29 @@ if __name__ == "__main__":
     design_shape = (problem.design_space.shape[0], problem.design_space.shape[1])
 
     # Set up PixelCNN++ model
-    if args.wandb_entity is not None:
-        artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_pixel_cnn_pp_2d_model:seed_{seed}"
-    else:
-        artifact_path = f"{args.wandb_project}/{args.problem_id}_pixel_cnn_pp_2d_model:seed_{seed}"
+    resolved = resolve_named_checkpoint(
+        model_source="auto",
+        problem_id=args.problem_id,
+        algo="pixel_cnn_pp_2d",
+        seed=seed,
+        hf_entity=args.hf_entity,
+        hf_repo_prefix=args.hf_repo_prefix,
+        required_files=["model.pth"],
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_artifact_names={"model.pth": f"{args.problem_id}_pixel_cnn_pp_2d_model"},
+    )
+    run_config = resolved.run_config
 
-    api = wandb.Api()
-    artifact = api.artifact(artifact_path, type="model")
-
-    class RunRetrievalError(ValueError):
-        def __init__(self):
-            super().__init__("Failed to retrieve the run")
-
-    run = artifact.logged_by()
-    if run is None or not hasattr(run, "config"):
-        raise RunRetrievalError
-
-    artifact_dir = artifact.download()
-    ckpt_path = os.path.join(artifact_dir, "model.pth")
+    ckpt_path = resolved.files["model.pth"]
     ckpt = th.load(ckpt_path, map_location=device)
 
     model = PixelCNNpp(
-        nr_resnet=run.config["nr_resnet"],
-        nr_filters=run.config["nr_filters"],
-        nr_logistic_mix=run.config["nr_logistic_mix"],
-        resnet_nonlinearity=run.config["resnet_nonlinearity"],
-        dropout_p=run.config["dropout_p"],
+        nr_resnet=run_config["nr_resnet"],
+        nr_filters=run_config["nr_filters"],
+        nr_logistic_mix=run_config["nr_logistic_mix"],
+        resnet_nonlinearity=run_config["resnet_nonlinearity"],
+        dropout_p=run_config["dropout_p"],
         input_channels=1,
         nr_conditions=conditions_tensor.shape[1],
     )
@@ -122,7 +123,7 @@ if __name__ == "__main__":
         for i in range(design_shape[0]):
             for j in range(design_shape[1]):
                 out = model(data, batch_conds)
-                out_sample = sample_from_discretized_mix_logistic(out, run.config["nr_logistic_mix"])
+                out_sample = sample_from_discretized_mix_logistic(out, run_config["nr_logistic_mix"])
                 data[:, :, i, j] = out_sample.data[:, :, i, j]
 
         # move completed batch to CPU to free GPU memory and store

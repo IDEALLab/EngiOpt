@@ -32,6 +32,7 @@ import tqdm
 import tyro
 import wandb
 
+from engiopt.checkpoint_store import save_checkpoint_package
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
@@ -68,6 +69,10 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
+    hf_entity: str = "IDEALLab"
+    """HF organization or user for checkpoint storage."""
+    hf_repo_prefix: str = "engiopt"
+    """HF repo prefix used to build per-family model repos."""
     seed: int = 1
     """Random seed."""
 
@@ -978,9 +983,19 @@ if __name__ == "__main__":
                         }
 
                         th.save(ckpt_cvq, "cvqgan.pth")
-                        artifact_cvq = wandb.Artifact(f"{args.problem_id}_{args.algo}_cvqgan", type="model")
-                        artifact_cvq.add_file("cvqgan.pth")
-                        wandb.log_artifact(artifact_cvq, aliases=[f"seed_{args.seed}"])
+                        save_checkpoint_package(
+                            checkpoint_backend="hf",
+                            hf_entity=args.hf_entity,
+                            hf_repo_prefix=args.hf_repo_prefix,
+                            hf_private=False,
+                            problem_id=args.problem_id,
+                            algo=args.algo,
+                            seed=args.seed,
+                            checkpoint_files={"cvqgan.pth": "cvqgan.pth"},
+                            run_config=vars(args),
+                            metadata={"stage": "cvqgan"},
+                            primary_files=["cvqgan.pth"],
+                        )
 
         # Freeze CVQGAN for later use in Stage 2 Transformer
         for p in cvqgan.parameters():
@@ -1084,13 +1099,22 @@ if __name__ == "__main__":
 
                     th.save(ckpt_vq, "vqgan.pth")
                     th.save(ckpt_disc, "discriminator.pth")
-                    artifact_vq = wandb.Artifact(f"{args.problem_id}_{args.algo}_vqgan", type="model")
-                    artifact_vq.add_file("vqgan.pth")
-                    artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
-                    artifact_disc.add_file("discriminator.pth")
-
-                    wandb.log_artifact(artifact_vq, aliases=[f"seed_{args.seed}"])
-                    wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
+                    save_checkpoint_package(
+                        checkpoint_backend="hf",
+                        hf_entity=args.hf_entity,
+                        hf_repo_prefix=args.hf_repo_prefix,
+                        hf_private=False,
+                        problem_id=args.problem_id,
+                        algo=args.algo,
+                        seed=args.seed,
+                        checkpoint_files={
+                            "vqgan.pth": "vqgan.pth",
+                            "discriminator.pth": "discriminator.pth",
+                        },
+                        run_config=vars(args),
+                        metadata={"stage": "vqgan"},
+                        primary_files=["vqgan.pth"],
+                    )
 
     # Freeze VQGAN for later use in Stage 2 Transformer
     for p in vqgan.parameters():
@@ -1211,8 +1235,26 @@ if __name__ == "__main__":
             }
             th.save(ckpt_tr, "transformer.pth")
 
-        artifact_tr = wandb.Artifact(f"{args.problem_id}_{args.algo}_transformer", type="model")
-        artifact_tr.add_file("transformer.pth")
-        wandb.log_artifact(artifact_tr, aliases=[f"seed_{args.seed}"])
+        checkpoint_files = {"transformer.pth": "transformer.pth"}
+        if os.path.exists("vqgan.pth"):
+            checkpoint_files["vqgan.pth"] = "vqgan.pth"
+        if os.path.exists("discriminator.pth"):
+            checkpoint_files["discriminator.pth"] = "discriminator.pth"
+        if os.path.exists("cvqgan.pth"):
+            checkpoint_files["cvqgan.pth"] = "cvqgan.pth"
+
+        save_checkpoint_package(
+            checkpoint_backend="hf",
+            hf_entity=args.hf_entity,
+            hf_repo_prefix=args.hf_repo_prefix,
+            hf_private=False,
+            problem_id=args.problem_id,
+            algo=args.algo,
+            seed=args.seed,
+            checkpoint_files=checkpoint_files,
+            run_config=vars(args),
+            metadata={"stage": "transformer"},
+            primary_files=["transformer.pth"],
+        )
 
     wandb.finish()
