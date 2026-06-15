@@ -27,6 +27,7 @@ dependencies = [
     "numpy",
     "torch >= 2.5.0",
     "torchvision >= 0.20.1",
+    "torchdiffeq >= 0.2.5",
     "wandb >= 0.22.0",
     "tqdm >= 4.67.1",
     "matplotlib >= 3.9.2",
