@@ -127,7 +127,7 @@ def summarize_metrics(
             var_name="metric",
             value_name="value",
         )
-        .groupby(group_cols + ["metric"], as_index=False)
+        .groupby(group_cols + ["metric"], as_index=False, dropna=False)
         .agg(
             mean=("value", "mean"),
             median=("value", "median"),

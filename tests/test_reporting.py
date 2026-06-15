@@ -49,3 +49,33 @@ def test_summarize_metrics_builds_mean_and_std():
     assert summary_wide.iloc[0]["cog_mean"] == 1.0
     assert summary_wide.iloc[0]["cog_median"] == 1.0
     assert summary_wide.iloc[0]["mmd_median"] == 2.0
+
+
+def test_summarize_metrics_keeps_baselines_without_integration_steps():
+    raw = pd.DataFrame(
+        [
+            {
+                "problem_id": "beams2d",
+                "model_id": "flow_matching_2d_cond",
+                "integration_steps": 50,
+                "seed": 1,
+                "source_file": "flow.csv",
+                "cog": 1.0,
+            },
+            {
+                "problem_id": "beams2d",
+                "model_id": "diffusion_2d_cond",
+                "seed": 1,
+                "source_file": "diffusion.csv",
+                "cog": 2.0,
+            },
+        ]
+    )
+
+    summary_long, summary_wide = summarize_metrics(raw, metrics=("cog",))
+
+    assert set(summary_long["model_id"]) == {"flow_matching_2d_cond", "diffusion_2d_cond"}
+    assert set(summary_wide["model_id"]) == {"flow_matching_2d_cond", "diffusion_2d_cond"}
+    diffusion_row = summary_wide[summary_wide["model_id"] == "diffusion_2d_cond"].iloc[0]
+    assert pd.isna(diffusion_row["integration_steps"])
+    assert diffusion_row["cog_mean"] == 2.0
