@@ -19,6 +19,7 @@ import wandb
 from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.diffusion_2d_cond.diffusion_2d_cond import beta_schedule
+from engiopt.diffusion_2d_cond.diffusion_2d_cond import denormalize_designs_from_diffusion_range
 from engiopt.diffusion_2d_cond.diffusion_2d_cond import DiffusionSampler
 from engiopt.reporting import build_display_name
 from engiopt.reporting import write_metrics_csv
@@ -233,8 +234,21 @@ def evaluate_checkpoint(
     generation_samples_per_sec = n_gen / generation_runtime_sec if generation_runtime_sec > 0 else float("nan")
 
     gen_designs = gen_designs.squeeze(1)
+    if "design_min" in ckpt and "design_max" in ckpt:
+        gen_designs = denormalize_designs_from_diffusion_range(
+            gen_designs,
+            ckpt["design_min"].to(context.device),
+            ckpt["design_max"].to(context.device),
+        )
     gen_designs_np = gen_designs.detach().cpu().numpy().reshape(n_gen, *context.problem.design_space.shape)
-    gen_designs_np = np.clip(gen_designs_np, context.args.clip_min, context.args.clip_max)
+    if "design_min" in ckpt and "design_max" in ckpt:
+        gen_designs_np = np.clip(
+            gen_designs_np,
+            ckpt["design_min"].detach().cpu().numpy(),
+            ckpt["design_max"].detach().cpu().numpy(),
+        )
+    else:
+        gen_designs_np = np.clip(gen_designs_np, context.args.clip_min, context.args.clip_max)
 
     metrics_start = time.perf_counter()
     metrics_dict = metrics.metrics(
@@ -475,8 +489,21 @@ if __name__ == "__main__":
         generation_samples_per_sec = args.n_samples / generation_runtime_sec if generation_runtime_sec > 0 else float("nan")
 
         gen_designs = gen_designs.squeeze(1)
+        if "design_min" in ckpt and "design_max" in ckpt:
+            gen_designs = denormalize_designs_from_diffusion_range(
+                gen_designs,
+                ckpt["design_min"].to(device),
+                ckpt["design_max"].to(device),
+            )
         gen_designs_np = gen_designs.detach().cpu().numpy().reshape(args.n_samples, *problem.design_space.shape)
-        gen_designs_np = np.clip(gen_designs_np, args.clip_min, args.clip_max)
+        if "design_min" in ckpt and "design_max" in ckpt:
+            gen_designs_np = np.clip(
+                gen_designs_np,
+                ckpt["design_min"].detach().cpu().numpy(),
+                ckpt["design_max"].detach().cpu().numpy(),
+            )
+        else:
+            gen_designs_np = np.clip(gen_designs_np, args.clip_min, args.clip_max)
 
         metrics_start = time.perf_counter()
         metrics_dict = metrics.metrics(

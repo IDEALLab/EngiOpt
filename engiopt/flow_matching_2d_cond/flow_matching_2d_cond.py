@@ -5,7 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 from pathlib import Path
-import random
 import time
 from typing import Literal
 
@@ -18,12 +17,14 @@ import tyro
 
 from engiopt.best_epoch_selection import BestEpochTracker
 from engiopt import metrics
-from engiopt.best_epoch_selection import BestEpochTracker
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.flow_matching_2d_cond.core import args_to_dict
 from engiopt.flow_matching_2d_cond.core import build_model
 from engiopt.flow_matching_2d_cond.core import compute_flow_matching_loss
 from engiopt.flow_matching_2d_cond.core import generate_samples
+from engiopt.reproducibility import enable_strict_determinism
+from engiopt.reproducibility import make_dataloader_generator
+from engiopt.reproducibility import seed_training
 import wandb
 
 
@@ -45,6 +46,8 @@ class Args:
     """Wandb entity name."""
     seed: int = 1
     """Random seed."""
+    strict_determinism: bool = False
+    """Enable strict deterministic operations for reproducibility debugging."""
     save_model: bool = False
     """Saves the model to disk."""
     checkpoint_path: str = "model.pth"
@@ -179,11 +182,9 @@ if __name__ == "__main__":
         wandb.define_metric("validation/epoch")
         wandb.define_metric("validation/mmd", step_metric="validation/epoch")
 
-    th.manual_seed(args.seed)
-    np.random.seed(args.seed)
-    random.seed(args.seed)
-    th.backends.cudnn.deterministic = True
-    th.backends.cudnn.benchmark = False
+    seed_training(args.seed)
+    if args.strict_determinism:
+        enable_strict_determinism(warn_only=True)
     th.set_num_threads(args.n_cpu)
 
     device = select_device(args.device)
@@ -215,7 +216,12 @@ if __name__ == "__main__":
     conds_min = cond_tensors.amin(dim=tuple(range(1, cond_tensors.ndim))).view(1, 1, -1)
     conds_max = cond_tensors.amax(dim=tuple(range(1, cond_tensors.ndim))).view(1, 1, -1)
 
-    dataloader = th.utils.data.DataLoader(training_ds, batch_size=args.batch_size, shuffle=True)
+    dataloader = th.utils.data.DataLoader(
+        training_ds,
+        batch_size=args.batch_size,
+        shuffle=True,
+        generator=make_dataloader_generator(args.seed),
+    )
     optimizer = th.optim.AdamW(model.parameters(), lr=args.lr, betas=(args.b1, args.b2))
 
     # Initialize best epoch tracking

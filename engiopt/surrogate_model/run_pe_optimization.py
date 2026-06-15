@@ -34,11 +34,12 @@ from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.optimize import minimize
 from pymoo.termination import get_termination
 import tyro
+import wandb
 
+from engiopt.checkpoint_store import resolve_checkpoint_reference
 from engiopt.surrogate_model.model_pipeline import ModelPipeline
 from engiopt.surrogate_model.pymoo_pe_problem import PymooPowerElecProblem
 from engiopt.surrogate_model.training_utils import get_device
-import wandb
 
 if TYPE_CHECKING:
     from pymoo.core.algorithm import Algorithm
@@ -52,9 +53,9 @@ if TYPE_CHECKING:
 class Args:
     # Surrogate pipelines
     model_gain_path: str
-    """Path to the W&B artifact for the gain model, e.g. "engibench/engiopt/power_electronics__mlp_tabular_only__DcGain__50__1746000531_model:latest"."""
+    """Model ref for the gain surrogate (W&B artifact, HF package ref, or local package directory)."""
     model_ripple_path: str
-    """Path to the W&B artifact for the ripple model, e.g. "engibench/engiopt/power_electronics__mlp_tabular_only__Voltage_Ripple__50__1746001046_model:latest"."""
+    """Model ref for the ripple surrogate (W&B artifact, HF package ref, or local package directory)."""
 
     # Optimisation hyperparameters
     seed: int
@@ -171,21 +172,28 @@ def save_front(res: Result, output_dir: str) -> tuple[str, str, str, str, str]:
     return evals_csv, designs_csv, pareto_csv, evals_txt, designs_txt
 
 
-def load_model_from_wandb(artifact_path: str, run) -> ModelPipeline:
-    """Load a model pipeline from a W&B artifact.
+def load_model_from_reference(
+    model_ref: str,
+    *,
+    active_wandb_run: wandb.sdk.wandb_run.Run | None,
+) -> ModelPipeline:
+    """Load a model pipeline from a W&B artifact, HF package, or local directory.
 
     Args:
-        artifact_path: Path to the W&B artifact.
-        run: Active W&B run to use for downloading the artifact.
+        model_ref: Reference to the stored model package or artifact.
+        active_wandb_run: Optional active W&B run for artifact access.
 
     Returns:
         Loaded model pipeline.
     """
-    artifact = run.use_artifact(artifact_path, type="model")
-    artifact_dir = artifact.download()
-    # Find the .pkl file in the directory (assuming exactly one)
-    model_file = next(f for f in os.listdir(artifact_dir) if f.endswith(".pkl"))
-    return ModelPipeline.load(os.path.join(artifact_dir, model_file))
+    resolved = resolve_checkpoint_reference(
+        model_source="auto",
+        model_ref=model_ref,
+        required_files=[],
+        active_wandb_run=active_wandb_run,
+    )
+    model_file = next(file_path for file_path in resolved.files.values() if file_path.endswith(".pkl"))
+    return ModelPipeline.load(model_file)
 
 
 # ---------------------------------------------------------------------------
@@ -208,11 +216,15 @@ def main(args: Args) -> None:
         wandb.define_metric("generation")
         wandb.define_metric("*", step_metric="generation")
 
-    # load models from weights and biases
-    assert wandb.run is not None, f"W&B run not found for run_name={run_name} in {args.wandb_entity}/{args.wandb_project}"
-    # Load both models using the helper function
-    pipeline_g = load_model_from_wandb(args.model_gain_path, wandb.run)
-    pipeline_r = load_model_from_wandb(args.model_ripple_path, wandb.run)
+    active_wandb_run = wandb.run if args.track else None
+    pipeline_g = load_model_from_reference(
+        args.model_gain_path,
+        active_wandb_run=active_wandb_run,
+    )
+    pipeline_r = load_model_from_reference(
+        args.model_ripple_path,
+        active_wandb_run=active_wandb_run,
+    )
 
     problem = PymooPowerElecProblem(
         pipeline_r=pipeline_r,

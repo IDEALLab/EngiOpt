@@ -82,6 +82,12 @@ def prepare_data(problem: Problem, padding_size: int, device: th.device) -> tupl
     return training_ds, design_normalizer
 
 
+def _prepare_diffusion_batch(designs: th.Tensor, design_normalizer: Normalizer) -> th.Tensor:
+    """Normalize designs before reshaping them for the 1D diffusion model."""
+    normalized_designs = design_normalizer.normalize(designs)
+    return normalized_designs.view(normalized_designs.size(0), 1, -1)
+
+
 @dataclass
 class Args:
     """Command-line arguments."""
@@ -208,10 +214,7 @@ if __name__ == "__main__":
     for epoch in tqdm.trange(args.n_epochs):
         for i, data in enumerate(dataloader):
             designs = data[0]
-
-            designs_flat = designs.view(designs.size(0), 1, -1)  # flattens designs to a batch of 1D tensors with 1 channel
-            # Normalize the designs
-            designs = design_normalizer.normalize(designs)
+            designs_flat = _prepare_diffusion_batch(designs, design_normalizer)
 
             # Learning
             optimizer.zero_grad()

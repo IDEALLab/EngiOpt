@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import random
 import time
+from typing import Literal
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import matplotlib.pyplot as plt
@@ -21,6 +22,8 @@ import tqdm
 import tyro
 
 import wandb
+
+GeneratorOutputActivation = Literal["tanh", "sigmoid"]
 
 
 @dataclass
@@ -69,12 +72,20 @@ class Args:
     """number of cpu threads to use during batch generation"""
     latent_dim: int = 100
     """dimensionality of the latent space"""
+    generator_output_activation: GeneratorOutputActivation = "tanh"
+    """Generator output activation; use sigmoid for new density-field runs in [0, 1]."""
     sample_interval: int = 400
     """interval between image samples"""
 
 
 class Generator(nn.Module):
-    def __init__(self, latent_dim: int, n_conds: int, design_shape: tuple):
+    def __init__(
+        self,
+        latent_dim: int,
+        n_conds: int,
+        design_shape: tuple,
+        generator_output_activation: GeneratorOutputActivation = "tanh",
+    ):
         super().__init__()
         self.design_shape = design_shape  # Store design shape
 
@@ -91,7 +102,7 @@ class Generator(nn.Module):
             *block(256, 512),
             *block(512, 1024),
             nn.Linear(1024, int(np.prod(design_shape))),
-            nn.Tanh(),
+            _make_output_activation(generator_output_activation),
         )
 
     def forward(self, z: th.Tensor, conds: th.Tensor) -> th.Tensor:
@@ -107,6 +118,17 @@ class Generator(nn.Module):
         gen_input = th.cat((z, conds), -1)
         design = self.model(gen_input)
         return design.view(design.size(0), *self.design_shape)
+
+
+def _make_output_activation(activation: GeneratorOutputActivation) -> nn.Module:
+    activations: dict[str, type[nn.Module]] = {
+        "tanh": nn.Tanh,
+        "sigmoid": nn.Sigmoid,
+    }
+    try:
+        return activations[activation]()
+    except KeyError:
+        raise ValueError(f"Unsupported generator output activation: {activation}") from None
 
 
 class Discriminator(nn.Module):
@@ -176,7 +198,7 @@ if __name__ == "__main__":
     adversarial_loss = th.nn.BCELoss()
 
     # Initialize generator and discriminator
-    generator = Generator(args.latent_dim, n_conds, design_shape)
+    generator = Generator(args.latent_dim, n_conds, design_shape, args.generator_output_activation)
     discriminator = Discriminator()
 
     generator.to(device)

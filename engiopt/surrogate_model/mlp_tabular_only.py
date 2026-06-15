@@ -9,7 +9,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import field
 import os
-import random
 import time
 from typing import Any, Literal
 
@@ -21,15 +20,19 @@ from sklearn.preprocessing import RobustScaler
 import torch
 from torch.utils.data import DataLoader
 import tyro
+import wandb
 
 from engiopt.args_utils import parse_list_from_single_item_list
 from engiopt.args_utils import parse_list_from_string
+from engiopt.checkpoint_store import save_checkpoint_package
+from engiopt.reproducibility import enable_strict_determinism
+from engiopt.reproducibility import make_dataloader_generator
+from engiopt.reproducibility import seed_training
 from engiopt.surrogate_model.model_pipeline import DataPreprocessor
 from engiopt.surrogate_model.model_pipeline import ModelPipeline
 from engiopt.surrogate_model.training_utils import get_device
 from engiopt.surrogate_model.training_utils import PlainTabularDataset
 from engiopt.surrogate_model.training_utils import train_one_model
-import wandb
 
 
 @dataclass
@@ -92,7 +95,10 @@ class Args:
     track: bool = True
     wandb_project: str = "engiopt"
     wandb_entity: str | None = None
+    hf_entity: str = "IDEALLab"
+    hf_repo_prefix: str = "engiopt"
     seed: int = 42
+    strict_determinism: bool = False
     n_ensembles: int = 1
     algo: str = os.path.basename(__file__)[: -len(".py")]
     save_model: bool = False
@@ -182,12 +188,9 @@ def train_ensemble(
     seeds = [args.seed + i for i in range(args.n_ensembles)]
     for seed_i in seeds:
         print(f"=== Training model for seed={seed_i} ===")
-        torch.manual_seed(seed_i)
-        random.seed(seed_i)
-        torch.cuda.manual_seed(seed_i)
-        torch.cuda.manual_seed_all(seed_i)
-        torch.backends.cudnn.deterministic = True
-        torch.backends.cudnn.benchmark = False
+        seed_training(seed_i)
+        if args.strict_determinism:
+            enable_strict_determinism(warn_only=True)
 
         model_i, best_val_loss_i = train_one_model(args, train_loader, val_loader, device=device)
         ensemble_models.append(model_i)
@@ -264,6 +267,10 @@ def main(args: Args) -> float:  # noqa: PLR0915
     Returns:
         float: The best validation loss achieved by any model in the ensemble.
     """
+    _ = seed_training(args.seed)
+    if args.strict_determinism:
+        enable_strict_determinism(warn_only=True)
+
     problem = BUILTIN_PROBLEMS[args.problem_id]()
     problem.reset(seed=args.seed)
 
@@ -315,7 +322,12 @@ def main(args: Args) -> float:  # noqa: PLR0915
     val_dataset = PlainTabularDataset(x_val_s, y_val_s)
     test_dataset = PlainTabularDataset(x_test_s, y_test_s)
 
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True)
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=args.batch_size,
+        shuffle=True,
+        generator=make_dataloader_generator(args.seed),
+    )
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False)
     test_loader = DataLoader(test_dataset, batch_size=args.batch_size, shuffle=False)
 
@@ -341,11 +353,22 @@ def main(args: Args) -> float:  # noqa: PLR0915
     if args.save_model:
         pipeline.save(pipeline_filename, device=device)
         print(f"[INFO] Saved pipeline to {pipeline_filename}")
+        save_checkpoint_package(
+            checkpoint_backend="hf",
+            hf_entity=args.hf_entity,
+            hf_repo_prefix=args.hf_repo_prefix,
+            hf_private=False,
+            problem_id=args.problem_id,
+            algo=args.algo,
+            seed=args.seed,
+            checkpoint_files={os.path.basename(pipeline_filename): pipeline_filename},
+            run_config=vars(args),
+            metadata={"target_col": args.target_col},
+            primary_files=[os.path.basename(pipeline_filename)],
+            extra_path_parts=[args.target_col],
+        )
         if args.track:
-            artifact = wandb.Artifact(f"{run_name}_model", type="model")
-            artifact.add_file(pipeline_filename)
-            wandb.log_artifact(artifact, aliases=[f"seed_{args.seed}"])
-            print("[INFO] Uploaded model artifact to W&B.")
+            print("[INFO] Uploaded model artifact to configured checkpoint backend(s).")
 
     # Evaluate on test set if requested
     if args.test_model:
