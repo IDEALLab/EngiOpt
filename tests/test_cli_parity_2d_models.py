@@ -47,6 +47,10 @@ def test_eval_cli_parity_for_2d_models() -> None:
         "output_csv",
         "append_output",
         "checkpoint_path",
+        "checkpoint_source",
+        "checkpoint_package_label",
+        "hf_entity",
+        "hf_repo_prefix",
     }
 
     for path, fields in zip(eval_files, eval_field_sets, strict=True):
@@ -71,6 +75,12 @@ def test_train_cli_parity_for_2d_models() -> None:
         "wandb_entity",
         "seed",
         "save_model",
+        "checkpoint_backend",
+        "upload_top_k_checkpoints",
+        "hf_entity",
+        "hf_repo_prefix",
+        "hf_private",
+        "checkpoint_package_label",
         "n_epochs",
         "batch_size",
         "n_cpu",
@@ -79,4 +89,3 @@ def test_train_cli_parity_for_2d_models() -> None:
     for path, fields in zip(train_files, train_field_sets, strict=True):
         missing = sorted(required_shared_fields - fields)
         assert not missing, f"{path} missing shared train fields: {missing}"
-

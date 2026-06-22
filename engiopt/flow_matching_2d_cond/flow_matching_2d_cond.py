@@ -25,6 +25,8 @@ from engiopt.flow_matching_2d_cond.core import generate_samples
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
+from engiopt.topk_checkpoint_bundle import archive_topk_checkpoint_bundle
+from engiopt.topk_checkpoint_bundle import TopKBundleSpec
 import wandb
 
 
@@ -56,6 +58,18 @@ class Args:
     """Save a local checkpoint every N epochs. Disabled when set to 0."""
     checkpoint_dir: str = "checkpoints"
     """Directory for periodic local checkpoints."""
+    checkpoint_backend: Literal["hf", "none"] = "none"
+    """Durable checkpoint backend for optional top-k archive uploads."""
+    upload_top_k_checkpoints: bool = False
+    """Upload validation top-k checkpoints and metrics to durable storage at the end of training."""
+    hf_entity: str = "IDEALLab"
+    """HF org/user where checkpoint packages are stored."""
+    hf_repo_prefix: str = "engiopt"
+    """HF repo prefix used for model-family repositories."""
+    hf_private: bool = False
+    """Create/use private HF model repositories."""
+    checkpoint_package_label: str | None = None
+    """Optional durable package label. Defaults to a model-specific protocol label."""
     device: Literal["auto", "cpu", "mps", "cuda"] = "auto"
     """Device selection for local smoke runs and training."""
 
@@ -588,6 +602,24 @@ if __name__ == "__main__":
             artifact_model = wandb.Artifact(f"{args.problem_id}_{args.algo}_model", type="model")
             artifact_model.add_file(args.checkpoint_path, name="model.pth")
             wandb.log_artifact(artifact_model, aliases=[f"seed_{args.seed}"])
+
+    if args.upload_top_k_checkpoints and args.enable_best_epoch_selection:
+        info = archive_topk_checkpoint_bundle(
+            spec=TopKBundleSpec(
+                model_id=args.algo,
+                problem_id=args.problem_id,
+                seed=args.seed,
+                checkpoint_dir=Path(args.checkpoint_dir),
+                top_k=5,
+                package_label=args.checkpoint_package_label,
+            ),
+            checkpoint_backend=args.checkpoint_backend,
+            hf_entity=args.hf_entity,
+            hf_repo_prefix=args.hf_repo_prefix,
+            hf_private=args.hf_private,
+            run_config=args_to_dict(args),
+        )
+        print(f"Top-k checkpoint archive info: {info}")
 
     if args.track:
         wandb.finish()

@@ -7,7 +7,7 @@ import json
 import os
 from pathlib import Path
 import time
-from typing import Any
+from typing import Any, Literal
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import numpy as np
@@ -22,6 +22,7 @@ from engiopt.flow_matching_2d_cond.core import generate_samples
 from engiopt.flow_matching_2d_cond.core import load_local_checkpoint
 from engiopt.reporting import build_display_name
 from engiopt.reporting import write_metrics_csv
+from engiopt.topk_checkpoint_bundle import restore_topk_checkpoint_dir
 
 
 @dataclasses.dataclass
@@ -36,6 +37,10 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
+    hf_entity: str = "IDEALLab"
+    """HF org/user where checkpoint packages are stored."""
+    hf_repo_prefix: str = "engiopt"
+    """HF repo prefix used for model-family repositories."""
     track: bool = True
     """Log evaluation metrics and metadata to W&B."""
     run_name: str | None = None
@@ -56,6 +61,10 @@ class Args:
     """Optional local checkpoint path. Preferred over WandB artifacts when set."""
     checkpoint_dir: str | None = None
     """Optional directory containing validation_metrics.json and epoch checkpoints for top-k post-training selection."""
+    checkpoint_source: Literal["local", "auto", "hf"] = "local"
+    """Source for top-k checkpoints. 'local' preserves legacy behavior; 'auto' falls back to HF."""
+    checkpoint_package_label: str | None = None
+    """Optional HF package label for top-k checkpoint bundles."""
     select_best_of_top_k: bool = True
     """If True and checkpoint_dir is set, rank the shortlisted checkpoints on validation COG/FOG before final test evaluation."""
     top_k: int = 5
@@ -321,8 +330,19 @@ if __name__ == "__main__":
         write_metrics_csv([metrics_dict], out_path, append_output=args.append_output)
         checkpoint_source = "local_checkpoint"
 
-    elif args.checkpoint_dir is not None and args.select_best_of_top_k:
-        checkpoint_dir = Path(args.checkpoint_dir)
+    elif args.select_best_of_top_k and (args.checkpoint_dir is not None or args.checkpoint_source in {"auto", "hf"}):
+        checkpoint_dir, topk_checkpoint_source = restore_topk_checkpoint_dir(
+            model_id="flow_matching_2d_cond",
+            problem_id=args.problem_id,
+            seed=args.seed,
+            checkpoint_source=args.checkpoint_source,
+            checkpoint_dir=args.checkpoint_dir,
+            hf_entity=args.hf_entity,
+            hf_repo_prefix=args.hf_repo_prefix,
+            wandb_project=args.wandb_project,
+            wandb_entity=args.wandb_entity,
+            package_label=args.checkpoint_package_label,
+        )
         candidates = load_top_k_candidates(checkpoint_dir, args.top_k)
 
         val_conditions_tensor, val_sampled_conditions, val_sampled_designs_np, _ = sample_conditions(
@@ -348,7 +368,7 @@ if __name__ == "__main__":
                     device=device,
                     args=args,
                     generation_seed=args.seed + 1000 + rank,
-                    checkpoint_source="selected_top_k_checkpoint",
+                    checkpoint_source=topk_checkpoint_source,
                 ),
             )
             selection_validation_rows.append(
@@ -392,7 +412,7 @@ if __name__ == "__main__":
                 device=device,
                 args=args,
                 generation_seed=args.seed + 2000,
-                checkpoint_source="selected_top_k_checkpoint",
+                checkpoint_source=topk_checkpoint_source,
             ),
         )
         metrics_dict.update(
@@ -414,7 +434,7 @@ if __name__ == "__main__":
         )
         metrics_dict["display_name"] = build_display_name(metrics_dict)
         write_metrics_csv([metrics_dict], out_path, append_output=args.append_output)
-        checkpoint_source = "selected_top_k_checkpoint"
+        checkpoint_source = topk_checkpoint_source
         final_reference_designs_np = test_sampled_designs_np
 
     else:

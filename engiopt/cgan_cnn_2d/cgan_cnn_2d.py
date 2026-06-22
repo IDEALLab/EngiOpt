@@ -24,6 +24,8 @@ import tyro
 from engiopt import metrics
 from engiopt.best_epoch_selection import BestEpochTracker
 from engiopt.dataset_sample_conditions import sample_conditions
+from engiopt.topk_checkpoint_bundle import archive_topk_checkpoint_bundle
+from engiopt.topk_checkpoint_bundle import TopKBundleSpec
 import wandb
 
 GeneratorOutputActivation = Literal["tanh", "sigmoid"]
@@ -57,6 +59,18 @@ class Args:
     """Final generator checkpoint path used when save_model is enabled."""
     discriminator_checkpoint_path: str = "discriminator.pth"
     """Final discriminator checkpoint path used when save_model is enabled."""
+    checkpoint_backend: Literal["hf", "none"] = "none"
+    """Durable checkpoint backend for optional top-k archive uploads."""
+    upload_top_k_checkpoints: bool = False
+    """Upload validation top-k checkpoints and metrics to durable storage at the end of training."""
+    hf_entity: str = "IDEALLab"
+    """HF org/user where checkpoint packages are stored."""
+    hf_repo_prefix: str = "engiopt"
+    """HF repo prefix used for model-family repositories."""
+    hf_private: bool = False
+    """Create/use private HF model repositories."""
+    checkpoint_package_label: str | None = None
+    """Optional durable package label. Defaults to a model-specific protocol label."""
 
     # Algorithm specific
     n_epochs: int = 200
@@ -724,6 +738,24 @@ if __name__ == "__main__":
 
             wandb.log_artifact(artifact_gen, aliases=[f"seed_{args.seed}"])
             wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
+
+    if args.upload_top_k_checkpoints and args.enable_best_epoch_selection:
+        info = archive_topk_checkpoint_bundle(
+            spec=TopKBundleSpec(
+                model_id=args.algo,
+                problem_id=args.problem_id,
+                seed=args.seed,
+                checkpoint_dir=Path(args.checkpoint_dir),
+                top_k=5,
+                package_label=args.checkpoint_package_label,
+            ),
+            checkpoint_backend=args.checkpoint_backend,
+            hf_entity=args.hf_entity,
+            hf_repo_prefix=args.hf_repo_prefix,
+            hf_private=args.hf_private,
+            run_config=vars(args),
+        )
+        print(f"Top-k checkpoint archive info: {info}")
 
     if args.track:
         wandb.finish()
