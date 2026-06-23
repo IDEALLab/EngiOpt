@@ -34,8 +34,8 @@ class Args:
     """Durable backend. Use 'none' for a dry no-upload run."""
     checkpoint_archive_mode: CheckpointArchiveMode = "eval"
     """Archive mode: 'eval' strips optimizer state; 'full' preserves training checkpoints."""
-    hf_entity: str = "IDEALLab"
-    """HF org/user where checkpoint packages are stored."""
+    hf_entity: str = ""
+    """HF org/user where checkpoint packages are stored. Empty infers the token username."""
     hf_repo_prefix: str = "engiopt"
     """HF repo prefix used for model-family repositories."""
     hf_private: bool = False

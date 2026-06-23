@@ -32,8 +32,20 @@ class ResolvedCheckpoint:
 
 def build_hf_repo_id(hf_entity: str, hf_repo_prefix: str, algo: str) -> str:
     """Return the canonical HF repo id for an EngiOpt model family."""
+    hf_entity = hf_entity or _default_hf_entity()
     repo_suffix = algo.replace("_", "-")
     return f"{hf_entity}/{hf_repo_prefix}-{repo_suffix}"
+
+
+def _default_hf_entity() -> str:
+    """Return the HF username associated with the active token."""
+    try:
+        name = HfApi().whoami().get("name")
+    except Exception as exc:
+        raise ValueError("HF entity is required when no Hugging Face token is configured") from exc
+    if not name:
+        raise ValueError("HF entity is required; Hugging Face token did not resolve a username")
+    return str(name)
 
 
 def build_hf_package_path(problem_id: str, seed: int, extra_parts: list[str] | None = None) -> str:

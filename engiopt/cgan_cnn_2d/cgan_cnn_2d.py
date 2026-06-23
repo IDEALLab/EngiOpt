@@ -67,8 +67,8 @@ class Args:
     """Upload validation top-k checkpoints and metrics to durable storage at the end of training."""
     include_final_in_top_k_bundle: bool = False
     """Also include final/best checkpoint files in the durable top-k bundle."""
-    hf_entity: str = "IDEALLab"
-    """HF org/user where checkpoint packages are stored."""
+    hf_entity: str = ""
+    """HF org/user where checkpoint packages are stored. Empty infers the token username."""
     hf_repo_prefix: str = "engiopt"
     """HF repo prefix used for model-family repositories."""
     hf_private: bool = False

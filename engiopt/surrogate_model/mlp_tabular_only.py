@@ -95,7 +95,7 @@ class Args:
     track: bool = True
     wandb_project: str = "engiopt"
     wandb_entity: str | None = None
-    hf_entity: str = "IDEALLab"
+    hf_entity: str = ""
     hf_repo_prefix: str = "engiopt"
     seed: int = 42
     strict_determinism: bool = False

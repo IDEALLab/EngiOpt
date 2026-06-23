@@ -37,8 +37,8 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
-    hf_entity: str = "IDEALLab"
-    """HF org/user where checkpoint packages are stored."""
+    hf_entity: str = ""
+    """HF org/user where checkpoint packages are stored. Empty infers the token username."""
     hf_repo_prefix: str = "engiopt"
     """HF repo prefix used for model-family repositories."""
     track: bool = True
