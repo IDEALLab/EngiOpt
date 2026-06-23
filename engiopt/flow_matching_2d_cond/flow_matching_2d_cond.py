@@ -60,6 +60,8 @@ class Args:
     """Directory for periodic local checkpoints."""
     checkpoint_backend: Literal["hf", "none"] = "none"
     """Durable checkpoint backend for optional top-k archive uploads."""
+    checkpoint_archive_mode: Literal["eval", "full"] = "eval"
+    """Archive mode for top-k uploads: 'eval' strips optimizer state; 'full' preserves training checkpoints."""
     upload_top_k_checkpoints: bool = False
     """Upload validation top-k checkpoints and metrics to durable storage at the end of training."""
     include_final_in_top_k_bundle: bool = False
@@ -615,6 +617,7 @@ if __name__ == "__main__":
                 top_k=5,
                 package_label=args.checkpoint_package_label,
                 include_final=args.include_final_in_top_k_bundle,
+                archive_mode=args.checkpoint_archive_mode,
             ),
             checkpoint_backend=args.checkpoint_backend,
             hf_entity=args.hf_entity,

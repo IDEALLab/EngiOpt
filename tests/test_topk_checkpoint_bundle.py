@@ -6,6 +6,7 @@ import pytest
 import torch as th
 
 from engiopt.topk_checkpoint_bundle import collect_topk_checkpoint_files
+from engiopt.topk_checkpoint_bundle import _eval_only_checkpoint
 from engiopt.topk_checkpoint_bundle import infer_checkpoint_package_label
 from engiopt.topk_checkpoint_bundle import TopKBundleSpec
 
@@ -75,3 +76,25 @@ def test_infers_protocol_labels():
     assert infer_checkpoint_package_label("flow_matching_2d_cond", {"method": "euler", "integration_steps": 16}) == "euler_16"
     assert infer_checkpoint_package_label("diffusion_2d_cond", {"num_timesteps": 1000}) == "timesteps_1000"
     assert infer_checkpoint_package_label("cgan_cnn_2d", {"generator_output_activation": "sigmoid"}) == "activation_sigmoid"
+
+
+def test_eval_only_checkpoint_strips_optimizer_state():
+    checkpoint = {
+        "args": {"layers_per_block": 2},
+        "model": {"weight": th.tensor([1.0])},
+        "model_config": {"num_timesteps": 1000},
+        "design_min": th.tensor(0.0),
+        "design_max": th.tensor(1.0),
+        "optimizer": {"state": "large"},
+        "optimizer_generator": {"state": "large"},
+    }
+
+    eval_checkpoint = _eval_only_checkpoint(checkpoint, "flow_matching_2d_cond")
+
+    assert "model" in eval_checkpoint
+    assert "args" in eval_checkpoint
+    assert "model_config" in eval_checkpoint
+    assert "design_min" in eval_checkpoint
+    assert "design_max" in eval_checkpoint
+    assert "optimizer" not in eval_checkpoint
+    assert "optimizer_generator" not in eval_checkpoint

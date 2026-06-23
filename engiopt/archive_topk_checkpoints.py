@@ -9,6 +9,7 @@ from typing import Literal
 import tyro
 
 from engiopt.topk_checkpoint_bundle import archive_topk_checkpoint_bundle
+from engiopt.topk_checkpoint_bundle import CheckpointArchiveMode
 from engiopt.topk_checkpoint_bundle import CheckpointBackend
 from engiopt.topk_checkpoint_bundle import TopKBundleSpec
 
@@ -31,6 +32,8 @@ class Args:
     """Number of top validation-MMD checkpoints to archive."""
     checkpoint_backend: CheckpointBackend = "hf"
     """Durable backend. Use 'none' for a dry no-upload run."""
+    checkpoint_archive_mode: CheckpointArchiveMode = "eval"
+    """Archive mode: 'eval' strips optimizer state; 'full' preserves training checkpoints."""
     hf_entity: str = "IDEALLab"
     """HF org/user where checkpoint packages are stored."""
     hf_repo_prefix: str = "engiopt"
@@ -57,6 +60,7 @@ def main() -> None:
             package_label=args.checkpoint_package_label,
             include_final=not args.no_final,
             include_discriminator=args.include_discriminator,
+            archive_mode=args.checkpoint_archive_mode,
         ),
         checkpoint_backend=args.checkpoint_backend,
         hf_entity=args.hf_entity,

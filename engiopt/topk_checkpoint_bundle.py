@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
+import tempfile
 from typing import Any, Literal
 
 import torch as th
@@ -14,6 +15,7 @@ from engiopt.checkpoint_store import save_checkpoint_package
 
 CheckpointSource = Literal["auto", "local", "hf"]
 CheckpointBackend = Literal["hf", "none"]
+CheckpointArchiveMode = Literal["eval", "full"]
 
 
 @dataclass(frozen=True)
@@ -28,6 +30,7 @@ class TopKBundleSpec:
     package_label: str | None = None
     include_final: bool = True
     include_discriminator: bool = True
+    archive_mode: CheckpointArchiveMode = "eval"
 
 
 def infer_checkpoint_package_label(model_id: str, run_config: dict[str, Any] | None = None) -> str | None:
@@ -113,39 +116,46 @@ def archive_topk_checkpoint_bundle(
         return {"checkpoint_backend": "none"}
 
     checkpoint_files, inferred_config = collect_topk_checkpoint_files(spec)
-    merged_config = dict(inferred_config)
-    if run_config:
-        merged_config.update(run_config)
-    package_label = spec.package_label
-    inferred_package_label = infer_checkpoint_package_label(spec.model_id, merged_config)
+    with tempfile.TemporaryDirectory(prefix="engiopt_topk_archive_") as tmpdir:
+        upload_files = (
+            _materialize_eval_checkpoint_files(checkpoint_files, spec.model_id, Path(tmpdir))
+            if spec.archive_mode == "eval"
+            else checkpoint_files
+        )
+        merged_config = dict(inferred_config)
+        if run_config:
+            merged_config.update(run_config)
+        package_label = spec.package_label
+        inferred_package_label = infer_checkpoint_package_label(spec.model_id, merged_config)
 
-    bundle_metadata = {
-        "bundle_type": "top_k_checkpoints",
-        "model_id": spec.model_id,
-        "problem_id": spec.problem_id,
-        "seed": spec.seed,
-        "top_k": spec.top_k,
-        "package_label": package_label,
-        "inferred_package_label": inferred_package_label,
-    }
-    if metadata:
-        bundle_metadata.update(metadata)
+        bundle_metadata = {
+            "bundle_type": "top_k_checkpoints",
+            "checkpoint_archive_mode": spec.archive_mode,
+            "model_id": spec.model_id,
+            "problem_id": spec.problem_id,
+            "seed": spec.seed,
+            "top_k": spec.top_k,
+            "package_label": package_label,
+            "inferred_package_label": inferred_package_label,
+        }
+        if metadata:
+            bundle_metadata.update(metadata)
 
-    return save_checkpoint_package(
-        checkpoint_backend=checkpoint_backend,
-        hf_entity=hf_entity,
-        hf_repo_prefix=hf_repo_prefix,
-        hf_private=hf_private,
-        problem_id=spec.problem_id,
-        algo=spec.model_id,
-        seed=spec.seed,
-        checkpoint_files=checkpoint_files,
-        run_config=merged_config,
-        metadata=bundle_metadata,
-        primary_files=["validation_metrics.json"],
-        extra_path_parts=topk_extra_path_parts(package_label),
-        upload_run_copy=False,
-    )
+        return save_checkpoint_package(
+            checkpoint_backend=checkpoint_backend,
+            hf_entity=hf_entity,
+            hf_repo_prefix=hf_repo_prefix,
+            hf_private=hf_private,
+            problem_id=spec.problem_id,
+            algo=spec.model_id,
+            seed=spec.seed,
+            checkpoint_files=upload_files,
+            run_config=merged_config,
+            metadata=bundle_metadata,
+            primary_files=["validation_metrics.json"],
+            extra_path_parts=topk_extra_path_parts(package_label),
+            upload_run_copy=False,
+        )
 
 
 def collect_topk_checkpoint_files(spec: TopKBundleSpec) -> tuple[dict[str, str], dict[str, Any]]:
@@ -214,3 +224,69 @@ def _load_checkpoint_args(checkpoint_path: Path) -> dict[str, Any]:
         return {}
     args = checkpoint.get("args", {})
     return dict(args) if isinstance(args, dict) else {}
+
+
+def _materialize_eval_checkpoint_files(
+    checkpoint_files: dict[str, str],
+    model_id: str,
+    output_dir: Path,
+) -> dict[str, str]:
+    """Create eval-only checkpoint copies while preserving non-checkpoint files."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    materialized: dict[str, str] = {}
+    for filename, source in checkpoint_files.items():
+        source_path = Path(source)
+        if source_path.suffix != ".pth":
+            materialized[filename] = str(source_path)
+            continue
+
+        checkpoint = th.load(source_path, map_location="cpu")
+        if not isinstance(checkpoint, dict):
+            raise TypeError(f"Expected checkpoint dict in {source_path}")
+
+        target_path = output_dir / filename
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        th.save(_eval_only_checkpoint(checkpoint, model_id), target_path)
+        materialized[filename] = str(target_path)
+    return materialized
+
+
+def _eval_only_checkpoint(checkpoint: dict[str, Any], model_id: str) -> dict[str, Any]:
+    """Return the subset of a checkpoint required for deterministic evaluation."""
+    keep_by_model = {
+        "flow_matching_2d_cond": {
+            "args",
+            "design_max",
+            "design_min",
+            "design_shape",
+            "encoder_hid_dim",
+            "epoch",
+            "loss",
+            "model",
+            "model_config",
+        },
+        "diffusion_2d_cond": {
+            "args",
+            "batches_done",
+            "design_max",
+            "design_min",
+            "diffusion_sample_max",
+            "diffusion_sample_min",
+            "epoch",
+            "loss",
+            "model",
+            "model_config",
+        },
+        "cgan_cnn_2d": {
+            "args",
+            "batches_done",
+            "discriminator",
+            "epoch",
+            "generator",
+            "loss",
+        },
+    }
+    keys = keep_by_model.get(model_id)
+    if keys is None:
+        raise ValueError(f"Unsupported model_id for eval-only archive: {model_id}")
+    return {key: checkpoint[key] for key in keys if key in checkpoint}
