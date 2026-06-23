@@ -77,6 +77,7 @@ def test_train_cli_parity_for_2d_models() -> None:
         "save_model",
         "checkpoint_backend",
         "upload_top_k_checkpoints",
+        "include_final_in_top_k_bundle",
         "hf_entity",
         "hf_repo_prefix",
         "hf_private",

@@ -63,6 +63,8 @@ class Args:
     """Durable checkpoint backend for optional top-k archive uploads."""
     upload_top_k_checkpoints: bool = False
     """Upload validation top-k checkpoints and metrics to durable storage at the end of training."""
+    include_final_in_top_k_bundle: bool = False
+    """Also include final/best checkpoint files in the durable top-k bundle."""
     hf_entity: str = "IDEALLab"
     """HF org/user where checkpoint packages are stored."""
     hf_repo_prefix: str = "engiopt"
@@ -748,6 +750,7 @@ if __name__ == "__main__":
                 checkpoint_dir=Path(args.checkpoint_dir),
                 top_k=5,
                 package_label=args.checkpoint_package_label,
+                include_final=args.include_final_in_top_k_bundle,
             ),
             checkpoint_backend=args.checkpoint_backend,
             hf_entity=args.hf_entity,
