@@ -20,6 +20,8 @@ from engiopt.cgan_cnn_2d.cgan_cnn_2d import Generator
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.reporting import build_display_name
 from engiopt.reporting import write_metrics_csv
+from engiopt.timing import generation_timer_elapsed
+from engiopt.timing import generation_timer_start
 from engiopt.topk_checkpoint_bundle import restore_topk_checkpoint_dir
 
 
@@ -210,9 +212,9 @@ def evaluate_checkpoint(
     n_gen = conditions_tensor.shape[0]
     z = th.randn((n_gen, int(run_config["latent_dim"]), 1, 1), device=context.device, dtype=th.float)
 
-    generation_start = time.perf_counter()
+    generation_start = generation_timer_start(context.device)
     gen_designs = model(z, conditions_tensor)
-    generation_runtime_sec = time.perf_counter() - generation_start
+    generation_runtime_sec = generation_timer_elapsed(context.device, generation_start)
     generation_samples_per_sec = n_gen / generation_runtime_sec if generation_runtime_sec > 0 else float("nan")
 
     gen_designs_np = gen_designs.detach().cpu().numpy().reshape(n_gen, *context.problem.design_space.shape)
@@ -435,9 +437,9 @@ if __name__ == "__main__":
 
         z = th.randn((args.n_samples, int(run_config["latent_dim"]), 1, 1), device=device, dtype=th.float)
 
-        generation_start = time.perf_counter()
+        generation_start = generation_timer_start(device)
         gen_designs = model(z, conditions_tensor)
-        generation_runtime_sec = time.perf_counter() - generation_start
+        generation_runtime_sec = generation_timer_elapsed(device, generation_start)
         gen_designs_np = gen_designs.detach().cpu().numpy()
         gen_designs_np = gen_designs_np.reshape(args.n_samples, *problem.design_space.shape)
         generation_samples_per_sec = args.n_samples / generation_runtime_sec if generation_runtime_sec > 0 else float("nan")

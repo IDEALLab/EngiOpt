@@ -23,6 +23,8 @@ from engiopt.flow_matching_2d_cond.evaluate_flow_matching_2d_cond import checkpo
 from engiopt.flow_matching_2d_cond.evaluate_flow_matching_2d_cond import load_artifact_checkpoint
 from engiopt.flow_matching_2d_cond.evaluate_flow_matching_2d_cond import select_device
 from engiopt.reporting import write_metrics_csv
+from engiopt.timing import generation_timer_elapsed
+from engiopt.timing import generation_timer_start
 
 
 @dataclasses.dataclass
@@ -146,7 +148,7 @@ if __name__ == "__main__":
 
     all_rows: list[dict[str, Any]] = []
     for integration_steps in integration_steps_values:
-        generation_start = time.perf_counter()
+        generation_start = generation_timer_start(device)
         gen_designs = generate_samples(
             model=model,
             design_shape=problem.design_space.shape,
@@ -158,7 +160,7 @@ if __name__ == "__main__":
             atol=args.atol,
             rtol=args.rtol
         )
-        generation_runtime_sec = time.perf_counter() - generation_start
+        generation_runtime_sec = generation_timer_elapsed(device, generation_start)
         gen_designs = gen_designs.squeeze(1)
         gen_designs_np = gen_designs.detach().cpu().numpy().reshape(args.n_samples, *problem.design_space.shape)
         gen_designs_np = np.clip(gen_designs_np, args.clip_min, args.clip_max)

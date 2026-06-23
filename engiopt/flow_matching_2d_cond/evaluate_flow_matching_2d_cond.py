@@ -22,6 +22,8 @@ from engiopt.flow_matching_2d_cond.core import generate_samples
 from engiopt.flow_matching_2d_cond.core import load_local_checkpoint
 from engiopt.reporting import build_display_name
 from engiopt.reporting import write_metrics_csv
+from engiopt.timing import generation_timer_elapsed
+from engiopt.timing import generation_timer_start
 from engiopt.topk_checkpoint_bundle import restore_topk_checkpoint_dir
 
 
@@ -227,7 +229,7 @@ def evaluate_checkpoint(
     model.eval()
 
     th.manual_seed(context.generation_seed)
-    generation_start = time.perf_counter()
+    generation_start = generation_timer_start(context.device)
     gen_designs = generate_samples(
         model=model,
         design_shape=context.problem.design_space.shape,
@@ -239,7 +241,7 @@ def evaluate_checkpoint(
         rtol=context.args.rtol,
         method=context.args.method,
     )
-    generation_runtime_sec = time.perf_counter() - generation_start
+    generation_runtime_sec = generation_timer_elapsed(context.device, generation_start)
     gen_designs = gen_designs.squeeze(1)
     gen_designs_np = gen_designs.detach().cpu().numpy().reshape(conditions_tensor.shape[0], *context.problem.design_space.shape)
     gen_designs_np = np.clip(gen_designs_np, context.args.clip_min, context.args.clip_max)
@@ -471,7 +473,7 @@ if __name__ == "__main__":
         model.load_state_dict(checkpoint["model"])
         model.eval()
 
-        generation_start = time.perf_counter()
+        generation_start = generation_timer_start(device)
         gen_designs = generate_samples(
             model=model,
             design_shape=problem.design_space.shape,
@@ -483,7 +485,7 @@ if __name__ == "__main__":
             rtol=args.rtol,
             method=args.method,
         )
-        generation_runtime_sec = time.perf_counter() - generation_start
+        generation_runtime_sec = generation_timer_elapsed(device, generation_start)
         gen_designs = gen_designs.squeeze(1)
         gen_designs_np = gen_designs.detach().cpu().numpy().reshape(args.n_samples, *problem.design_space.shape)
         gen_designs_np = np.clip(gen_designs_np, args.clip_min, args.clip_max)

@@ -23,6 +23,8 @@ from engiopt.diffusion_2d_cond.diffusion_2d_cond import denormalize_designs_from
 from engiopt.diffusion_2d_cond.diffusion_2d_cond import DiffusionSampler
 from engiopt.reporting import build_display_name
 from engiopt.reporting import write_metrics_csv
+from engiopt.timing import generation_timer_elapsed
+from engiopt.timing import generation_timer_start
 from engiopt.topk_checkpoint_bundle import restore_topk_checkpoint_dir
 
 
@@ -232,14 +234,14 @@ def evaluate_checkpoint(
     model.eval()
 
     th.manual_seed(context.generation_seed)
-    generation_start = time.perf_counter()
+    generation_start = generation_timer_start(context.device)
     design_shape: tuple = context.problem.design_space.shape
     n_gen = conditions_tensor.shape[0]
     gen_designs = th.randn((n_gen, 1, *design_shape), device=context.device)
     for i in reversed(range(num_timesteps)):
         t = th.full((n_gen,), i, device=context.device, dtype=th.long)
         gen_designs = ddm_sampler.sample_timestep(model, gen_designs, t, conditions_tensor)
-    generation_runtime_sec = time.perf_counter() - generation_start
+    generation_runtime_sec = generation_timer_elapsed(context.device, generation_start)
     generation_samples_per_sec = n_gen / generation_runtime_sec if generation_runtime_sec > 0 else float("nan")
 
     gen_designs = gen_designs.squeeze(1)
@@ -500,12 +502,12 @@ if __name__ == "__main__":
         model.eval()
 
         design_shape: tuple = problem.design_space.shape
-        generation_start = time.perf_counter()
+        generation_start = generation_timer_start(device)
         gen_designs = th.randn((args.n_samples, 1, *design_shape), device=device)
         for i in reversed(range(num_timesteps)):
             t = th.full((args.n_samples,), i, device=device, dtype=th.long)
             gen_designs = ddm_sampler.sample_timestep(model, gen_designs, t, conditions_tensor)
-        generation_runtime_sec = time.perf_counter() - generation_start
+        generation_runtime_sec = generation_timer_elapsed(device, generation_start)
         generation_samples_per_sec = args.n_samples / generation_runtime_sec if generation_runtime_sec > 0 else float("nan")
 
         gen_designs = gen_designs.squeeze(1)
