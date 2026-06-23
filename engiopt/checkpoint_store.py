@@ -66,6 +66,7 @@ def save_checkpoint_package(  # noqa: PLR0913
     metadata: dict[str, Any] | None = None,
     primary_files: list[str] | None = None,
     extra_path_parts: list[str] | None = None,
+    upload_run_copy: bool = True,
 ) -> dict[str, Any]:
     """Save a checkpoint package to HuggingFace.
 
@@ -99,7 +100,11 @@ def save_checkpoint_package(  # noqa: PLR0913
         metadata_payload["hf_repo_id"] = repo_id
         metadata_payload["hf_package_path"] = package_path
 
-        run_package_path = build_hf_run_package_path(package_path, metadata_payload.get("wandb_run_id"))
+        run_package_path = (
+            build_hf_run_package_path(package_path, metadata_payload.get("wandb_run_id"))
+            if upload_run_copy
+            else None
+        )
         info["hf_run_package_path"] = run_package_path
         if run_package_path is not None:
             metadata_payload["hf_run_package_path"] = run_package_path

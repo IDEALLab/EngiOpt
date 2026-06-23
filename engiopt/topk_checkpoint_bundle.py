@@ -144,6 +144,7 @@ def archive_topk_checkpoint_bundle(
         metadata=bundle_metadata,
         primary_files=["validation_metrics.json"],
         extra_path_parts=topk_extra_path_parts(package_label),
+        upload_run_copy=False,
     )
 
 
