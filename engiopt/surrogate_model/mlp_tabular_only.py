@@ -24,6 +24,7 @@ import wandb
 
 from engiopt.args_utils import parse_list_from_single_item_list
 from engiopt.args_utils import parse_list_from_string
+from engiopt.checkpoint_store import save_checkpoint_package
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
@@ -94,6 +95,8 @@ class Args:
     track: bool = True
     wandb_project: str = "engiopt"
     wandb_entity: str | None = None
+    hf_entity: str = "IDEALLab"
+    hf_repo_prefix: str = "engiopt"
     seed: int = 42
     strict_determinism: bool = False
     n_ensembles: int = 1
@@ -350,11 +353,22 @@ def main(args: Args) -> float:  # noqa: PLR0915
     if args.save_model:
         pipeline.save(pipeline_filename, device=device)
         print(f"[INFO] Saved pipeline to {pipeline_filename}")
+        save_checkpoint_package(
+            checkpoint_backend="hf",
+            hf_entity=args.hf_entity,
+            hf_repo_prefix=args.hf_repo_prefix,
+            hf_private=False,
+            problem_id=args.problem_id,
+            algo=args.algo,
+            seed=args.seed,
+            checkpoint_files={os.path.basename(pipeline_filename): pipeline_filename},
+            run_config=vars(args),
+            metadata={"target_col": args.target_col},
+            primary_files=[os.path.basename(pipeline_filename)],
+            extra_path_parts=[args.target_col],
+        )
         if args.track:
-            artifact = wandb.Artifact(f"{run_name}_model", type="model")
-            artifact.add_file(pipeline_filename)
-            wandb.log_artifact(artifact, aliases=[f"seed_{args.seed}"])
-            print("[INFO] Uploaded model artifact to W&B.")
+            print("[INFO] Uploaded model artifact to configured checkpoint backend(s).")
 
     # Evaluate on test set if requested
     if args.test_model:

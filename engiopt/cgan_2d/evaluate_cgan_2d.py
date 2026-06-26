@@ -13,8 +13,8 @@ import tyro
 
 from engiopt import metrics
 from engiopt.cgan_2d.cgan_2d import Generator
+from engiopt.checkpoint_store import resolve_named_checkpoint
 from engiopt.dataset_sample_conditions import sample_conditions
-import wandb
 
 
 @dataclasses.dataclass
@@ -29,6 +29,10 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name (if any)."""
+    hf_entity: str = "IDEALLab"
+    """HF org/user where checkpoints are stored."""
+    hf_repo_prefix: str = "engiopt"
+    """HF repo prefix used for model-family repositories."""
     n_samples: int = 50
     """Number of generated samples per seed."""
     sigma: float = 10.0
@@ -66,36 +70,34 @@ if __name__ == "__main__":
     )
 
     ### Set Up Generator ###
-    if args.wandb_entity is not None:
-        artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_cgan_2d_generator:seed_{seed}"
-    else:
-        artifact_path = f"{args.wandb_project}/{args.problem_id}_cgan_2d_generator:seed_{seed}"
+    resolved = resolve_named_checkpoint(
+        model_source="auto",
+        problem_id=args.problem_id,
+        algo="cgan_2d",
+        seed=seed,
+        hf_entity=args.hf_entity,
+        hf_repo_prefix=args.hf_repo_prefix,
+        required_files=["generator.pth"],
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_artifact_names={"generator.pth": f"{args.problem_id}_cgan_2d_generator"},
+    )
+    run_config = resolved.run_config
 
-    api = wandb.Api()
-    artifact = api.artifact(artifact_path, type="model")
-
-    class RunRetrievalError(ValueError):
-        def __init__(self):
-            super().__init__("Failed to retrieve the run")
-
-    run = artifact.logged_by()
-    if run is None or not hasattr(run, "config"):
-        raise RunRetrievalError
-
-    artifact_dir = artifact.download()
-    ckpt_path = os.path.join(artifact_dir, "generator.pth")
+    ckpt_path = resolved.files["generator.pth"]
     ckpt = th.load(ckpt_path, map_location=device)
 
     model = Generator(
-        latent_dim=run.config["latent_dim"],
+        latent_dim=run_config["latent_dim"],
         n_conds=len(problem.conditions_keys),
         design_shape=problem.design_space.shape,
+        generator_output_activation=run_config.get("generator_output_activation", "tanh"),
     ).to(device)
     model.load_state_dict(ckpt["generator"])
     model.eval()
 
     # Sample noise and generate designs
-    z = th.randn((args.n_samples, run.config["latent_dim"]), device=device)
+    z = th.randn((args.n_samples, run_config["latent_dim"]), device=device)
     gen_designs = model(z, conditions_tensor)
     gen_designs_np = gen_designs.detach().cpu().numpy()
     gen_designs_np = np.clip(gen_designs_np, 1e-3, 1.0)

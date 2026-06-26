@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import time
+from typing import Literal
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import matplotlib.pyplot as plt
@@ -19,9 +20,12 @@ import tqdm
 import tyro
 import wandb
 
+from engiopt.checkpoint_store import save_checkpoint_package
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
+
+GeneratorOutputActivation = Literal["tanh", "sigmoid"]
 
 
 @dataclass
@@ -40,6 +44,10 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
+    hf_entity: str = "IDEALLab"
+    """HF org/user where checkpoints are stored."""
+    hf_repo_prefix: str = "engiopt"
+    """HF repo prefix used for model-family repositories."""
     seed: int = 1
     """Random seed."""
 
@@ -65,12 +73,20 @@ class Args:
     """number of cpu threads to use during batch generation"""
     latent_dim: int = 100
     """dimensionality of the latent space"""
+    generator_output_activation: GeneratorOutputActivation = "tanh"
+    """Generator output activation; use sigmoid for new density-field runs in [0, 1]."""
     sample_interval: int = 400
     """interval between image samples"""
 
 
 class Generator(nn.Module):
-    def __init__(self, latent_dim: int, n_conds: int, design_shape: tuple):
+    def __init__(
+        self,
+        latent_dim: int,
+        n_conds: int,
+        design_shape: tuple,
+        generator_output_activation: GeneratorOutputActivation = "tanh",
+    ):
         super().__init__()
         self.design_shape = design_shape  # Store design shape
 
@@ -87,7 +103,7 @@ class Generator(nn.Module):
             *block(256, 512),
             *block(512, 1024),
             nn.Linear(1024, int(np.prod(design_shape))),
-            nn.Tanh(),
+            _make_output_activation(generator_output_activation),
         )
 
     def forward(self, z: th.Tensor, conds: th.Tensor) -> th.Tensor:
@@ -103,6 +119,17 @@ class Generator(nn.Module):
         gen_input = th.cat((z, conds), -1)
         design = self.model(gen_input)
         return design.view(design.size(0), *self.design_shape)
+
+
+def _make_output_activation(activation: GeneratorOutputActivation) -> nn.Module:
+    activations: dict[str, type[nn.Module]] = {
+        "tanh": nn.Tanh,
+        "sigmoid": nn.Sigmoid,
+    }
+    try:
+        return activations[activation]()
+    except KeyError:
+        raise ValueError(f"Unsupported generator output activation: {activation}") from None
 
 
 class Discriminator(nn.Module):
@@ -169,7 +196,7 @@ if __name__ == "__main__":
     adversarial_loss = th.nn.BCELoss()
 
     # Initialize generator and discriminator
-    generator = Generator(args.latent_dim, n_conds, design_shape)
+    generator = Generator(args.latent_dim, n_conds, design_shape, args.generator_output_activation)
     discriminator = Discriminator()
 
     generator.to(device)
@@ -317,13 +344,17 @@ if __name__ == "__main__":
 
                     th.save(ckpt_gen, "generator.pth")
                     th.save(ckpt_disc, "discriminator.pth")
-                    if args.track:
-                        artifact_gen = wandb.Artifact(f"{args.problem_id}_{args.algo}_generator", type="model")
-                        artifact_gen.add_file("generator.pth")
-                        artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
-                        artifact_disc.add_file("discriminator.pth")
-
-                        wandb.log_artifact(artifact_gen, aliases=[f"seed_{args.seed}"])
-                        wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
+                    save_checkpoint_package(
+                        checkpoint_backend="hf",
+                        hf_entity=args.hf_entity,
+                        hf_repo_prefix=args.hf_repo_prefix,
+                        hf_private=False,
+                        problem_id=args.problem_id,
+                        algo=args.algo,
+                        seed=args.seed,
+                        checkpoint_files={"generator.pth": "generator.pth", "discriminator.pth": "discriminator.pth"},
+                        run_config=vars(args),
+                        primary_files=["generator.pth"],
+                    )
 
     wandb.finish()

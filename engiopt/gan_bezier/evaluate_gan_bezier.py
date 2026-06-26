@@ -13,11 +13,11 @@ import torch as th
 import tyro
 
 from engiopt import metrics
+from engiopt.checkpoint_store import resolve_named_checkpoint
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.gan_bezier.gan_bezier import Generator
 from engiopt.gan_bezier.gan_bezier import prepare_data
 from engiopt.transforms import flatten_dict_factory
-import wandb
 
 if TYPE_CHECKING:
     from gymnasium import spaces
@@ -37,6 +37,10 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
+    hf_entity: str = "IDEALLab"
+    """HF org/user where checkpoints are stored."""
+    hf_repo_prefix: str = "engiopt"
+    """HF repo prefix used for model-family repositories."""
     n_samples: int = 50
     """Number of generated samples per seed."""
     sigma: float = 10.0
@@ -76,32 +80,29 @@ if __name__ == "__main__":
     )
 
     ### Set Up Generator ###
-    if args.wandb_entity is not None:
-        artifact_path = f"{args.wandb_entity}/{args.wandb_project}/{args.problem_id}_gan_bezier_generator:seed_{seed}"
-    else:
-        artifact_path = f"{args.wandb_project}/{args.problem_id}_gan_bezier_generator:seed_{seed}"
+    resolved = resolve_named_checkpoint(
+        model_source="auto",
+        problem_id=args.problem_id,
+        algo="gan_bezier",
+        seed=seed,
+        hf_entity=args.hf_entity,
+        hf_repo_prefix=args.hf_repo_prefix,
+        required_files=["bezier_generator.pth"],
+        wandb_project=args.wandb_project,
+        wandb_entity=args.wandb_entity,
+        wandb_artifact_names={"bezier_generator.pth": f"{args.problem_id}_gan_bezier_generator"},
+    )
+    run_config = resolved.run_config
 
-    api = wandb.Api()
-    artifact = api.artifact(artifact_path, type="model")
-
-    class RunRetrievalError(ValueError):
-        def __init__(self):
-            super().__init__("Failed to retrieve the run")
-
-    run = artifact.logged_by()
-    if run is None or not hasattr(run, "config"):
-        raise RunRetrievalError
-
-    artifact_dir = artifact.download()
-    ckpt_path = os.path.join(artifact_dir, "bezier_generator.pth")
+    ckpt_path = resolved.files["bezier_generator.pth"]
     ckpt = th.load(ckpt_path, map_location=device)
 
     _, design_scalars_normalizer, _ = prepare_data(problem, args.n_samples, device)
 
     model = Generator(
-        latent_dim=run.config["latent_dim"],
-        noise_dim=run.config["noise_dim"],
-        n_control_points=run.config["bezier_control_pts"],
+        latent_dim=run_config["latent_dim"],
+        noise_dim=run_config["noise_dim"],
+        n_control_points=run_config["bezier_control_pts"],
         n_data_points=coords_space.shape[1],
         design_scalars_normalizer=design_scalars_normalizer,
         eps=_EPS,
@@ -112,8 +113,8 @@ if __name__ == "__main__":
 
     # Sample noise and generate designs
     bounds = (0.0, 1.0)  # Bounds for angle of attack
-    c = (bounds[1] - bounds[0]) * th.rand(args.n_samples, run.config["latent_dim"], device=device) + bounds[0]
-    z = 0.5 * th.randn(args.n_samples, run.config["noise_dim"], device=device)
+    c = (bounds[1] - bounds[0]) * th.rand(args.n_samples, run_config["latent_dim"], device=device) + bounds[0]
+    z = 0.5 * th.randn(args.n_samples, run_config["noise_dim"], device=device)
     gen_designs, _, _, _, _, alphas = model(c, z)
 
     gen_designs_np = gen_designs.detach().cpu().numpy()

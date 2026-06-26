@@ -18,12 +18,16 @@ import tqdm
 import tyro
 import wandb
 
+from engiopt.checkpoint_store import save_checkpoint_package
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+DIFFUSION_SAMPLE_MIN = -1.0
+DIFFUSION_SAMPLE_MAX = 1.0
 
 
 @dataclass
@@ -42,6 +46,10 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
+    hf_entity: str = "IDEALLab"
+    """HF org/user where checkpoints are stored."""
+    hf_repo_prefix: str = "engiopt"
+    """HF repo prefix used for model-family repositories."""
     seed: int = 1
     """Random seed."""
 
@@ -68,7 +76,7 @@ class Args:
     sample_interval: int = 400
     """interval between image samples"""
 
-    num_timesteps: int = 250
+    num_timesteps: int = 1000
     """Number of timesteps in the diffusion schedule"""
     layers_per_block: int = 2
     """Layers per U-NET block"""
@@ -125,6 +133,41 @@ def get_index_from_list(vals: th.Tensor, t: th.Tensor, x_shape: tuple[int, ...])
     return out.reshape(batch_size, *((1,) * (len(x_shape) - 1))).to(t.device)
 
 
+def normalize_designs_to_diffusion_range(
+    designs: th.Tensor,
+    design_min: th.Tensor,
+    design_max: th.Tensor,
+) -> th.Tensor:
+    """Map designs from their problem bounds to [-1, 1]."""
+    denom = th.clamp(design_max - design_min, min=th.finfo(designs.dtype).eps)
+    designs_01 = (designs - design_min) / denom
+    return designs_01 * (DIFFUSION_SAMPLE_MAX - DIFFUSION_SAMPLE_MIN) + DIFFUSION_SAMPLE_MIN
+
+
+def denormalize_designs_from_diffusion_range(
+    designs: th.Tensor,
+    design_min: th.Tensor,
+    design_max: th.Tensor,
+) -> th.Tensor:
+    """Map designs from [-1, 1] back to the original problem scale."""
+    designs_01 = (designs - DIFFUSION_SAMPLE_MIN) / (DIFFUSION_SAMPLE_MAX - DIFFUSION_SAMPLE_MIN)
+    return designs_01 * (design_max - design_min) + design_min
+
+
+def get_design_bounds(
+    problem,
+    fallback_designs: th.Tensor,
+    device: th.device,
+) -> tuple[th.Tensor, th.Tensor]:
+    """Get finite design bounds from the EngiBench problem definition."""
+    design_min = th.as_tensor(problem.design_space.low, dtype=fallback_designs.dtype, device=device)
+    design_max = th.as_tensor(problem.design_space.high, dtype=fallback_designs.dtype, device=device)
+    if th.isfinite(design_min).all() and th.isfinite(design_max).all() and th.all(design_max > design_min):
+        return design_min, design_max
+
+    return fallback_designs.min(), fallback_designs.max()
+
+
 class DiffusionSampler:
     # Precompute the sqrt alphas and sqrt one minus alphas
     def __init__(self, t: int, betas: th.Tensor):
@@ -137,6 +180,22 @@ class DiffusionSampler:
         self.sqrt_alphas_cumprod = th.sqrt(self.alphas_cumprod)
         self.sqrt_one_minus_alphas_cumprod = th.sqrt(1.0 - self.alphas_cumprod)
         self.posterior_variance = self.betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+        self.posterior_mean_coef1 = self.betas * th.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
+        self.posterior_mean_coef2 = (1.0 - self.alphas_cumprod_prev) * th.sqrt(self.alphas) / (1.0 - self.alphas_cumprod)
+
+    def _posterior_mean(self, noise_pred: th.Tensor, x_noisy: th.Tensor, t: th.Tensor) -> th.Tensor:
+        sqrt_alphas_cumprod_t = get_index_from_list(self.sqrt_alphas_cumprod, t, x_noisy.shape)
+        sqrt_one_minus_alphas_cumprod_t = get_index_from_list(
+            self.sqrt_one_minus_alphas_cumprod,
+            t,
+            x_noisy.shape,
+        )
+        pred_original_sample = (x_noisy - sqrt_one_minus_alphas_cumprod_t * noise_pred) / sqrt_alphas_cumprod_t
+        pred_original_sample = pred_original_sample.clamp(DIFFUSION_SAMPLE_MIN, DIFFUSION_SAMPLE_MAX)
+
+        posterior_mean_coef1_t = get_index_from_list(self.posterior_mean_coef1, t, x_noisy.shape)
+        posterior_mean_coef2_t = get_index_from_list(self.posterior_mean_coef2, t, x_noisy.shape)
+        return posterior_mean_coef1_t * pred_original_sample + posterior_mean_coef2_t * x_noisy
 
     def forward_diffusion_sample(
         self,
@@ -186,19 +245,18 @@ class DiffusionSampler:
         noise_pred: th.Tensor,
         x_noisy: th.Tensor,
         t: th.Tensor,
-        device: th.device = th.device("cpu"),  # noqa: B008
+        device: th.device | None = None,
     ) -> th.Tensor:
         """Takes an image, noise and step; returns denoised image."""
-        betas_t = get_index_from_list(self.betas, t, x_noisy.shape).to(device)
-        sqrt_one_minus_alphas_cumprod_t = get_index_from_list(self.sqrt_one_minus_alphas_cumprod, t, x_noisy.shape).to(
-            device
-        )
-        sqrt_recip_alphas_t = get_index_from_list(self.sqrt_recip_alphas, t, x_noisy.shape).to(device)
-        model_mean = sqrt_recip_alphas_t * (x_noisy - betas_t * noise_pred / sqrt_one_minus_alphas_cumprod_t)
+        if device is None:
+            device = x_noisy.device
+
+        model_mean = self._posterior_mean(noise_pred, x_noisy, t).to(device)
         posterior_variance_t = get_index_from_list(self.posterior_variance, t, x_noisy.shape).to(device)
+        t_mask = ((t != 0).float().view(-1, *([1] * (len(x_noisy.shape) - 1)))).to(device)
 
         # mean + variance
-        return (model_mean + th.sqrt(posterior_variance_t) * noise_pred).to(device)
+        return (model_mean + th.sqrt(posterior_variance_t) * th.randn_like(x_noisy) * t_mask).to(device)
 
     def lossfn_builder(self) -> Callable[[th.Tensor, th.Tensor], th.Tensor]:
         """Returns the loss function for the diffusion model."""
@@ -222,13 +280,9 @@ class DiffusionSampler:
         """
         model.eval()
         with th.no_grad():
-            betas_t = get_index_from_list(self.betas, t, x.shape)
-            sqrt_one_minus_alphas_cumprod_t = get_index_from_list(self.sqrt_one_minus_alphas_cumprod, t, x.shape)
-            sqrt_recip_alphas_t = get_index_from_list(self.sqrt_recip_alphas, t, x.shape)
-
             # Call model (current image - noise prediction)
             noise_pred = model(x, t, encoder_hidden_states).sample
-            model_mean = sqrt_recip_alphas_t * (x - betas_t * noise_pred / sqrt_one_minus_alphas_cumprod_t)
+            model_mean = self._posterior_mean(noise_pred, x, t)
 
             posterior_variance_t = get_index_from_list(self.posterior_variance, t, x.shape)
             if t_mask is None:
@@ -292,9 +346,8 @@ if __name__ == "__main__":
     filtered_ds = th.zeros(len(training_ds), design_shape[0], design_shape[1], device=device)
     for i in range(len(training_ds)):
         filtered_ds[i] = training_ds[i]["optimal_design"][:].reshape(1, design_shape[0], design_shape[1])
-    filtered_ds_max = filtered_ds.max()
-    filtered_ds_min = filtered_ds.min()
-    filtered_ds_norm = (filtered_ds - filtered_ds_min) / (filtered_ds_max - filtered_ds_min)
+    filtered_ds_min, filtered_ds_max = get_design_bounds(problem, filtered_ds, device)
+    filtered_ds_norm = normalize_designs_to_diffusion_range(filtered_ds, filtered_ds_min, filtered_ds_max)
     training_ds = th.utils.data.TensorDataset(
         filtered_ds_norm.flatten(1), *[training_ds[key][:] for key in problem.conditions_keys]
     )
@@ -414,7 +467,8 @@ if __name__ == "__main__":
 
                     # Plot the image created by each output
                     for j, tensor in enumerate(designs):
-                        img = tensor.cpu().numpy()  # Extract x and y coordinates
+                        design = denormalize_designs_from_diffusion_range(tensor, filtered_ds_min, filtered_ds_max)
+                        img = design.cpu().numpy()  # Extract x and y coordinates
                         dc = hidden_states[j, 0, :].cpu()
                         axes[j].imshow(img[0])  # image plot
                         title = [(problem.conditions_keys[i], f"{dc[i]:.2f}") for i in range(len(problem.conditions_keys))]
@@ -439,13 +493,24 @@ if __name__ == "__main__":
                         "model": model.state_dict(),
                         "optimizer_generator": optimizer.state_dict(),
                         "loss": loss.item(),
+                        "design_min": filtered_ds_min.detach().cpu(),
+                        "design_max": filtered_ds_max.detach().cpu(),
+                        "diffusion_sample_min": DIFFUSION_SAMPLE_MIN,
+                        "diffusion_sample_max": DIFFUSION_SAMPLE_MAX,
                     }
 
                     th.save(ckpt_model, "model.pth")
-                    if args.track:
-                        artifact_model = wandb.Artifact(f"{args.problem_id}_{args.algo}_model", type="model")
-                        artifact_model.add_file("model.pth")
-
-                        wandb.log_artifact(artifact_model, aliases=[f"seed_{args.seed}"])
+                    save_checkpoint_package(
+                        checkpoint_backend="hf",
+                        hf_entity=args.hf_entity,
+                        hf_repo_prefix=args.hf_repo_prefix,
+                        hf_private=False,
+                        problem_id=args.problem_id,
+                        algo=args.algo,
+                        seed=args.seed,
+                        checkpoint_files={"model.pth": "model.pth"},
+                        run_config=vars(args),
+                        primary_files=["model.pth"],
+                    )
 
     wandb.finish()

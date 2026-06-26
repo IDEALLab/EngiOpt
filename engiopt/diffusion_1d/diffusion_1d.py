@@ -22,6 +22,7 @@ import tqdm
 import tyro
 import wandb
 
+from engiopt.checkpoint_store import save_checkpoint_package
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
@@ -46,6 +47,12 @@ class Normalizer:
     def denormalize(self, x: th.Tensor) -> th.Tensor:
         """Denormalizes the input tensor."""
         return x * (self.max_val - self.min_val + self.eps) + self.min_val
+
+
+def _prepare_diffusion_batch(designs: th.Tensor, design_normalizer: Normalizer) -> th.Tensor:
+    """Normalize designs and add the channel dimension expected by GaussianDiffusion1D."""
+    designs = design_normalizer.normalize(designs)
+    return designs.view(designs.size(0), 1, -1)
 
 
 def prepare_data(problem: Problem, padding_size: int, device: th.device) -> tuple[th.utils.data.TensorDataset, Normalizer]:
@@ -100,6 +107,10 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
+    hf_entity: str = "IDEALLab"
+    """HF org/user where checkpoints are stored."""
+    hf_repo_prefix: str = "engiopt"
+    """HF repo prefix used for model-family repositories."""
     seed: int = 1
     """Random seed."""
 
@@ -182,7 +193,7 @@ if __name__ == "__main__":
     diffusion = GaussianDiffusion1D(
         model,
         seq_length=np.prod(design_shape),
-        auto_normalize=True,
+        auto_normalize=args.auto_norm,
     ).to(device)
 
     # Configure data loader
@@ -206,9 +217,7 @@ if __name__ == "__main__":
         for i, data in enumerate(dataloader):
             designs = data[0]
 
-            designs_flat = designs.view(designs.size(0), 1, -1)  # flattens designs to a batch of 1D tensors with 1 channel
-            # Normalize the designs
-            designs = design_normalizer.normalize(designs)
+            designs_flat = _prepare_diffusion_batch(designs, design_normalizer)
 
             # Learning
             optimizer.zero_grad()
@@ -274,10 +283,17 @@ if __name__ == "__main__":
                     }
 
                     th.save(ckpt, "model.pth")
-                    if args.track:
-                        artifact = wandb.Artifact(f"{args.problem_id}_{args.algo}_model", type="model")
-                        artifact.add_file("model.pth")
-
-                        wandb.log_artifact(artifact, aliases=[f"seed_{args.seed}"])
+                    save_checkpoint_package(
+                        checkpoint_backend="hf",
+                        hf_entity=args.hf_entity,
+                        hf_repo_prefix=args.hf_repo_prefix,
+                        hf_private=False,
+                        problem_id=args.problem_id,
+                        algo=args.algo,
+                        seed=args.seed,
+                        checkpoint_files={"model.pth": "model.pth"},
+                        run_config=vars(args),
+                        primary_files=["model.pth"],
+                    )
 
     wandb.finish()

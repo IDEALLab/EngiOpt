@@ -22,6 +22,7 @@ import tqdm
 import tyro
 import wandb
 
+from engiopt.checkpoint_store import save_checkpoint_package
 from engiopt.metrics import dpp_diversity
 from engiopt.metrics import mmd
 from engiopt.reproducibility import enable_strict_determinism
@@ -47,6 +48,10 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
+    hf_entity: str = "IDEALLab"
+    """HF org/user where checkpoints are stored."""
+    hf_repo_prefix: str = "engiopt"
+    """HF repo prefix used for model-family repositories."""
     seed: int = 1
     """Random seed."""
 
@@ -681,15 +686,18 @@ if __name__ == "__main__":
 
             th.save(ckpt_gen, "generator_3d.pth")
             th.save(ckpt_disc, "discriminator_3d.pth")
-
-            if args.track:
-                artifact_gen = wandb.Artifact(f"{args.problem_id}_{args.algo}_generator_3d", type="model")
-                artifact_gen.add_file("generator_3d.pth")
-                artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator_3d", type="model")
-                artifact_disc.add_file("discriminator_3d.pth")
-
-                wandb.log_artifact(artifact_gen, aliases=[f"seed_{args.seed}"])
-                wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
+            save_checkpoint_package(
+                checkpoint_backend="hf",
+                hf_entity=args.hf_entity,
+                hf_repo_prefix=args.hf_repo_prefix,
+                hf_private=False,
+                problem_id=args.problem_id,
+                algo=args.algo,
+                seed=args.seed,
+                checkpoint_files={"generator_3d.pth": "generator_3d.pth", "discriminator_3d.pth": "discriminator_3d.pth"},
+                run_config=vars(args),
+                primary_files=["generator_3d.pth"],
+            )
 
             print("3D models saved successfully!")
 

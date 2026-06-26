@@ -21,6 +21,7 @@ import tqdm
 import tyro
 import wandb
 
+from engiopt.checkpoint_store import save_checkpoint_package
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
@@ -46,6 +47,10 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
+    hf_entity: str = "IDEALLab"
+    """HF org/user where checkpoints are stored."""
+    hf_repo_prefix: str = "engiopt"
+    """HF repo prefix used for model-family repositories."""
     seed: int = 1
     """Random seed."""
 
@@ -340,13 +345,17 @@ if __name__ == "__main__":
 
                     th.save(ckpt_gen, "generator.pth")
                     th.save(ckpt_disc, "discriminator.pth")
-                    if args.track:
-                        artifact_gen = wandb.Artifact(f"{args.problem_id}_{args.algo}_generator", type="model")
-                        artifact_gen.add_file("generator.pth")
-                        artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
-                        artifact_disc.add_file("discriminator.pth")
-
-                        wandb.log_artifact(artifact_gen, aliases=[f"seed_{args.seed}"])
-                        wandb.log_artifact(artifact_disc, aliases=[f"seed_{args.seed}"])
+                    save_checkpoint_package(
+                        checkpoint_backend="hf",
+                        hf_entity=args.hf_entity,
+                        hf_repo_prefix=args.hf_repo_prefix,
+                        hf_private=False,
+                        problem_id=args.problem_id,
+                        algo=args.algo,
+                        seed=args.seed,
+                        checkpoint_files={"generator.pth": "generator.pth", "discriminator.pth": "discriminator.pth"},
+                        run_config=vars(args),
+                        primary_files=["generator.pth"],
+                    )
 
     wandb.finish()

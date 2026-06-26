@@ -40,6 +40,7 @@ dependencies = [
     "datasets >=4.0.0",
     "einops >=0.8.0",
     "requests >=2.31.0",
+    "huggingface-hub >= 0.30.0",
 ]
 dynamic = ["version"]
 
@@ -127,6 +128,7 @@ ignore = [
   "EM102",    # f-string-in-exception
   "E741",     # ambiguous-variable-name
   "FIX002",   # flake8-fixme (flake8-todos is enough)
+  "PLR0913",  # too-many-arguments (common in scientific/ML configs)
   "PTH",      # flake8-use-pathlib
   "S101",     # flake8-bandit: assert
   "S301",     # suspicious-pickle-usage
@@ -294,6 +296,8 @@ module = [
     "plotly.*",
     "einops",
     "einops.*",
+    "huggingface_hub",
+    "huggingface_hub.*",
     "torchvision.*",
     "requests",
 ]
