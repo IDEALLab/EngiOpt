@@ -13,6 +13,7 @@ from diffusers import UNet2DConditionModel
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import matplotlib.pyplot as plt
 import numpy as np
+from PIL import Image
 import torch as th
 import tyro
 import wandb
@@ -71,6 +72,10 @@ class Args:
     """Maximum value used when clipping generated designs."""
     output_dir: str = "qualitative_bundle"
     """Output root directory."""
+    image_dpi: int = 300
+    """DPI metadata written to exported qualitative PNGs."""
+    image_min_pixels: int = 600
+    """Minimum shorter-side pixel count for exported qualitative PNGs."""
     track: bool = False
     """Log output image files to W&B."""
     run_name: str | None = None
@@ -154,11 +159,26 @@ def load_cgan_checkpoint(
     return checkpoint, dict(run.config)
 
 
-def save_grayscale_image(image: np.ndarray, output_path: Path) -> None:
+def save_grayscale_image(image: np.ndarray, output_path: Path, *, dpi: int = 300, min_pixels: int = 600) -> None:
     """Save a single 2D design image in EngiBench Reds_r colormap."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    cmap = plt.get_cmap("Reds_r")
-    plt.imsave(output_path, image, cmap=cmap, vmin=0.0, vmax=1.0)
+    save_colormap_png(image, output_path, dpi=dpi, min_pixels=min_pixels)
+
+
+def save_colormap_png(image: np.ndarray, output_path: Path, *, dpi: int = 300, min_pixels: int = 600) -> None:
+    """Save a design array as a publication-resolution PNG without changing values."""
+    array = np.asarray(image, dtype=np.float32)
+    if array.ndim != 2:
+        raise ValueError(f"Expected a 2D image array, got shape {array.shape}")
+    normalized = np.clip(array, 0.0, 1.0)
+    rgba = plt.get_cmap("Reds_r")(normalized, bytes=True)
+    pil_image = Image.fromarray(rgba, mode="RGBA")
+    shorter_side = min(pil_image.size)
+    if min_pixels > 0 and shorter_side < min_pixels:
+        scale = int(np.ceil(min_pixels / shorter_side))
+        new_size = (pil_image.size[0] * scale, pil_image.size[1] * scale)
+        pil_image = pil_image.resize(new_size, resample=Image.Resampling.NEAREST)
+    pil_image.save(output_path, dpi=(dpi, dpi))
 
 
 def to_jsonable_dict(values: dict[str, Any]) -> dict[str, Any]:
@@ -172,12 +192,11 @@ def to_jsonable_dict(values: dict[str, Any]) -> dict[str, Any]:
     return converted
 
 
-def save_design_raster(designs_np: np.ndarray, output_path: Path) -> None:
+def save_design_raster(designs_np: np.ndarray, output_path: Path, *, dpi: int = 300, min_pixels: int = 600) -> None:
     """Save a tiled raster of designs using 3x1 layout (3 rows, 1 col for compact visualization)."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
     grid = build_design_grid(designs_np, rows=3, cols=1)
-    cmap = plt.get_cmap("Reds_r")
-    plt.imsave(output_path, grid, cmap=cmap, vmin=0.0, vmax=1.0)
+    save_colormap_png(grid, output_path, dpi=dpi, min_pixels=min_pixels)
 
 
 if __name__ == "__main__":
@@ -265,8 +284,18 @@ if __name__ == "__main__":
                 ).squeeze(1)
                 flow_np = flow_designs.detach().cpu().numpy().reshape(args.n_samples, *design_shape)
                 flow_np = np.clip(flow_np, args.clip_min, args.clip_max)
-                save_design_raster(flow_np, problem_output_dir / f"rank_{rank}.png")
-                save_design_raster(flow_np, problem_output_dir / f"flow_matching_2d_cond_rank_{rank}.png")
+                save_design_raster(
+                    flow_np,
+                    problem_output_dir / f"rank_{rank}.png",
+                    dpi=args.image_dpi,
+                    min_pixels=args.image_min_pixels,
+                )
+                save_design_raster(
+                    flow_np,
+                    problem_output_dir / f"flow_matching_2d_cond_rank_{rank}.png",
+                    dpi=args.image_dpi,
+                    min_pixels=args.image_min_pixels,
+                )
                 if rank == 1:
                     flow_rank_1_np = flow_np
                 flow_top_k_metadata.append(
@@ -283,7 +312,12 @@ if __name__ == "__main__":
             flow_integration_steps = int(flow_top_k_metadata[0]["flow_integration_steps"])
             flow_num_train_timesteps = int(flow_top_k_metadata[0]["flow_num_train_timesteps"])
             flow_np = flow_rank_1_np
-            save_design_raster(flow_np, problem_output_dir / "flow_matching_2d_cond.png")
+            save_design_raster(
+                flow_np,
+                problem_output_dir / "flow_matching_2d_cond.png",
+                dpi=args.image_dpi,
+                min_pixels=args.image_min_pixels,
+            )
         else:
             # Flow matching generation
             flow_ckpt_path = resolve_optional_pattern(args.flow_checkpoint_path, problem_id, args.seed)
@@ -406,14 +440,54 @@ if __name__ == "__main__":
         diffusion_image = diffusion_np[sample_idx]
         cgan_image = cgan_np[sample_idx]
 
-        save_grayscale_image(reference, problem_output_dir / "reference.png")
-        save_design_raster(sampled_designs_np, problem_output_dir / "reference_raster.png")
-        save_grayscale_image(flow_image, problem_output_dir / "flow_matching_2d_cond.png")
-        save_design_raster(flow_np, problem_output_dir / "flow_matching_2d_cond_raster.png")
-        save_grayscale_image(diffusion_image, problem_output_dir / "diffusion_2d_cond.png")
-        save_design_raster(diffusion_np, problem_output_dir / "diffusion_2d_cond_raster.png")
-        save_grayscale_image(cgan_image, problem_output_dir / "cgan_cnn_2d.png")
-        save_design_raster(cgan_np, problem_output_dir / "cgan_cnn_2d_raster.png")
+        save_grayscale_image(
+            reference,
+            problem_output_dir / "reference.png",
+            dpi=args.image_dpi,
+            min_pixels=args.image_min_pixels,
+        )
+        save_design_raster(
+            sampled_designs_np,
+            problem_output_dir / "reference_raster.png",
+            dpi=args.image_dpi,
+            min_pixels=args.image_min_pixels,
+        )
+        save_grayscale_image(
+            flow_image,
+            problem_output_dir / "flow_matching_2d_cond.png",
+            dpi=args.image_dpi,
+            min_pixels=args.image_min_pixels,
+        )
+        save_design_raster(
+            flow_np,
+            problem_output_dir / "flow_matching_2d_cond_raster.png",
+            dpi=args.image_dpi,
+            min_pixels=args.image_min_pixels,
+        )
+        save_grayscale_image(
+            diffusion_image,
+            problem_output_dir / "diffusion_2d_cond.png",
+            dpi=args.image_dpi,
+            min_pixels=args.image_min_pixels,
+        )
+        save_design_raster(
+            diffusion_np,
+            problem_output_dir / "diffusion_2d_cond_raster.png",
+            dpi=args.image_dpi,
+            min_pixels=args.image_min_pixels,
+        )
+        save_grayscale_image(
+            cgan_image,
+            problem_output_dir / "cgan_cnn_2d.png",
+            dpi=args.image_dpi,
+            min_pixels=args.image_min_pixels,
+        )
+        save_design_raster(
+            cgan_np,
+            problem_output_dir / "cgan_cnn_2d_raster.png",
+            dpi=args.image_dpi,
+            min_pixels=args.image_min_pixels,
+        )
 
         problem_metadata = metadata["problems"].setdefault(problem_id, {})
         problem_metadata.update(

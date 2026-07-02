@@ -184,7 +184,7 @@ def save_design_grid(
         axes[idx].set_yticks([])
 
     plt.tight_layout()
-    plt.savefig(img_fname)
+    plt.savefig(img_fname, dpi=300, bbox_inches="tight")
     plt.close(fig)
 
 

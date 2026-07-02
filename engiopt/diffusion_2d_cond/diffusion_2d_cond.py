@@ -579,7 +579,7 @@ if __name__ == "__main__":
 
                     plt.tight_layout()
                     img_fname = f"images/{batches_done}.png"
-                    plt.savefig(img_fname)
+                    plt.savefig(img_fname, dpi=300, bbox_inches="tight")
                     plt.close()
                     wandb.log({"designs": wandb.Image(img_fname)})
 
@@ -770,7 +770,7 @@ if __name__ == "__main__":
                             
                             plt.tight_layout()
                             img_fname = f"images/top5_rank_{rank}_epoch_{epoch + 1:04d}.png"
-                            plt.savefig(img_fname)
+                            plt.savefig(img_fname, dpi=300, bbox_inches="tight")
                             plt.close()
                             
                             wandb.log({
