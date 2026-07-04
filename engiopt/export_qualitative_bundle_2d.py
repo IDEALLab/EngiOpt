@@ -10,6 +10,7 @@ import time
 from typing import Any
 
 from diffusers import UNet2DConditionModel
+from engiopt.diffusion_2d_cond.diffusion_2d_cond import denormalize_designs_from_diffusion_range
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import matplotlib.pyplot as plt
 import numpy as np
@@ -171,7 +172,7 @@ def save_colormap_png(image: np.ndarray, output_path: Path, *, dpi: int = 300, m
     if array.ndim != 2:
         raise ValueError(f"Expected a 2D image array, got shape {array.shape}")
     normalized = np.clip(array, 0.0, 1.0)
-    rgba = plt.get_cmap("Reds_r")(normalized, bytes=True)
+    rgba = plt.get_cmap("viridis")(normalized, bytes=True)
     pil_image = Image.fromarray(rgba, mode="RGBA")
     shorter_side = min(pil_image.size)
     if min_pixels > 0 and shorter_side < min_pixels:
@@ -404,13 +405,28 @@ if __name__ == "__main__":
         diffusion_sampler = DiffusionSampler(diffusion_timesteps, diffusion_betas)
         diffusion_model.load_state_dict(diffusion_ckpt["model"])
         diffusion_model.eval()
+        th.manual_seed(args.seed + 2000)
         diffusion_designs = th.randn((args.n_samples, 1, *design_shape), device=device)
         diffusion_conditions = conditions_tensor.unsqueeze(1)
         for timestep in reversed(range(diffusion_timesteps)):
             t = th.full((args.n_samples,), timestep, device=device, dtype=th.long)
             diffusion_designs = diffusion_sampler.sample_timestep(diffusion_model, diffusion_designs, t, diffusion_conditions)
-        diffusion_np = diffusion_designs.squeeze(1).detach().cpu().numpy().reshape(args.n_samples, *design_shape)
-        diffusion_np = np.clip(diffusion_np, args.clip_min, args.clip_max)
+        diffusion_designs = diffusion_designs.squeeze(1)
+        if "design_min" in diffusion_ckpt and "design_max" in diffusion_ckpt:
+            diffusion_designs = denormalize_designs_from_diffusion_range(
+                diffusion_designs,
+                diffusion_ckpt["design_min"].to(device),
+                diffusion_ckpt["design_max"].to(device),
+            )
+        diffusion_np = diffusion_designs.detach().cpu().numpy().reshape(args.n_samples, *design_shape)
+        if "design_min" in diffusion_ckpt and "design_max" in diffusion_ckpt:
+            diffusion_np = np.clip(
+                diffusion_np,
+                diffusion_ckpt["design_min"].detach().cpu().numpy(),
+                diffusion_ckpt["design_max"].detach().cpu().numpy(),
+            )
+        else:
+            diffusion_np = np.clip(diffusion_np, args.clip_min, args.clip_max)
 
         # cGAN generation
         cgan_ckpt_path = resolve_optional_pattern(args.cgan_checkpoint_path, problem_id, args.seed)
