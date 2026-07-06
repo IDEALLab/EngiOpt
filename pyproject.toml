@@ -114,6 +114,10 @@ target-version = "py39"
 ######################################## LINTING ########################################
 [tool.ruff.lint]
 select = ["ALL"]
+exclude = [
+  "workshops/dcc26/**/*.ipynb",
+  "workshops/dcc26/utils/**/*.py",
+]
 ignore = [
   "ANN",      # flake8-annotations (mypy's job)
   "COM812",   # missing-trailing-comma (conflicts with formatter)
@@ -192,6 +196,7 @@ order-by-type = false
 
 ###################################### FORMAT ########################################
 [tool.ruff.format]
+exclude = ["workshops/dcc26/**/*.ipynb"]
 # Like Black, use double quotes for strings.
 quote-style = "double"
 
@@ -277,6 +282,9 @@ module = [
     "seaborn",
     "matplotlib",
     "matplotlib.*",
+    "IPython",
+    "IPython.*",
+    "ipywidgets",
     "pandas",
     "cvxopt",
     "cvxopt.*",

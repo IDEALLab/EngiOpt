@@ -171,3 +171,7 @@ logs/*
 
 .ruff_cache/
 engibench_studies/*
+workshops/dcc26/artifacts/*
+workshops/dcc26/optional_artifacts/*
+workshops/dcc26/SLIDE_STORYBOARD.md
+workshops/dcc26/slides/

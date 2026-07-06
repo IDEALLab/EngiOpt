@@ -1,0 +1,15 @@
+# Local convenience snapshot for workshop notebooks.
+# Source of truth for Colab is the install/bootstrap cell inside each notebook.
+# EngiOpt is intentionally installed from Git in notebook bootstrap cells.
+
+engibench[beams2d]
+sqlitedict
+matplotlib
+seaborn
+gymnasium
+pybullet
+tqdm
+tyro
+wandb
+torch
+torchvision
