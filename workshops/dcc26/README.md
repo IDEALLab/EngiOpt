@@ -22,6 +22,11 @@ Recommended live flow:
 3. Run Simple 02 to evaluate visual quality, feasibility, simulation performance, diversity, and warmstarting. If artifacts from Simple 01 are missing, Simple 02 rebuilds them automatically.
 4. Run Simple 03 as the capstone for adding a new benchmark problem.
 
+After Simple 03, participants who want to package a real research problem for EngiBench should use
+[Bring Your Own EngiBench Problem](BRING_YOUR_OWN_PROBLEM.md). It expands the notebook toy example into
+the production repository layout, dataset requirements, documentation steps, and validation checks expected
+by EngiBench.
+
 ## Optional Extra Exercises
 
 The `participant/` notebooks are more hands-on. They contain `PUBLIC FILL-IN` cells, checkpoints, and deeper metric or implementation exercises. Use these as homework, breakout exercises, or follow-up material after the live workshop.
