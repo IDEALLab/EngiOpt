@@ -20,14 +20,15 @@ from torch import nn
 from torch.nn import functional
 import tqdm
 import tyro
-import wandb
 
 from engiopt.checkpoint_store import save_checkpoint_package
+from engiopt.core import checkpoint_identity
 from engiopt.metrics import dpp_diversity
 from engiopt.metrics import mmd
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
+import wandb
 
 
 @dataclass
@@ -330,7 +331,7 @@ class Discriminator3D(nn.Module):
         return self.final_conv(h)  # -> (B, out_channels, 1, 1, 1)
 
 
-def compute_gradient_penalty(discriminator, real_samples, fake_samples, conds, device, lambda_gp=20.0):  # noqa: PLR0913
+def compute_gradient_penalty(discriminator, real_samples, fake_samples, conds, device, lambda_gp=20.0):
     """Calculates the gradient penalty loss for WGAN GP."""
     batch_size = real_samples.size(0)
     # Random weight term for interpolation between real and fake samples
@@ -696,6 +697,7 @@ if __name__ == "__main__":
                 seed=args.seed,
                 checkpoint_files={"generator_3d.pth": "generator_3d.pth", "discriminator_3d.pth": "discriminator_3d.pth"},
                 run_config=vars(args),
+                **checkpoint_identity(args),
                 primary_files=["generator_3d.pth"],
             )
 

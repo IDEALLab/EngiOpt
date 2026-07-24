@@ -16,12 +16,13 @@ from torch import nn
 from torchvision import transforms
 import tqdm
 import tyro
-import wandb
 
 from engiopt.checkpoint_store import save_checkpoint_package
+from engiopt.core import checkpoint_identity
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
+import wandb
 
 
 @dataclass
@@ -280,8 +281,8 @@ if __name__ == "__main__":
             # ----------
             #  Logging
             # ----------
+            batches_done = epoch * len(dataloader) + i
             if args.track:
-                batches_done = epoch * len(dataloader) + i
                 wandb.log(
                     {
                         "d_loss": d_loss.item(),
@@ -319,35 +320,36 @@ if __name__ == "__main__":
                 # --------------
                 #  Save models
                 # --------------
-                if args.save_model and epoch == args.n_epochs - 1 and i == len(dataloader) - 1:
-                    ckpt_gen = {
-                        "epoch": epoch,
-                        "batches_done": batches_done,
-                        "generator": generator.state_dict(),
-                        "optimizer_generator": optimizer_generator.state_dict(),
-                        "loss": g_loss.item(),
-                    }
-                    ckpt_disc = {
-                        "epoch": epoch,
-                        "batches_done": batches_done,
-                        "discriminator": discriminator.state_dict(),
-                        "optimizer_discriminator": optimizer_discriminator.state_dict(),
-                        "loss": d_loss.item(),
-                    }
+            if args.save_model and epoch == args.n_epochs - 1 and i == len(dataloader) - 1:
+                ckpt_gen = {
+                    "epoch": epoch,
+                    "batches_done": batches_done,
+                    "generator": generator.state_dict(),
+                    "optimizer_generator": optimizer_generator.state_dict(),
+                    "loss": g_loss.item(),
+                }
+                ckpt_disc = {
+                    "epoch": epoch,
+                    "batches_done": batches_done,
+                    "discriminator": discriminator.state_dict(),
+                    "optimizer_discriminator": optimizer_discriminator.state_dict(),
+                    "loss": d_loss.item(),
+                }
 
-                    th.save(ckpt_gen, "generator.pth")
-                    th.save(ckpt_disc, "discriminator.pth")
-                    save_checkpoint_package(
-                        checkpoint_backend="hf",
-                        hf_entity=args.hf_entity,
-                        hf_repo_prefix=args.hf_repo_prefix,
-                        hf_private=False,
-                        problem_id=args.problem_id,
-                        algo=args.algo,
-                        seed=args.seed,
-                        checkpoint_files={"generator.pth": "generator.pth", "discriminator.pth": "discriminator.pth"},
-                        run_config=vars(args),
-                        primary_files=["generator.pth"],
-                    )
+                th.save(ckpt_gen, "generator.pth")
+                th.save(ckpt_disc, "discriminator.pth")
+                save_checkpoint_package(
+                    checkpoint_backend="hf",
+                    hf_entity=args.hf_entity,
+                    hf_repo_prefix=args.hf_repo_prefix,
+                    hf_private=False,
+                    problem_id=args.problem_id,
+                    algo=args.algo,
+                    seed=args.seed,
+                    checkpoint_files={"generator.pth": "generator.pth", "discriminator.pth": "discriminator.pth"},
+                    run_config=vars(args),
+                    **checkpoint_identity(args),
+                    primary_files=["generator.pth"],
+                )
 
     wandb.finish()

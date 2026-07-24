@@ -5,8 +5,51 @@ from collections.abc import Callable
 from datasets import Dataset
 from engibench.core import Problem
 from gymnasium import spaces
+import numpy as np
 import torch as th
 import torch.nn.functional as f
+
+
+def get_scalar_condition_keys(problem: Problem, dataset: Dataset, *, drop_constants: bool = False) -> list[str]:
+    """Return the condition keys usable as a dense model input.
+
+    `problem.conditions_keys` is the full contract, which is broader than what a
+    generator can consume as a `(n, n_conds)` tensor. Two cases are excluded:
+
+    1. Keys absent from the dataset. Some are solver settings rather than
+       per-sample conditions -- photonics2d declares `num_elems_x`,
+       `num_elems_y`, and `num_optimization_steps`, none of which vary per row.
+    2. Array-valued keys. thermoelastic2d encodes boundary conditions as 65x65
+       matrices, which cannot be stacked alongside scalars.
+
+    Args:
+        problem: An EngiBench problem instance.
+        dataset: A dataset split, e.g. `problem.dataset["test"]`.
+        drop_constants: Also drop columns with zero standard deviation.
+
+    Returns:
+        Condition names, in `conditions_keys` order.
+    """
+    scalar_keys = [
+        key for key in problem.conditions_keys if key in dataset.column_names and np.asarray(dataset[0][key]).ndim == 0
+    ]
+
+    if drop_constants and scalar_keys:
+        conds = th.stack([th.as_tensor(dataset[c][:]).float() for c in scalar_keys], dim=1)
+        std = conds.std(dim=0)
+        scalar_keys = [c for i, c in enumerate(scalar_keys) if std[i] > 0]
+
+    return scalar_keys
+
+
+def get_image_condition_keys(problem: Problem, dataset: Dataset) -> list[str]:
+    """Return the array-valued condition keys present in the dataset.
+
+    The complement of `get_scalar_condition_keys`, e.g. thermoelastic2d's 65x65
+    boundary matrices. These still reach the simulator through the conditions
+    dataset; they simply cannot travel in the dense condition tensor.
+    """
+    return [key for key in problem.conditions_keys if key in dataset.column_names and np.asarray(dataset[0][key]).ndim > 0]
 
 
 def flatten_dict_factory(problem: Problem, device: th.device) -> Callable:

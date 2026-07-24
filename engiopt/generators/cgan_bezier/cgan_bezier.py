@@ -20,6 +20,7 @@ import torch.nn.functional as f
 import tyro
 
 from engiopt.checkpoint_store import save_checkpoint_package
+from engiopt.core import checkpoint_identity
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
@@ -27,6 +28,8 @@ import wandb
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+
+    from engibench.core import Problem
 
 _EPS = 1e-7
 
@@ -120,7 +123,7 @@ class MLP(nn.Module):
 
 
 class Deconv1DCombo(nn.Module):
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         in_channels: int,
         out_channels: int,
@@ -241,7 +244,7 @@ class Generator(nn.Module):
     3) Bezier => final design
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         latent_dim: int,
         noise_dim: int,
@@ -301,7 +304,7 @@ class Generator(nn.Module):
 class Discriminator(nn.Module):
     """Bezier GAN discriminator."""
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         latent_dim: int,
         design_scalars: int,
@@ -431,6 +434,49 @@ class Normalizer:
         return x * (self.max_val - self.min_val + self.eps) + self.min_val
 
 
+def prepare_data(
+    problem: Problem, device: th.device
+) -> tuple[th.utils.data.TensorDataset, Normalizer, Normalizer, list[str]]:
+    """Build the training tensors and the normalizers derived from them.
+
+    Extracted from the training loop so that evaluation can rebuild the exact
+    same normalizers: they are computed from dataset statistics rather than
+    stored in the checkpoint, so a generator cannot be reconstructed without
+    them. Matches the `prepare_data` helpers in the sibling 1D models.
+
+    Args:
+        problem: The problem whose training split defines the statistics.
+        device: Device the normalizer bounds should live on.
+
+    Returns:
+        The training dataset, the conditions normalizer, the design-scalars
+        normalizer, and the design scalar key names.
+    """
+    problem_dataset = problem.dataset.with_format("torch")["train"]
+    design_scalar_keys = list(problem_dataset["optimal_design"][0].keys())
+    design_scalar_keys.remove("coords")
+    coords_set = [problem_dataset[i]["optimal_design"]["coords"][:] for i in range(len(problem_dataset))]
+    design_scalars = [example["optimal_design"][key] for example in problem_dataset for key in design_scalar_keys]
+    training_ds = th.utils.data.TensorDataset(
+        th.stack(coords_set),
+        th.stack(design_scalars).unsqueeze(1),
+        *[problem_dataset[key][:] for key in problem.conditions_keys],
+    )
+
+    cond_tensors = th.stack(training_ds.tensors[2:])
+    conds_min = cond_tensors.amin(dim=tuple(range(1, cond_tensors.ndim))).to(device)
+    conds_max = cond_tensors.amax(dim=tuple(range(1, cond_tensors.ndim))).to(device)
+    design_scalars_min = training_ds.tensors[1].amin(dim=0).to(device)
+    design_scalars_max = training_ds.tensors[1].amax(dim=0).to(device)
+
+    return (
+        training_ds,
+        Normalizer(conds_min, conds_max),
+        Normalizer(design_scalars_min, design_scalars_max),
+        design_scalar_keys,
+    )
+
+
 if __name__ == "__main__":
     args = tyro.cli(Args)
     th.autograd.set_detect_anomaly(True)
@@ -460,25 +506,8 @@ if __name__ == "__main__":
     n_data_points = problem.design_space["coords"].shape[1]  # for airfoil, 192
 
     # The Discriminator uses shape [N, 2, #points].
-    problem_dataset = problem.dataset.with_format("torch")["train"]
-    design_scalar_keys = list(problem_dataset["optimal_design"][0].keys())
-    design_scalar_keys.remove("coords")
-    coords_set = [problem_dataset[i]["optimal_design"]["coords"][:] for i in range(len(problem_dataset))]
-    design_scalars = [example["optimal_design"][key] for example in problem_dataset for key in design_scalar_keys]
-    training_ds = th.utils.data.TensorDataset(
-        th.stack(coords_set),
-        th.stack(design_scalars).unsqueeze(1),
-        *[problem_dataset[key][:] for key in problem.conditions_keys],
-    )
-
-    cond_tensors = th.stack(training_ds.tensors[2:])
-    conds_min = cond_tensors.amin(dim=tuple(range(1, cond_tensors.ndim))).to(device)
-    conds_max = cond_tensors.amax(dim=tuple(range(1, cond_tensors.ndim))).to(device)
-    design_scalars_min = training_ds.tensors[1].amin(dim=0).to(device)
-    design_scalars_max = training_ds.tensors[1].amax(dim=0).to(device)
-
-    conds_normalizer = Normalizer(conds_min, conds_max)
-    design_scalars_normalizer = Normalizer(design_scalars_min, design_scalars_max)
+    training_ds, conds_normalizer, design_scalars_normalizer, design_scalar_keys = prepare_data(problem, device)
+    conds_min, conds_max = conds_normalizer.min_val, conds_normalizer.max_val
 
     dataloader = th.utils.data.DataLoader(
         training_ds,
@@ -658,6 +687,7 @@ if __name__ == "__main__":
                         "bezier_discriminator.pth": "bezier_discriminator.pth",
                     },
                     run_config=vars(args),
+                    **checkpoint_identity(args),
                     primary_files=["bezier_generator.pth"],
                 )
 

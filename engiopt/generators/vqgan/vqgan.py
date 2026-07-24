@@ -30,15 +30,9 @@ from torch import nn
 from torch.nn import functional as f
 import tqdm
 import tyro
-import wandb
 
 from engiopt.checkpoint_store import save_checkpoint_package
-from engiopt.reproducibility import enable_strict_determinism
-from engiopt.reproducibility import make_dataloader_generator
-from engiopt.reproducibility import seed_training
-from engiopt.transforms import drop_constant
-from engiopt.transforms import normalize
-from engiopt.transforms import resize_to
+from engiopt.core import checkpoint_identity
 from engiopt.generators.vqgan.utils import Codebook
 from engiopt.generators.vqgan.utils import Discriminator
 from engiopt.generators.vqgan.utils import DownSampleBlock
@@ -51,6 +45,13 @@ from engiopt.generators.vqgan.utils import NonLocalBlock
 from engiopt.generators.vqgan.utils import ResidualBlock
 from engiopt.generators.vqgan.utils import Swish
 from engiopt.generators.vqgan.utils import UpSampleBlock
+from engiopt.reproducibility import enable_strict_determinism
+from engiopt.reproducibility import make_dataloader_generator
+from engiopt.reproducibility import seed_training
+from engiopt.transforms import drop_constant
+from engiopt.transforms import normalize
+from engiopt.transforms import resize_to
+import wandb
 
 
 @dataclass
@@ -158,7 +159,7 @@ class Args:
     n_epochs_transformer: int = 100
     """number of epochs of training"""
     early_stopping: bool = True
-    """whether to use early stopping for the transformer; if True requires args.track to be True"""
+    """whether to use early stopping for the transformer based on held-out validation loss"""
     early_stopping_patience: int = 3
     """number of epochs with no improvement after which training will be stopped"""
     early_stopping_delta: float = 1e-3
@@ -198,7 +199,7 @@ class Encoder(nn.Module):
         latent_dim (int): dimensionality of the latent space
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         encoder_channels: tuple[int, ...],
         encoder_start_resolution: int,
@@ -278,7 +279,7 @@ class Decoder(nn.Module):
         latent_dim (int): dimensionality of the latent space
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         decoder_channels: tuple[int, ...],
         decoder_start_resolution: int,
@@ -371,7 +372,7 @@ class VQGAN(nn.Module):
         num_codebook_vectors (int): Number of codebook vectors.
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         *,
         device: th.device,
@@ -484,7 +485,7 @@ class VQGANTransformer(nn.Module):
         bias (bool): If True, use bias terms in the Transformer layers.
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         *,
         conditional: bool = True,
@@ -962,8 +963,8 @@ if __name__ == "__main__":
                 # ----------
                 #  Logging
                 # ----------
+                batches_done = epoch * len(dataloader_cvqgan) + i
                 if args.track:
-                    batches_done = epoch * len(dataloader_cvqgan) + i
                     wandb.log({"cvqgan_loss": cvq_loss.item(), "cvqgan_step": batches_done})
                     wandb.log({"epoch_cvqgan": epoch, "cvqgan_step": batches_done})
                     print(
@@ -973,29 +974,30 @@ if __name__ == "__main__":
                     # --------------
                     #  Save model
                     # --------------
-                    if args.save_model and epoch == args.n_epochs_cvqgan - 1 and i == len(dataloader_cvqgan) - 1:
-                        ckpt_cvq = {
-                            "epoch": epoch,
-                            "batches_done": batches_done,
-                            "cvqgan": cvqgan.state_dict(),
-                            "optimizer_cvqgan": opt_cvq.state_dict(),
-                            "loss": cvq_loss.item(),
-                        }
+                if args.save_model and epoch == args.n_epochs_cvqgan - 1 and i == len(dataloader_cvqgan) - 1:
+                    ckpt_cvq = {
+                        "epoch": epoch,
+                        "batches_done": batches_done,
+                        "cvqgan": cvqgan.state_dict(),
+                        "optimizer_cvqgan": opt_cvq.state_dict(),
+                        "loss": cvq_loss.item(),
+                    }
 
-                        th.save(ckpt_cvq, "cvqgan.pth")
-                        save_checkpoint_package(
-                            checkpoint_backend="hf",
-                            hf_entity=args.hf_entity,
-                            hf_repo_prefix=args.hf_repo_prefix,
-                            hf_private=False,
-                            problem_id=args.problem_id,
-                            algo=args.algo,
-                            seed=args.seed,
-                            checkpoint_files={"cvqgan.pth": "cvqgan.pth"},
-                            run_config=vars(args),
-                            metadata={"stage": "cvqgan"},
-                            primary_files=["cvqgan.pth"],
-                        )
+                    th.save(ckpt_cvq, "cvqgan.pth")
+                    save_checkpoint_package(
+                        checkpoint_backend="hf",
+                        hf_entity=args.hf_entity,
+                        hf_repo_prefix=args.hf_repo_prefix,
+                        hf_private=False,
+                        problem_id=args.problem_id,
+                        algo=args.algo,
+                        seed=args.seed,
+                        checkpoint_files={"cvqgan.pth": "cvqgan.pth"},
+                        run_config=vars(args),
+                        **checkpoint_identity(args),
+                        metadata={"stage": "cvqgan"},
+                        primary_files=["cvqgan.pth"],
+                    )
 
         # Freeze CVQGAN for later use in Stage 2 Transformer
         for p in cvqgan.parameters():
@@ -1044,8 +1046,8 @@ if __name__ == "__main__":
             # ----------
             #  Logging
             # ----------
+            batches_done = epoch * len(dataloader_vqgan) + i
             if args.track:
-                batches_done = epoch * len(dataloader_vqgan) + i
                 wandb.log({"vqgan_loss": vq_loss.item(), "vqgan_step": batches_done})
                 wandb.log({"discriminator_loss": gan_loss.item(), "vqgan_step": batches_done})
                 wandb.log({"epoch_vqgan": epoch, "vqgan_step": batches_done})
@@ -1081,40 +1083,41 @@ if __name__ == "__main__":
                 # --------------
                 #  Save models
                 # --------------
-                if args.save_model and epoch == args.n_epochs_vqgan - 1 and i == len(dataloader_vqgan) - 1:
-                    ckpt_vq = {
-                        "epoch": epoch,
-                        "batches_done": batches_done,
-                        "vqgan": vqgan.state_dict(),
-                        "optimizer_vqgan": opt_vq.state_dict(),
-                        "loss": vq_loss.item(),
-                    }
-                    ckpt_disc = {
-                        "epoch": epoch,
-                        "batches_done": batches_done,
-                        "discriminator": discriminator.state_dict(),
-                        "optimizer_discriminator": opt_disc.state_dict(),
-                        "loss": gan_loss.item(),
-                    }
+            if args.save_model and epoch == args.n_epochs_vqgan - 1 and i == len(dataloader_vqgan) - 1:
+                ckpt_vq = {
+                    "epoch": epoch,
+                    "batches_done": batches_done,
+                    "vqgan": vqgan.state_dict(),
+                    "optimizer_vqgan": opt_vq.state_dict(),
+                    "loss": vq_loss.item(),
+                }
+                ckpt_disc = {
+                    "epoch": epoch,
+                    "batches_done": batches_done,
+                    "discriminator": discriminator.state_dict(),
+                    "optimizer_discriminator": opt_disc.state_dict(),
+                    "loss": gan_loss.item(),
+                }
 
-                    th.save(ckpt_vq, "vqgan.pth")
-                    th.save(ckpt_disc, "discriminator.pth")
-                    save_checkpoint_package(
-                        checkpoint_backend="hf",
-                        hf_entity=args.hf_entity,
-                        hf_repo_prefix=args.hf_repo_prefix,
-                        hf_private=False,
-                        problem_id=args.problem_id,
-                        algo=args.algo,
-                        seed=args.seed,
-                        checkpoint_files={
-                            "vqgan.pth": "vqgan.pth",
-                            "discriminator.pth": "discriminator.pth",
-                        },
-                        run_config=vars(args),
-                        metadata={"stage": "vqgan"},
-                        primary_files=["vqgan.pth"],
-                    )
+                th.save(ckpt_vq, "vqgan.pth")
+                th.save(ckpt_disc, "discriminator.pth")
+                save_checkpoint_package(
+                    checkpoint_backend="hf",
+                    hf_entity=args.hf_entity,
+                    hf_repo_prefix=args.hf_repo_prefix,
+                    hf_private=False,
+                    problem_id=args.problem_id,
+                    algo=args.algo,
+                    seed=args.seed,
+                    checkpoint_files={
+                        "vqgan.pth": "vqgan.pth",
+                        "discriminator.pth": "discriminator.pth",
+                    },
+                    run_config=vars(args),
+                    **checkpoint_identity(args),
+                    metadata={"stage": "vqgan"},
+                    primary_files=["vqgan.pth"],
+                )
 
     # Freeze VQGAN for later use in Stage 2 Transformer
     for p in vqgan.parameters():
@@ -1148,8 +1151,8 @@ if __name__ == "__main__":
             # ----------
             #  Logging
             # ----------
+            batches_done = epoch * len(dataloader_transformer) + i
             if args.track:
-                batches_done = epoch * len(dataloader_transformer) + i
                 wandb.log({"transformer_loss": loss.item(), "transformer_step": batches_done})
                 wandb.log({"epoch_transformer": epoch, "transformer_step": batches_done})
                 print(
@@ -1185,8 +1188,10 @@ if __name__ == "__main__":
                     plt.close()
                     wandb.log({"designs_transformer": wandb.Image(img_fname)})
 
-        # Early stopping based on held-out validation loss
-        if args.track and args.early_stopping:
+        # Early stopping based on held-out validation loss. This is training
+        # logic -- it decides when to stop and which checkpoint to keep -- so it
+        # runs regardless of W&B; only the metric *logging* below is track-gated.
+        if args.early_stopping:
             transformer.eval()
             val_losses = []
             with th.no_grad():
@@ -1197,7 +1202,8 @@ if __name__ == "__main__":
                     val_loss = f.cross_entropy(val_logits.reshape(-1, val_logits.size(-1)), val_targets.reshape(-1))
                     val_losses.append(val_loss.item())
             val_loss = sum(val_losses) / len(val_losses)
-            wandb.log({"transformer_val_loss": val_loss, "transformer_step": batches_done})
+            if args.track:
+                wandb.log({"transformer_val_loss": val_loss, "transformer_step": batches_done})
 
             if val_loss < best_val - args.early_stopping_delta:
                 best_val = val_loss
@@ -1224,7 +1230,7 @@ if __name__ == "__main__":
     # --------------
     #  Save model
     # --------------
-    if args.track and args.save_model:
+    if args.save_model:
         if not args.early_stopping:
             ckpt_tr = {
                 "epoch": epoch,
@@ -1253,6 +1259,7 @@ if __name__ == "__main__":
             seed=args.seed,
             checkpoint_files=checkpoint_files,
             run_config=vars(args),
+            **checkpoint_identity(args),
             metadata={"stage": "transformer"},
             primary_files=["transformer.pth"],
         )

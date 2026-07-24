@@ -16,12 +16,13 @@ import torch as th
 from torch.nn import functional
 import tqdm
 import tyro
-import wandb
 
 from engiopt.checkpoint_store import save_checkpoint_package
+from engiopt.core import checkpoint_identity
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
+import wandb
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -442,8 +443,8 @@ if __name__ == "__main__":
             # ----------
             #  Logging
             # ----------
+            batches_done = epoch * len(dataloader) + i
             if args.track:
-                batches_done = epoch * len(dataloader) + i
                 wandb.log(
                     {
                         "loss": loss.item(),
@@ -486,31 +487,32 @@ if __name__ == "__main__":
                 # --------------
                 #  Save models
                 # --------------
-                if args.save_model and epoch == args.n_epochs - 1 and i == len(dataloader) - 1:
-                    ckpt_model = {
-                        "epoch": epoch,
-                        "batches_done": batches_done,
-                        "model": model.state_dict(),
-                        "optimizer_generator": optimizer.state_dict(),
-                        "loss": loss.item(),
-                        "design_min": filtered_ds_min.detach().cpu(),
-                        "design_max": filtered_ds_max.detach().cpu(),
-                        "diffusion_sample_min": DIFFUSION_SAMPLE_MIN,
-                        "diffusion_sample_max": DIFFUSION_SAMPLE_MAX,
-                    }
+            if args.save_model and epoch == args.n_epochs - 1 and i == len(dataloader) - 1:
+                ckpt_model = {
+                    "epoch": epoch,
+                    "batches_done": batches_done,
+                    "model": model.state_dict(),
+                    "optimizer_generator": optimizer.state_dict(),
+                    "loss": loss.item(),
+                    "design_min": filtered_ds_min.detach().cpu(),
+                    "design_max": filtered_ds_max.detach().cpu(),
+                    "diffusion_sample_min": DIFFUSION_SAMPLE_MIN,
+                    "diffusion_sample_max": DIFFUSION_SAMPLE_MAX,
+                }
 
-                    th.save(ckpt_model, "model.pth")
-                    save_checkpoint_package(
-                        checkpoint_backend="hf",
-                        hf_entity=args.hf_entity,
-                        hf_repo_prefix=args.hf_repo_prefix,
-                        hf_private=False,
-                        problem_id=args.problem_id,
-                        algo=args.algo,
-                        seed=args.seed,
-                        checkpoint_files={"model.pth": "model.pth"},
-                        run_config=vars(args),
-                        primary_files=["model.pth"],
-                    )
+                th.save(ckpt_model, "model.pth")
+                save_checkpoint_package(
+                    checkpoint_backend="hf",
+                    hf_entity=args.hf_entity,
+                    hf_repo_prefix=args.hf_repo_prefix,
+                    hf_private=False,
+                    problem_id=args.problem_id,
+                    algo=args.algo,
+                    seed=args.seed,
+                    checkpoint_files={"model.pth": "model.pth"},
+                    run_config=vars(args),
+                    **checkpoint_identity(args),
+                    primary_files=["model.pth"],
+                )
 
     wandb.finish()

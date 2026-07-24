@@ -20,13 +20,14 @@ import torch as th
 from torchvision import transforms
 import tqdm
 import tyro
-import wandb
 
 from engiopt.checkpoint_store import save_checkpoint_package
+from engiopt.core import checkpoint_identity
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
 from engiopt.transforms import flatten_dict_factory
+import wandb
 
 if TYPE_CHECKING:
     from engibench.utils.problem import Problem
@@ -228,8 +229,8 @@ if __name__ == "__main__":
             # ----------
             #  Logging
             # ----------
+            batches_done = epoch * len(dataloader) + i
             if args.track:
-                batches_done = epoch * len(dataloader) + i
                 wandb.log({"loss": loss.item(), "epoch": epoch, "batch": batches_done})
                 print(f"[Epoch {epoch}/{args.n_epochs}] [Batch {i}/{len(dataloader)}] [loss: {loss.item()}]")
 
@@ -274,26 +275,27 @@ if __name__ == "__main__":
                 # --------------
                 #  Save models
                 # --------------
-                if args.save_model and epoch == args.n_epochs - 1 and i == len(dataloader) - 1:
-                    ckpt = {
-                        "epoch": epoch,
-                        "batches_done": batches_done,
-                        "model": diffusion.state_dict(),
-                        "loss": loss.item(),
-                    }
+            if args.save_model and epoch == args.n_epochs - 1 and i == len(dataloader) - 1:
+                ckpt = {
+                    "epoch": epoch,
+                    "batches_done": batches_done,
+                    "model": diffusion.state_dict(),
+                    "loss": loss.item(),
+                }
 
-                    th.save(ckpt, "model.pth")
-                    save_checkpoint_package(
-                        checkpoint_backend="hf",
-                        hf_entity=args.hf_entity,
-                        hf_repo_prefix=args.hf_repo_prefix,
-                        hf_private=False,
-                        problem_id=args.problem_id,
-                        algo=args.algo,
-                        seed=args.seed,
-                        checkpoint_files={"model.pth": "model.pth"},
-                        run_config=vars(args),
-                        primary_files=["model.pth"],
-                    )
+                th.save(ckpt, "model.pth")
+                save_checkpoint_package(
+                    checkpoint_backend="hf",
+                    hf_entity=args.hf_entity,
+                    hf_repo_prefix=args.hf_repo_prefix,
+                    hf_private=False,
+                    problem_id=args.problem_id,
+                    algo=args.algo,
+                    seed=args.seed,
+                    checkpoint_files={"model.pth": "model.pth"},
+                    run_config=vars(args),
+                    **checkpoint_identity(args),
+                    primary_files=["model.pth"],
+                )
 
     wandb.finish()

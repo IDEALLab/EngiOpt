@@ -23,12 +23,13 @@ import torch.nn.functional as f
 from torch.nn.utils.parametrizations import weight_norm
 import tqdm
 import tyro
-import wandb
 
 from engiopt.checkpoint_store import save_checkpoint_package
+from engiopt.core import checkpoint_identity
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
+import wandb
 
 
 @dataclass
@@ -109,7 +110,7 @@ class NetworkInNetwork(nn.Module):
 
 
 class GatedResnet(nn.Module):
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         nr_filters: int,
         conv_op: nn.Module,
@@ -299,7 +300,7 @@ class DownRightShiftedDeconv2d(nn.Module):
 
 
 class PixelCNNpp(nn.Module):
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         nr_resnet: int,
         nr_filters: int,
@@ -765,7 +766,7 @@ if __name__ == "__main__":
     optimizer = th.optim.Adam(model.parameters(), lr=args.lr, betas=(args.b1, args.b2))
 
     @th.no_grad()
-    def sample_designs(  # noqa: PLR0913
+    def sample_designs(
         model: PixelCNNpp,
         design_shape: tuple[int, int, int],
         conditions: th.Tensor,
@@ -835,8 +836,8 @@ if __name__ == "__main__":
             # ----------
             #  Logging
             # ----------
+            batches_done = epoch * len(dataloader) + i
             if args.track:
-                batches_done = epoch * len(dataloader) + i
                 wandb.log(
                     {
                         "loss": loss.item(),
@@ -885,28 +886,29 @@ if __name__ == "__main__":
                 # --------------
                 #  Save models
                 # --------------
-                if args.save_model and epoch == args.n_epochs - 1 and i == len(dataloader) - 1:
-                    # if args.save_model and (((epoch + 1) % args.model_storage_interval == 0) or (epoch == args.n_epochs - 1)) and i == len(dataloader) - 1:
-                    ckpt_model = {
-                        "epoch": epoch,
-                        "batches_done": batches_done,
-                        "model": model.state_dict(),
-                        "optimizer": optimizer.state_dict(),
-                        "loss": loss.item(),
-                    }
+            if args.save_model and epoch == args.n_epochs - 1 and i == len(dataloader) - 1:
+                # if args.save_model and (((epoch + 1) % args.model_storage_interval == 0) or (epoch == args.n_epochs - 1)) and i == len(dataloader) - 1:
+                ckpt_model = {
+                    "epoch": epoch,
+                    "batches_done": batches_done,
+                    "model": model.state_dict(),
+                    "optimizer": optimizer.state_dict(),
+                    "loss": loss.item(),
+                }
 
-                    th.save(ckpt_model, "model.pth")
-                    save_checkpoint_package(
-                        checkpoint_backend="hf",
-                        hf_entity=args.hf_entity,
-                        hf_repo_prefix=args.hf_repo_prefix,
-                        hf_private=False,
-                        problem_id=args.problem_id,
-                        algo=args.algo,
-                        seed=args.seed,
-                        checkpoint_files={"model.pth": "model.pth"},
-                        run_config=vars(args),
-                        primary_files=["model.pth"],
-                    )
+                th.save(ckpt_model, "model.pth")
+                save_checkpoint_package(
+                    checkpoint_backend="hf",
+                    hf_entity=args.hf_entity,
+                    hf_repo_prefix=args.hf_repo_prefix,
+                    hf_private=False,
+                    problem_id=args.problem_id,
+                    algo=args.algo,
+                    seed=args.seed,
+                    checkpoint_files={"model.pth": "model.pth"},
+                    run_config=vars(args),
+                    **checkpoint_identity(args),
+                    primary_files=["model.pth"],
+                )
 
     wandb.finish()

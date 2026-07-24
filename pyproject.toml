@@ -172,11 +172,16 @@ order-by-type = false
     "D104",    # D104 - Package dostrings not required in test files.
     "ARG",     # ARG - Unused args are common in tests with mock patches and mock functions.
     "D",       # Pydocstyle
+    "PLR2004", # Magic values are the point of an assertion in a test.
+    "SLF001",  # Tests may exercise private helpers directly.
 ]
 "*/__init__.py" = [
     "F401",    # Module imported but unused
     "D104",    # D104 - Package dostrings not required in init files.
     "E402"
+]
+"engiopt/generators/_template/*.py" = [
+    "ERA001",  # The commented-out example code is the point of the template.
 ]
 "docs/**" = [
     "D",       # Pydocstyle

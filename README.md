@@ -22,24 +22,24 @@ As much as we can, we follow the [CleanRL](https://github.com/vwxyzjn/cleanrl) p
 
 **Algorithm** | **Class** | **Dimensions** | **Conditional?** | **Model**
 --- | --- | --- | --- | ---
-[cgan_1d](engiopt/cgan_1d/) | Inverse Design | 1D | ✅ | GAN MLP
-[cgan_2d](engiopt/cgan_2d/) | Inverse Design | 2D | ✅ | GAN MLP
-[cgan_bezier](engiopt/cgan_bezier/) | Inverse Design | 1D | ✅ | GAN + Bezier layer
-[cgan_cnn_2d](engiopt/cgan_cnn_2d/) | Inverse Design | 2D | ✅ | GAN + CNN
-[cgan_cnn_3d](engiopt/cgan_cnn_3d/) | Inverse Design | 3D | ✅ | GAN + 3D CNN
-[cgan_vae](engiopt/cgan_vae/) | Inverse Design | 3D | ✅ | MultiView GAN + VAE
-[diffusion_1d](engiopt/diffusion_1d/) | Inverse Design | 1D | ❌ | Diffusion
-[diffusion_2d_cond](engiopt/diffusion_2d_cond/) | Inverse Design | 2D | ✅ | Diffusion
-[gan_1d](engiopt/gan_1d/) | Inverse Design | 1D | ❌ | GAN MLP
-[gan_2d](engiopt/gan_2d/) | Inverse Design | 2D | ❌ | GAN MLP
-[gan_bezier](engiopt/gan_bezier/) | Inverse Design | 1D | ❌ | GAN + Bezier layer
-[gan_cnn_2d](engiopt/gan_cnn_2d/) | Inverse Design | 2D | ❌ | GAN + CNN
+[cgan_1d](engiopt/generators/cgan_1d/) | Inverse Design | 1D | ✅ | GAN MLP
+[cgan_2d](engiopt/generators/cgan_2d/) | Inverse Design | 2D | ✅ | GAN MLP
+[cgan_bezier](engiopt/generators/cgan_bezier/) | Inverse Design | 1D | ✅ | GAN + Bezier layer
+[cgan_cnn_2d](engiopt/generators/cgan_cnn_2d/) | Inverse Design | 2D | ✅ | GAN + CNN
+[cgan_cnn_3d](engiopt/generators/cgan_cnn_3d/) | Inverse Design | 3D | ✅ | GAN + 3D CNN
+[cgan_vae](engiopt/generators/cgan_vae/) | Inverse Design | 3D | ✅ | MultiView GAN + VAE
+[diffusion_1d](engiopt/generators/diffusion_1d/) | Inverse Design | 1D | ❌ | Diffusion
+[diffusion_2d_cond](engiopt/generators/diffusion_2d_cond/) | Inverse Design | 2D | ✅ | Diffusion
+[gan_1d](engiopt/generators/gan_1d/) | Inverse Design | 1D | ❌ | GAN MLP
+[gan_2d](engiopt/generators/gan_2d/) | Inverse Design | 2D | ❌ | GAN MLP
+[gan_bezier](engiopt/generators/gan_bezier/) | Inverse Design | 1D | ❌ | GAN + Bezier layer
+[gan_cnn_2d](engiopt/generators/gan_cnn_2d/) | Inverse Design | 2D | ❌ | GAN + CNN
 [surrogate_model](engiopt/surrogate_model/) | Surrogate Model | 1D | ❌ | MLP
-[vqgan](engiopt/vqgan) | Inverse Design | 2D | ✅ | VQVAE + Transformer
-[pixel_cnn_pp_2d](engiopt/pixel_cnn_pp_2d) | Inverse Design | 2D | ✅ | PixelCNN++ Autoregressive Model
+[vqgan](engiopt/generators/vqgan) | Inverse Design | 2D | ✅ | VQVAE + Transformer
+[pixel_cnn_pp_2d](engiopt/generators/pixel_cnn_pp_2d) | Inverse Design | 2D | ✅ | PixelCNN++ Autoregressive Model
 
 ## Dashboards
-The integration with WandB allows us to access live dashboards of our runs (on the cluster or not). New checkpoint packages are stored on the Hugging Face Hub by default, while WandB keeps experiment tracking, metadata, and links back to the canonical checkpoint location. Historical WandB model artifacts remain supported for backward compatibility. You can access some of our runs at https://wandb.ai/engibench/engiopt.
+HuggingFace hosts everything that has to be reloaded or compared -- model weights, run configs, evaluation metrics, and the leaderboard. WandB hosts what you only look at: loss curves and sample images. Nothing in the evaluation path requires WandB, so training with `--track false` produces exactly the same checkpoints and scores. You can access some of our runs at https://wandb.ai/engibench/engiopt.
 <img src="imgs/wandb_dashboard.png" alt="WandB dashboards"/>
 
 
@@ -77,7 +77,7 @@ Usually, we provide two scripts per algorithm: one to train the model, and one t
 To train a model, you can run (for example):
 
 ```
-python engiopt/cgan_cnn_2d/cgan_cnn_2d.py --problem-id "beams2d" --track --wandb-entity None --save-model --n-epochs 200 --seed 1
+python engiopt/generators/cgan_cnn_2d/cgan_cnn_2d.py --problem-id "beams2d" --track --wandb-entity None --save-model --n-epochs 200 --seed 1
 ```
 
 This trains a CGAN 2D w/ CNN on `beams2d`. The flags mirror W&B's: `--track` enables W&B logging, `--wandb-entity`/`--wandb-project` say where the run goes, `--save-model` uploads the checkpoint to HuggingFace, and `--hf-entity`/`--hf-repo-prefix` say where the checkpoint goes.
@@ -89,23 +89,23 @@ wandb login              # for tracking
 huggingface-cli login    # for checkpoints (or: export HF_TOKEN=...)
 ```
 
-The defaults (`--hf-entity IDEALLab --hf-repo-prefix engiopt`) push to `huggingface.co/IDEALLab/engiopt-cgan-cnn-2d/beams2d/seed_1/`. The W&B run summary records the HF path for traceability. Each checkpoint package contains the model files plus `run_config.json` and `metadata.json`, so evaluation needs no live W&B state.
+The defaults (`--hf-entity IDEALLab --hf-repo-prefix engiopt`) push to `huggingface.co/IDEALLab/engiopt-cgan-cnn-2d/beams2d/cfg_<fingerprint>/seed_1/`, one location per hyperparameter configuration. A run using the script's default hyperparameters additionally claims `beams2d/seed_1/`, which is what the bare model name resolves to. The W&B run summary records the HF path for traceability. Each checkpoint package contains the model files plus `run_config.json` and `metadata.json`, so evaluation needs no live W&B state.
 
 For reproducible debugging runs, you can additionally enable strict deterministic mode:
 ```
-python engiopt/cgan_cnn_2d/cgan_cnn_2d.py --problem-id "beams2d" --seed 1 --strict-determinism
+python engiopt/generators/cgan_cnn_2d/cgan_cnn_2d.py --problem-id "beams2d" --seed 1 --strict-determinism
 ```
 
 For new cGAN density-field runs, you can emit designs natively in the EngiBench `[0, 1]` density range while preserving older `tanh` checkpoint behavior by default:
 ```
-python engiopt/cgan_cnn_2d/cgan_cnn_2d.py --problem-id "beams2d" --generator-output-activation sigmoid
+python engiopt/generators/cgan_cnn_2d/cgan_cnn_2d.py --problem-id "beams2d" --generator-output-activation sigmoid
 ```
 
 Then evaluate:
 ```
-python engiopt/cgan_cnn_2d/evaluate_cgan_cnn_2d.py --problem-id "beams2d" --seed 1 --n-samples 10
+python -m engiopt.evaluate --problem-id "beams2d" --generators cgan_cnn_2d --seeds 1
 ```
-Evaluation pulls the checkpoint from HF automatically. For runs trained before the HF cutover, evaluation transparently falls back to the legacy W&B artifact. Pass `--hf-entity` / `--hf-repo-prefix` to point at a different HF repo.
+Evaluation pulls the checkpoint from HF automatically. Pass `--hf-entity` / `--hf-repo-prefix` to point at a different HF repo, and `--config-fingerprints` to score specific hyperparameter configurations instead of the default one.
 
 ### Surrogate model
 

@@ -37,7 +37,7 @@ class Codebook(nn.Module):
         init (bool): if true, the codebook has been initialized
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         *,
         num_codebook_vectors: int,
@@ -450,7 +450,7 @@ class GreyscaleLPIPS(nn.Module):
         ckpt_name: Key in URL_MAP/CKPT_MAP for loading LPIPS heads.
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         *,
         use_raw: bool = True,

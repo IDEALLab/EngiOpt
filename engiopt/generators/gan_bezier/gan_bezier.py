@@ -20,6 +20,7 @@ import torch.nn.functional as f
 import tyro
 
 from engiopt.checkpoint_store import save_checkpoint_package
+from engiopt.core import checkpoint_identity
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
@@ -120,7 +121,7 @@ class MLP(nn.Module):
 
 
 class Deconv1DCombo(nn.Module):
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         in_channels: int,
         out_channels: int,
@@ -243,7 +244,7 @@ class Generator(nn.Module):
     3) Bezier => final design
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         latent_dim: int,
         noise_dim: int,
@@ -297,7 +298,7 @@ class Generator(nn.Module):
 class Discriminator(nn.Module):
     """Bezier GAN discriminator."""
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         latent_dim: int,
         design_scalars: int,
@@ -637,6 +638,7 @@ if __name__ == "__main__":
                         "bezier_discriminator.pth": "bezier_discriminator.pth",
                     },
                     run_config=vars(args),
+                    **checkpoint_identity(args),
                     primary_files=["bezier_generator.pth"],
                 )
 
