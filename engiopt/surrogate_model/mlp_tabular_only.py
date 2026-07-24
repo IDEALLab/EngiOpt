@@ -20,7 +20,6 @@ from sklearn.preprocessing import RobustScaler
 import torch
 from torch.utils.data import DataLoader
 import tyro
-import wandb
 
 from engiopt.args_utils import parse_list_from_single_item_list
 from engiopt.args_utils import parse_list_from_string
@@ -33,6 +32,7 @@ from engiopt.surrogate_model.model_pipeline import ModelPipeline
 from engiopt.surrogate_model.training_utils import get_device
 from engiopt.surrogate_model.training_utils import PlainTabularDataset
 from engiopt.surrogate_model.training_utils import train_one_model
+import wandb
 
 
 @dataclass
@@ -123,7 +123,7 @@ class Args:
             self.params_cols = parse_list_from_single_item_list(self.params_cols, "--params_cols")
 
 
-def scale_data(  # noqa: PLR0913
+def scale_data(
     x_train: npt.NDArray,
     x_val: npt.NDArray,
     x_test: npt.NDArray,

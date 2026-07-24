@@ -36,12 +36,12 @@ save_checkpoint_package(
     hf_repo_prefix=args.hf_repo_prefix,
     hf_private=False,
     problem_id=args.problem_id,
-    algo=args.algo,          # must equal your algo_id
+    algo=args.algo,  # must equal your algo_id
     seed=args.seed,
     checkpoint_files={"generator.pth": "generator.pth"},
-    run_config=vars(args),   # everything needed to rebuild the model
+    run_config=vars(args),  # everything needed to rebuild the model
     primary_files=["generator.pth"],
-    **checkpoint_identity(args),   # files this run under its own hyperparameters
+    **checkpoint_identity(args),  # files this run under its own hyperparameters
 )
 ```
 
@@ -69,12 +69,12 @@ Edit `engiopt/generators/my_model/adapter.py`. Declare what your model is:
 
 ```python
 class MyModel(Generator):
-    algo_id = "my_model"        # == directory name
-    conditional = True          # does _sample use the conditions?
-    design_kinds = ("2d",)      # 1d / 2d / 3d / dict
+    algo_id = "my_model"  # == directory name
+    conditional = True  # does _sample use the conditions?
+    design_kinds = ("2d",)  # 1d / 2d / 3d / dict
     checkpoint_files = ("generator.pth",)
     primary_state_key = "generator"
-    output_clip = (1e-3, 1.0)   # or None
+    output_clip = (1e-3, 1.0)  # or None
 ```
 
 Then implement the two methods:
@@ -105,8 +105,8 @@ applies to `Problem` classes, so the name-to-model mapping stays unambiguous.
 
 ```python
 cond = conditions.require_tensor(self.algo_id)  # (n, n_conds) on your device
-conditions.dataset                              # original columns, if you need them
-conditions.keys                                 # condition names, in column order
+conditions.dataset  # original columns, if you need them
+conditions.keys  # condition names, in column order
 ```
 
 Most models want `require_tensor`. Reach for `dataset` only when your model
@@ -132,6 +132,7 @@ comparison rather than to any one model:
 
 ```python
 from engiopt.evaluation import register_metric
+
 
 @register_metric("my_metric", family="diversity", cost="cheap", higher_is_better=True)
 def my_metric(ctx) -> float:

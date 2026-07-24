@@ -34,12 +34,12 @@ from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.optimize import minimize
 from pymoo.termination import get_termination
 import tyro
-import wandb
 
 from engiopt.checkpoint_store import resolve_checkpoint_reference
 from engiopt.surrogate_model.model_pipeline import ModelPipeline
 from engiopt.surrogate_model.pymoo_pe_problem import PymooPowerElecProblem
 from engiopt.surrogate_model.training_utils import get_device
+import wandb
 
 if TYPE_CHECKING:
     from pymoo.core.algorithm import Algorithm
@@ -172,16 +172,11 @@ def save_front(res: Result, output_dir: str) -> tuple[str, str, str, str, str]:
     return evals_csv, designs_csv, pareto_csv, evals_txt, designs_txt
 
 
-def load_model_from_reference(
-    model_ref: str,
-    *,
-    active_wandb_run: wandb.sdk.wandb_run.Run | None,
-) -> ModelPipeline:
-    """Load a model pipeline from a W&B artifact, HF package, or local directory.
+def load_model_from_reference(model_ref: str) -> ModelPipeline:
+    """Load a model pipeline from an HF package or local directory.
 
     Args:
-        model_ref: Reference to the stored model package or artifact.
-        active_wandb_run: Optional active W&B run for artifact access.
+        model_ref: Reference to the stored model package.
 
     Returns:
         Loaded model pipeline.
@@ -190,7 +185,6 @@ def load_model_from_reference(
         model_source="auto",
         model_ref=model_ref,
         required_files=[],
-        active_wandb_run=active_wandb_run,
     )
     model_file = next(file_path for file_path in resolved.files.values() if file_path.endswith(".pkl"))
     return ModelPipeline.load(model_file)
@@ -216,15 +210,8 @@ def main(args: Args) -> None:
         wandb.define_metric("generation")
         wandb.define_metric("*", step_metric="generation")
 
-    active_wandb_run = wandb.run if args.track else None
-    pipeline_g = load_model_from_reference(
-        args.model_gain_path,
-        active_wandb_run=active_wandb_run,
-    )
-    pipeline_r = load_model_from_reference(
-        args.model_ripple_path,
-        active_wandb_run=active_wandb_run,
-    )
+    pipeline_g = load_model_from_reference(args.model_gain_path)
+    pipeline_r = load_model_from_reference(args.model_ripple_path)
 
     problem = PymooPowerElecProblem(
         pipeline_r=pipeline_r,

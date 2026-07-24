@@ -66,7 +66,8 @@ gen = BUILTIN_GENERATORS["cgan_cnn_2d"].from_pretrained(problem, problem_id="bea
 
 # one specific configuration from a sweep
 gen = BUILTIN_GENERATORS["cgan_cnn_2d"].from_pretrained(
-    problem, problem_id="beams2d", seed=1, config_fingerprint="3ab84748")
+    problem, problem_id="beams2d", seed=1, config_fingerprint="3ab84748"
+)
 ```
 
 ## The leaderboard

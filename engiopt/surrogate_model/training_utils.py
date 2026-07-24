@@ -136,7 +136,7 @@ class PlainTabularDataset(Dataset):
         return self.x[idx], self.y[idx]
 
 
-def _create_mlp(  # noqa: PLR0913
+def _create_mlp(
     in_dim: int,
     hidden_size: int,
     hidden_layers: int,
