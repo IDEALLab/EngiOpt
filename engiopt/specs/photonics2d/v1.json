@@ -1,0 +1,19 @@
+{
+  "condition_digest": "ade3d18084b31b5e",
+  "condition_seed": 1,
+  "engibench_version": "0.2.0",
+  "metrics": [
+    "mmd",
+    "dpp",
+    "viol",
+    "iog",
+    "cog",
+    "fog"
+  ],
+  "n_samples": 50,
+  "notes": "",
+  "problem_id": "photonics2d",
+  "sigma": 10.0,
+  "version": "v1",
+  "volfrac_tol": 0.01
+}

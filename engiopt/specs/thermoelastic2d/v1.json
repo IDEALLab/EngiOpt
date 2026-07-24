@@ -1,0 +1,21 @@
+{
+  "condition_digest": "3a1d2ae6c45add7f",
+  "condition_seed": 1,
+  "engibench_version": "0.2.0",
+  "metrics": [
+    "mmd",
+    "dpp",
+    "viol",
+    "iog",
+    "cog",
+    "fog"
+  ],
+  "n_samples": 50,
+  "notes": "",
+  "objective_weight_condition": "weight",
+  "objective_weights": null,
+  "problem_id": "thermoelastic2d",
+  "sigma": 10.0,
+  "version": "v1",
+  "volfrac_tol": 0.01
+}

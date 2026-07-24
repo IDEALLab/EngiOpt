@@ -1,0 +1,19 @@
+{
+  "condition_digest": "50961cce837117ed",
+  "condition_seed": 1,
+  "engibench_version": "0.2.0",
+  "metrics": [
+    "mmd",
+    "dpp",
+    "viol",
+    "iog",
+    "cog",
+    "fog"
+  ],
+  "n_samples": 50,
+  "notes": "",
+  "problem_id": "heatconduction2d",
+  "sigma": 10.0,
+  "version": "v1",
+  "volfrac_tol": 0.01
+}

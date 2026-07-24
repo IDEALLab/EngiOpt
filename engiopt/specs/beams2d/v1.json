@@ -1,0 +1,19 @@
+{
+  "condition_digest": "67f84c4e50c355cf",
+  "condition_seed": 1,
+  "engibench_version": "0.2.0",
+  "metrics": [
+    "mmd",
+    "dpp",
+    "viol",
+    "iog",
+    "cog",
+    "fog"
+  ],
+  "n_samples": 50,
+  "notes": "",
+  "problem_id": "beams2d",
+  "sigma": 10.0,
+  "version": "v1",
+  "volfrac_tol": 0.01
+}
