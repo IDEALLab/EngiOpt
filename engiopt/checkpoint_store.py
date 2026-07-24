@@ -1,4 +1,14 @@
-"""Shared checkpoint save/load helpers for EngiOpt model artifacts."""
+"""Shared checkpoint save/load helpers for EngiOpt model artifacts.
+
+HuggingFace is the single home for anything that has to be *reloaded or
+compared*: checkpoints, their run configs, and their evaluation metrics.
+Weights & Biases, when enabled, hosts the things you only ever *look at* --
+loss curves, sample images, and a pointer back to the HF package.
+
+Each run is filed under `{problem_id}/cfg_{fingerprint}/seed_{seed}`, so every
+hyperparameter setting is independently addressable, plus the canonical
+`{problem_id}/seed_{seed}` when the run used the training script's defaults.
+"""
 
 from __future__ import annotations
 
@@ -15,15 +25,18 @@ from huggingface_hub import snapshot_download
 
 import wandb
 
+METRICS_FILE = "metrics.json"
+"""Evaluation scores stored alongside the weights they describe."""
+
 CheckpointBackend = Literal["hf", "none"]
-ModelSource = Literal["auto", "hf", "wandb", "local"]
+ModelSource = Literal["auto", "hf", "local"]
 
 
 @dataclass(frozen=True)
 class ResolvedCheckpoint:
     """Resolved checkpoint package with local files and serialized config."""
 
-    source: Literal["hf", "wandb", "local"]
+    source: Literal["hf", "local"]
     root_dir: str
     files: dict[str, str]
     run_config: dict[str, Any]
@@ -45,14 +58,7 @@ def build_hf_package_path(problem_id: str, seed: int, extra_parts: list[str] | N
     return "/".join(parts)
 
 
-def build_hf_run_package_path(package_path: str, wandb_run_id: str | None) -> str | None:
-    """Return an immutable run-specific package path when a W&B run id is available."""
-    if not wandb_run_id:
-        return None
-    return f"{package_path}/run_{_sanitize_path_component(wandb_run_id)}"
-
-
-def save_checkpoint_package(  # noqa: PLR0913
+def save_checkpoint_package(
     *,
     checkpoint_backend: CheckpointBackend,
     hf_entity: str,
@@ -66,8 +72,23 @@ def save_checkpoint_package(  # noqa: PLR0913
     metadata: dict[str, Any] | None = None,
     primary_files: list[str] | None = None,
     extra_path_parts: list[str] | None = None,
+    config_fingerprint: str | None = None,
+    is_default_config: bool = True,
 ) -> dict[str, Any]:
     """Save a checkpoint package to HuggingFace.
+
+    A run is filed under up to three paths in its model repo:
+
+    - `{problem_id}/cfg_{fingerprint}/seed_{seed}` -- this exact set of
+      hyperparameters. Every configuration in a sweep gets its own, so runs
+      never overwrite each other.
+    - `{problem_id}/seed_{seed}` -- the canonical location that a plain
+      `from_pretrained(problem, seed=...)` reads. Written **only** when the run
+      used the training script's default hyperparameters, so a sweep cannot
+      redefine what the bare model name means.
+    Pass `config_fingerprint` and `is_default_config` together via
+    `engiopt.core.checkpoint_identity(args)`. Omitting them keeps the older
+    behaviour of writing only the canonical path.
 
     W&B is no longer a checkpoint storage backend; the active W&B run still
     receives a summary pointing at the HF package for traceability.
@@ -76,9 +97,9 @@ def save_checkpoint_package(  # noqa: PLR0913
         "checkpoint_backend": checkpoint_backend,
         "hf_repo_id": None,
         "hf_package_path": None,
-        "hf_run_package_path": None,
+        "hf_config_package_path": None,
         "hf_revision": None,
-        "hf_run_revision": None,
+        "hf_config_revision": None,
     }
     metadata_payload = _build_metadata(
         problem_id=problem_id,
@@ -99,33 +120,42 @@ def save_checkpoint_package(  # noqa: PLR0913
         metadata_payload["hf_repo_id"] = repo_id
         metadata_payload["hf_package_path"] = package_path
 
-        run_package_path = build_hf_run_package_path(package_path, metadata_payload.get("wandb_run_id"))
-        info["hf_run_package_path"] = run_package_path
-        if run_package_path is not None:
-            metadata_payload["hf_run_package_path"] = run_package_path
-            run_revision = _upload_package_to_hf(
+        # Every configuration gets its own addressable location, so a sweep's
+        # runs cannot overwrite one another.
+        if config_fingerprint:
+            config_package_path = build_hf_package_path(
+                problem_id, seed, [*(extra_path_parts or []), f"cfg_{config_fingerprint}"]
+            )
+            info["hf_config_package_path"] = config_package_path
+            metadata_payload["config_fingerprint"] = config_fingerprint
+            metadata_payload["hf_config_package_path"] = config_package_path
+            info["hf_config_revision"] = _upload_package_to_hf(
                 repo_id=repo_id,
                 hf_private=hf_private,
-                package_path=run_package_path,
+                package_path=config_package_path,
                 checkpoint_files=checkpoint_files,
                 run_config=run_config,
                 metadata=metadata_payload,
                 algo=algo,
             )
-            info["hf_run_revision"] = run_revision
-            metadata_payload["hf_run_revision"] = run_revision
+            metadata_payload["hf_config_revision"] = info["hf_config_revision"]
 
-        revision = _upload_package_to_hf(
-            repo_id=repo_id,
-            hf_private=hf_private,
-            package_path=package_path,
-            checkpoint_files=checkpoint_files,
-            run_config=run_config,
-            metadata=metadata_payload,
-            algo=algo,
-        )
-        info["hf_revision"] = revision
-        metadata_payload["hf_revision"] = revision
+        # The canonical path defines what the bare model name resolves to, so
+        # only a default-hyperparameter run may claim it.
+        if is_default_config:
+            revision = _upload_package_to_hf(
+                repo_id=repo_id,
+                hf_private=hf_private,
+                package_path=package_path,
+                checkpoint_files=checkpoint_files,
+                run_config=run_config,
+                metadata=metadata_payload,
+                algo=algo,
+            )
+            info["hf_revision"] = revision
+            metadata_payload["hf_revision"] = revision
+        else:
+            info["hf_package_path"] = None
 
     if wandb.run is not None:
         _log_checkpoint_summary_to_wandb(metadata_payload, info)
@@ -133,7 +163,7 @@ def save_checkpoint_package(  # noqa: PLR0913
     return info
 
 
-def resolve_named_checkpoint(  # noqa: PLR0913
+def resolve_named_checkpoint(
     *,
     model_source: ModelSource,
     problem_id: str,
@@ -142,22 +172,27 @@ def resolve_named_checkpoint(  # noqa: PLR0913
     hf_entity: str,
     hf_repo_prefix: str,
     required_files: list[str],
-    wandb_project: str,
-    wandb_entity: str | None,
-    wandb_artifact_names: dict[str, str],
-    wandb_config_artifact_name: str | None = None,
-    wandb_artifact_alias: str | None = None,
     local_model_dir: str | None = None,
     extra_path_parts: list[str] | None = None,
 ) -> ResolvedCheckpoint:
     """Resolve a checkpoint package by the standard EngiOpt problem/algo/seed naming.
 
-    ``wandb_artifact_alias`` overrides the default ``f"seed_{seed}"`` alias used when
-    falling back to legacy W&B artifacts. Callers with custom alias schemes (e.g.
-    ``f"seed_{seed}_rec{r}_perf{p}"``) pass it here so the read-fallback resolves
-    historical artifacts that pre-date the HF cutover.
+    Args:
+        model_source: `auto` tries HuggingFace then any local directory; `hf` or
+            `local` restrict it to one.
+        problem_id: EngiBench problem the checkpoint was trained on.
+        algo: Model family, which selects the HF repo.
+        seed: Training seed.
+        hf_entity: HF org/user holding the checkpoint repos.
+        hf_repo_prefix: Prefix of the per-model-family repo.
+        required_files: Files the package must contain.
+        local_model_dir: Directory to load from instead of the Hub.
+        extra_path_parts: Path components identifying one configuration; see
+            `engiopt.core.config_path_parts`.
+
+    Raises:
+        FileNotFoundError: If no backend could supply the package.
     """
-    alias = wandb_artifact_alias or f"seed_{seed}"
     errors: list[str] = []
     if model_source in {"auto", "hf"}:
         try:
@@ -171,21 +206,6 @@ def resolve_named_checkpoint(  # noqa: PLR0913
                 raise
             errors.append(f"hf: {exc}")
 
-    if model_source in {"auto", "wandb"}:
-        try:
-            return _resolve_wandb_package(
-                _required_files=required_files,
-                artifact_names=wandb_artifact_names,
-                wandb_project=wandb_project,
-                wandb_entity=wandb_entity,
-                alias=alias,
-                config_artifact_name=wandb_config_artifact_name,
-            )
-        except Exception as exc:
-            if model_source == "wandb":
-                raise
-            errors.append(f"wandb: {exc}")
-
     if local_model_dir is not None and model_source in {"auto", "local"}:
         return _resolve_local_package(local_model_dir, required_files)
 
@@ -198,39 +218,26 @@ def resolve_checkpoint_reference(
     model_source: ModelSource,
     model_ref: str,
     required_files: list[str] | None = None,
-    active_wandb_run: wandb.sdk.wandb_run.Run | None = None,
 ) -> ResolvedCheckpoint:
-    """Resolve a checkpoint package from an explicit HF/W&B/local reference."""
+    """Resolve a checkpoint package from an explicit `hf://` or local reference.
+
+    Raises:
+        ValueError: If the reference cannot be interpreted.
+    """
     inferred_source = model_source
-    normalized_ref = model_ref
     if model_source == "auto":
-        if model_ref.startswith("hf://"):
-            inferred_source = "hf"
-        elif model_ref.startswith("wandb://"):
-            inferred_source = "wandb"
-        elif os.path.isdir(model_ref):
-            inferred_source = "local"
-        else:
-            inferred_source = "wandb"
+        inferred_source = "local" if os.path.isdir(model_ref.removeprefix("file://")) else "hf"
 
     if inferred_source == "hf":
         repo_id, package_path = _parse_hf_reference(model_ref)
         return _resolve_hf_package(repo_id=repo_id, package_path=package_path, required_files=required_files or [])
-    if inferred_source == "wandb":
-        artifact_path = model_ref.removeprefix("wandb://")
-        return _resolve_wandb_reference(
-            artifact_path=artifact_path,
-            required_files=required_files or [],
-            active_wandb_run=active_wandb_run,
-        )
     if inferred_source == "local":
-        normalized_ref = model_ref.removeprefix("file://")
-        return _resolve_local_package(normalized_ref, required_files or [])
+        return _resolve_local_package(model_ref.removeprefix("file://"), required_files or [])
 
     raise ValueError(f"Unsupported model source: {model_source}")
 
 
-def _upload_package_to_hf(  # noqa: PLR0913
+def _upload_package_to_hf(
     *,
     repo_id: str,
     hf_private: bool,
@@ -277,85 +284,6 @@ def _resolve_local_package(local_model_dir: str, required_files: list[str]) -> R
     if not os.path.isdir(local_model_dir):
         raise FileNotFoundError(f"Local checkpoint directory not found: {local_model_dir}")
     return _load_package_from_directory(root_dir=local_model_dir, required_files=required_files, source="local")
-
-
-def _resolve_wandb_package(
-    *,
-    _required_files: list[str],
-    artifact_names: dict[str, str],
-    wandb_project: str,
-    wandb_entity: str | None,
-    alias: str,
-    config_artifact_name: str | None,
-) -> ResolvedCheckpoint:
-    api = wandb.Api()
-    files: dict[str, str] = {}
-    for file_name, artifact_name in artifact_names.items():
-        artifact_path = _build_wandb_artifact_path(
-            artifact_name=artifact_name,
-            wandb_project=wandb_project,
-            wandb_entity=wandb_entity,
-            alias=alias,
-        )
-        artifact = api.artifact(artifact_path, type="model")
-        artifact_dir = artifact.download()
-        files[file_name] = os.path.join(artifact_dir, file_name)
-
-    config_artifact = config_artifact_name or next(iter(artifact_names.values()))
-    config_artifact_path = _build_wandb_artifact_path(
-        artifact_name=config_artifact,
-        wandb_project=wandb_project,
-        wandb_entity=wandb_entity,
-        alias=alias,
-    )
-    artifact = api.artifact(config_artifact_path, type="model")
-    run = artifact.logged_by()
-    if run is None or not hasattr(run, "config"):
-        raise ValueError("Failed to retrieve W&B run config from artifact")
-
-    return ResolvedCheckpoint(
-        source="wandb",
-        root_dir=os.path.dirname(next(iter(files.values()))),
-        files=files,
-        run_config=dict(run.config),
-        metadata={
-            "source": "wandb",
-            "artifact_paths": {
-                file_name: _build_wandb_artifact_path(
-                    artifact_name=artifact_name,
-                    wandb_project=wandb_project,
-                    wandb_entity=wandb_entity,
-                    alias=alias,
-                )
-                for file_name, artifact_name in artifact_names.items()
-            },
-        },
-    )
-
-
-def _resolve_wandb_reference(
-    *,
-    artifact_path: str,
-    required_files: list[str],
-    active_wandb_run: wandb.sdk.wandb_run.Run | None,
-) -> ResolvedCheckpoint:
-    artifact = (
-        active_wandb_run.use_artifact(artifact_path, type="model")
-        if active_wandb_run is not None
-        else wandb.Api().artifact(artifact_path, type="model")
-    )
-    artifact_dir = artifact.download()
-    files = _discover_reference_files(artifact_dir, required_files)
-    run = artifact.logged_by()
-    if run is None or not hasattr(run, "config"):
-        raise ValueError("Failed to retrieve W&B run config from artifact reference")
-    return ResolvedCheckpoint(
-        source="wandb",
-        root_dir=artifact_dir,
-        files=files,
-        run_config=dict(run.config),
-        metadata={"source": "wandb", "artifact_path": artifact_path},
-    )
 
 
 def _load_package_from_directory(
@@ -417,18 +345,7 @@ def _parse_hf_reference(model_ref: str) -> tuple[str, str]:
     return repo_id, package_path
 
 
-def _build_wandb_artifact_path(
-    *,
-    artifact_name: str,
-    wandb_project: str,
-    wandb_entity: str | None,
-    alias: str,
-) -> str:
-    project_path = f"{wandb_entity}/{wandb_project}" if wandb_entity is not None else wandb_project
-    return f"{project_path}/{artifact_name}:{alias}"
-
-
-def _build_metadata(  # noqa: PLR0913
+def _build_metadata(
     *,
     problem_id: str,
     algo: str,
@@ -502,16 +419,20 @@ def _repo_readme_text(algo: str) -> str:
 
 
 def _log_checkpoint_summary_to_wandb(metadata: dict[str, Any], info: dict[str, Any]) -> None:
+    """Point the W&B run at the HF package holding its weights.
+
+    W&B stores the media -- loss curves and sample images -- while the weights
+    and metrics live on HuggingFace, so each side records where the other is.
+    """
     if wandb.run is None:
         return
     wandb.summary["checkpoint_backend"] = info["checkpoint_backend"]
     if info["hf_repo_id"] is not None:
         wandb.summary["hf_repo_id"] = info["hf_repo_id"]
         wandb.summary["hf_package_path"] = info["hf_package_path"]
+        wandb.summary["hf_config_package_path"] = info["hf_config_package_path"]
         wandb.summary["hf_revision"] = info["hf_revision"]
-    if info["hf_run_package_path"] is not None:
-        wandb.summary["hf_run_package_path"] = info["hf_run_package_path"]
-        wandb.summary["hf_run_revision"] = info["hf_run_revision"]
+        wandb.summary["hf_config_revision"] = info["hf_config_revision"]
     wandb.summary["checkpoint_primary_files"] = metadata["primary_files"]
 
 
@@ -527,3 +448,50 @@ def _read_json(path: str) -> dict[str, Any]:
 
 def _sanitize_path_component(value: str) -> str:
     return value.replace(os.sep, "_").replace(" ", "_")
+
+
+def publish_checkpoint_metrics(
+    *,
+    hf_entity: str,
+    hf_repo_prefix: str,
+    problem_id: str,
+    algo: str,
+    seed: int,
+    metrics: dict[str, Any],
+    extra_path_parts: list[str] | None = None,
+    token: str | None = None,
+) -> str:
+    """Attach evaluation metrics to a checkpoint package on HuggingFace.
+
+    Metrics live beside the weights they describe, so a checkpoint is
+    self-describing: whoever downloads it can see how it scored without
+    consulting the leaderboard or a W&B run.
+
+    Args:
+        hf_entity: HF org/user holding the checkpoint repos.
+        hf_repo_prefix: Prefix of the per-model-family repo.
+        problem_id: Problem the checkpoint was evaluated on.
+        algo: Model family, selecting the repo.
+        seed: Training seed.
+        metrics: Scores to record, typically one leaderboard row.
+        extra_path_parts: Configuration path components, from
+            `engiopt.core.config_path_parts`.
+        token: HF token; falls back to the ambient login.
+
+    Returns:
+        The path written inside the repo.
+    """
+    repo_id = build_hf_repo_id(hf_entity, hf_repo_prefix, algo)
+    package_path = build_hf_package_path(problem_id, seed, extra_path_parts)
+    api = HfApi(token=token)
+    with tempfile.TemporaryDirectory() as tmp:
+        local = Path(tmp) / METRICS_FILE
+        _write_json(local, metrics)
+        api.upload_file(
+            path_or_fileobj=str(local),
+            path_in_repo=f"{package_path}/{METRICS_FILE}",
+            repo_id=repo_id,
+            repo_type="model",
+            commit_message=f"Evaluation metrics for {problem_id}/seed_{seed}",
+        )
+    return f"{package_path}/{METRICS_FILE}"
