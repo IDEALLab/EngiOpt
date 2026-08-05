@@ -1,13 +1,19 @@
 """Transformations for the data."""
 
-from collections.abc import Callable
+from __future__ import annotations
 
-from datasets import Dataset
-from engibench.core import Problem
+from typing import TYPE_CHECKING
+
 from gymnasium import spaces
 import numpy as np
 import torch as th
 import torch.nn.functional as f
+
+if TYPE_CHECKING:
+    from collections.abc import Callable, Sequence
+
+    from datasets import Dataset
+    from engibench.core import Problem
 
 
 def get_scalar_condition_keys(problem: Problem, dataset: Dataset, *, drop_constants: bool = False) -> list[str]:
@@ -66,10 +72,66 @@ def get_image_condition_keys(problem: Problem, dataset: Dataset) -> list[str]:
     """Return the array-valued condition keys present in the dataset.
 
     The complement of `get_scalar_condition_keys`, e.g. thermoelastic2d's 65x65
-    boundary matrices. These still reach the simulator through the conditions
-    dataset; they simply cannot travel in the dense condition tensor.
+    boundary matrices. These cannot travel in the dense scalar condition tensor;
+    they reach models as a separate image tensor, and the simulator through the
+    conditions dataset.
     """
     return [key for key in problem.conditions_keys if key in dataset.column_names and np.asarray(dataset[0][key]).ndim > 0]
+
+
+def image_condition_keys(problem: Problem, split: str = "train") -> list[str]:
+    """The image-valued condition columns a model can be conditioned on, in channel order.
+
+    The image counterpart of `condition_keys`, and the one definition training,
+    checkpoint loading, and sampling share. thermoelastic2d's four 65x65
+    boundary masks are the motivating case: where the part is held, loaded, and
+    cooled is as much a design requirement as its volume budget.
+
+    Args:
+        problem: An EngiBench problem instance.
+        split: Dataset split to inspect; the schema is the same in all of them.
+
+    Returns:
+        Condition names, in `conditions_keys` order.
+    """
+    dataset = problem.dataset
+    return get_image_condition_keys(problem, dataset[split] if split in dataset else next(iter(dataset.values())))
+
+
+def stack_image_conditions(conditions: Dataset, keys: Sequence[str], device: th.device | None = None) -> th.Tensor | None:
+    """Stack image-valued condition columns into one `(n, len(keys), H, W)` tensor.
+
+    Masks are handed over at their native resolution rather than resized to the
+    design grid. thermoelastic2d's are 65x65 while its designs are 64x64, because
+    the conditions live on finite-element *nodes* and the design on *elements*;
+    quietly resampling one onto the other would erase a real distinction. Models
+    that need them on the design grid should resize explicitly, e.g. with
+    `resize_to`.
+
+    Args:
+        conditions: The sampled conditions dataset.
+        keys: Image condition names, in the channel order to stack them.
+        device: Device for the result; CPU when omitted.
+
+    Returns:
+        The stacked masks, or None when `keys` is empty.
+
+    Raises:
+        ValueError: If the columns do not all share one spatial shape, since
+            there is then no single tensor to stack them into. Read them from
+            `ConditionBatch.dataset` instead.
+    """
+    if not keys:
+        return None
+    channels = [np.asarray(conditions[key], dtype=np.float32) for key in keys]
+    shapes = {channel.shape[1:] for channel in channels}
+    if len(shapes) > 1:
+        detail = ", ".join(f"{key}={np.asarray(conditions[key]).shape[1:]}" for key in keys)
+        raise ValueError(
+            f"Image conditions have differing shapes ({detail}), so they cannot stack into one tensor. "
+            "Read them individually from the conditions dataset."
+        )
+    return th.as_tensor(np.stack(channels, axis=1), dtype=th.float32, device=device)
 
 
 def flatten_dict_factory(problem: Problem, device: th.device) -> Callable:

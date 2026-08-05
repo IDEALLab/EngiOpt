@@ -28,6 +28,7 @@ import torch as th
 
 from engiopt.checkpoint_store import resolve_named_checkpoint
 from engiopt.transforms import condition_keys as scalar_condition_keys
+from engiopt.transforms import image_condition_keys as scalar_image_condition_keys
 
 if TYPE_CHECKING:
     from datasets import Dataset
@@ -45,35 +46,60 @@ DEFAULT_HF_REPO_PREFIX = "engiopt"
 class ConditionBatch:
     """The conditions a generator is asked to satisfy, in every form models need.
 
-    Most models want `tensor`. Some need the original columns -- to drop constant
-    conditions, re-normalize them, or look them up by name -- so the raw dataset
-    travels alongside rather than being reconstructed from the tensor.
+    A design requirement comes in two shapes, and they cannot share a tensor.
+    Scalars (a volume budget, a filter radius) stack into `tensor`. Fields
+    (where a part is held, loaded, or cooled) stack into `images`. Models that
+    need the original columns -- to drop constant conditions, re-normalize them,
+    or look one up by name -- read `dataset` instead.
 
     Attributes:
         tensor: `(n, n_conds)` float tensor on the generator's device, or None
-            for unconditional problems.
+            when the problem has no scalar conditions.
+        images: `(n, n_image_conds, H, W)` float tensor of field conditions, or
+            None when the problem has none. Native resolution: thermoelastic2d's
+            masks are 65x65 against a 64x64 design, because they live on
+            finite-element nodes rather than elements.
         dataset: The sampled conditions as an EngiBench/HF dataset, if available.
-        keys: Condition names, in the same column order as `tensor`.
+            The only route to conditions that fit neither tensor.
+        keys: Scalar condition names, in the same column order as `tensor`.
+        image_keys: Image condition names, in the same channel order as `images`.
     """
 
     tensor: th.Tensor | None
+    images: th.Tensor | None = None
     dataset: Dataset | None = None
     keys: tuple[str, ...] = ()
+    image_keys: tuple[str, ...] = ()
 
     def __len__(self) -> int:
         if self.tensor is not None:
             return int(self.tensor.shape[0])
+        if self.images is not None:
+            return int(self.images.shape[0])
         return len(self.dataset) if self.dataset is not None else 0
 
     def require_tensor(self, algo_id: str) -> th.Tensor:
         """Return `tensor`, with a clear error when a conditional model got nothing.
 
         Raises:
-            ValueError: If no conditions are available.
+            ValueError: If no scalar conditions are available.
         """
         if self.tensor is None:
             raise ValueError(f"{algo_id} is conditional, but no conditions were provided.")
         return self.tensor
+
+    def require_images(self, algo_id: str) -> th.Tensor:
+        """Return `images`, with a clear error when an image-conditioned model got none.
+
+        Raises:
+            ValueError: If no image conditions are available.
+        """
+        if self.images is None:
+            raise ValueError(
+                f"{algo_id} is image-conditioned, but this problem provides no image conditions. "
+                "Declare the problems it serves, or check `image_condition_keys(problem)`."
+            )
+        return self.images
 
 
 def pick_device() -> th.device:
@@ -166,7 +192,10 @@ def config_path_parts(config_fingerprint_value: str | None) -> list[str] | None:
 
 
 CONDITION_KEYS_METADATA_FIELD = "condition_keys"
-"""Checkpoint-metadata field recording which conditions a model was trained on."""
+"""Checkpoint-metadata field recording which scalar conditions a model was trained on."""
+
+IMAGE_CONDITION_KEYS_METADATA_FIELD = "image_condition_keys"
+"""Checkpoint-metadata field recording which image conditions a model was trained on."""
 
 
 def condition_keys_for(problem: Problem, resolved: ResolvedCheckpoint | None = None) -> tuple[str, ...]:
@@ -189,6 +218,27 @@ def condition_keys_for(problem: Problem, resolved: ResolvedCheckpoint | None = N
         if recorded:
             return tuple(str(key) for key in recorded)
     return tuple(scalar_condition_keys(problem))
+
+
+def image_condition_keys_for(problem: Problem, resolved: ResolvedCheckpoint | None = None) -> tuple[str, ...]:
+    """Which image conditions a generator consumes, in its input channel order.
+
+    The image counterpart of `condition_keys_for`, with the same precedence: the
+    checkpoint's recorded schema wins, so a model keeps loading after a problem
+    gains or reorders a field condition.
+
+    Args:
+        problem: The problem the checkpoint was trained on.
+        resolved: A downloaded checkpoint package, when one is available.
+
+    Returns:
+        Condition names, in `problem.conditions_keys` order.
+    """
+    if resolved is not None:
+        recorded = resolved.metadata.get(IMAGE_CONDITION_KEYS_METADATA_FIELD)
+        if recorded:
+            return tuple(str(key) for key in recorded)
+    return tuple(scalar_image_condition_keys(problem))
 
 
 def design_shape_of(problem: Problem) -> tuple[int, ...]:
@@ -217,10 +267,17 @@ class Generator(abc.ABC):
     Class attributes:
         algo_id: Stable identifier. Used as the leaderboard key, the HF repo
             suffix, and the registry key. Must match the package directory name.
-        conditional: Whether `sample` consumes conditions. Unconditional models
-            still receive them (so the call signature is uniform) but ignore
-            them -- which is exactly what the conditional-adherence metrics are
-            meant to expose.
+        conditional: Whether `sample` consumes the scalar conditions.
+            Unconditional models still receive them (so the call signature is
+            uniform) but ignore them -- which is exactly what the
+            conditional-adherence metrics are meant to expose.
+        image_conditional: Whether `sample` consumes the *field* conditions --
+            thermoelastic2d's masks for where a part is held, loaded, and
+            cooled. Declared separately from `conditional` because they are
+            different inputs: a model can take the volume budget and ignore the
+            boundary conditions. Pointing an image-conditioned model at a
+            problem with no field conditions fails immediately, the same way
+            `design_kinds` rejects a 2D model on a 3D problem.
         design_kinds: Which design-space shapes this model can serve, e.g.
             `("2d",)`. Used to reject nonsensical model/problem pairings early.
         checkpoint_files: Files the checkpoint package must contain.
@@ -235,6 +292,7 @@ class Generator(abc.ABC):
 
     algo_id: ClassVar[str]
     conditional: ClassVar[bool] = True
+    image_conditional: ClassVar[bool] = False
     design_kinds: ClassVar[tuple[str, ...]] = ("2d",)
     checkpoint_files: ClassVar[tuple[str, ...]] = ("generator.pth",)
     primary_state_key: ClassVar[str] = "generator"
@@ -249,6 +307,7 @@ class Generator(abc.ABC):
         device: th.device,
         run_config: dict[str, Any] | None = None,
         condition_keys: tuple[str, ...] | None = None,
+        image_condition_keys: tuple[str, ...] | None = None,
         checkpoint_revision: str | None = None,
         checkpoint_hash: str | None = None,
     ) -> None:
@@ -258,6 +317,7 @@ class Generator(abc.ABC):
         self.device = device
         self.run_config: dict[str, Any] = run_config or {}
         self._condition_keys = condition_keys
+        self._image_condition_keys = image_condition_keys
         self.checkpoint_revision = checkpoint_revision
         """Commit the checkpoint was downloaded at, when it came from the Hub."""
         self.checkpoint_hash = checkpoint_hash
@@ -350,6 +410,7 @@ class Generator(abc.ABC):
             seed=seed,
             run_config=resolved.run_config,
             condition_keys=condition_keys_for(problem, resolved),
+            image_condition_keys=image_condition_keys_for(problem, resolved),
             checkpoint_revision=resolved.revision,
             checkpoint_hash=resolved.content_hash,
             **kwargs,
@@ -428,16 +489,24 @@ class Generator(abc.ABC):
     def _as_batch(self, conditions: ConditionBatch | th.Tensor | npt.NDArray[Any] | None) -> ConditionBatch:
         """Normalize whatever the caller passed into a `ConditionBatch` on this device."""
         if isinstance(conditions, ConditionBatch):
-            self._check_condition_keys(conditions.keys)
-            tensor = conditions.tensor
-            moved = None if tensor is None else tensor.to(device=self.device, dtype=th.float)
-            return ConditionBatch(tensor=moved, dataset=conditions.dataset, keys=conditions.keys)
+            self._check_condition_keys(conditions.keys, conditions.image_keys)
+            return ConditionBatch(
+                tensor=self._to_device(conditions.tensor),
+                images=self._to_device(conditions.images),
+                dataset=conditions.dataset,
+                keys=conditions.keys,
+                image_keys=conditions.image_keys,
+            )
         if conditions is None:
             return ConditionBatch(tensor=None, keys=self.condition_keys)
         tensor = conditions if isinstance(conditions, th.Tensor) else th.as_tensor(np.asarray(conditions))
-        return ConditionBatch(tensor=tensor.to(device=self.device, dtype=th.float), keys=self.condition_keys)
+        return ConditionBatch(tensor=self._to_device(tensor), keys=self.condition_keys)
 
-    def _check_condition_keys(self, keys: tuple[str, ...]) -> None:
+    def _to_device(self, tensor: th.Tensor | None) -> th.Tensor | None:
+        """Move a condition tensor onto this generator's device, passing None through."""
+        return None if tensor is None else tensor.to(device=self.device, dtype=th.float)
+
+    def _check_condition_keys(self, keys: tuple[str, ...], image_keys: tuple[str, ...] = ()) -> None:
         """Refuse conditions whose columns are not the ones this model was trained on.
 
         Silently accepting them produces either a shape error deep inside the
@@ -445,13 +514,17 @@ class Generator(abc.ABC):
 
         Raises:
             ValueError: If the caller's condition columns differ from the
-                checkpoint's.
+                checkpoint's, for either the scalar or the image conditions.
         """
-        if keys and self.condition_keys and tuple(keys) != self.condition_keys:
-            raise ValueError(
-                f"{self.algo_id} was trained on conditions {self.condition_keys} but was given {tuple(keys)}. "
-                "Re-train against the current problem, or evaluate the checkpoint that matches it."
-            )
+        for kind, given, trained in (
+            ("conditions", keys, self.condition_keys),
+            ("image conditions", image_keys, self.image_condition_keys),
+        ):
+            if given and trained and tuple(given) != trained:
+                raise ValueError(
+                    f"{self.algo_id} was trained on {kind} {trained} but was given {tuple(given)}. "
+                    "Re-train against the current problem, or evaluate the checkpoint that matches it."
+                )
 
     @cached_property
     def design_shape(self) -> tuple[int, ...]:
@@ -474,10 +547,26 @@ class Generator(abc.ABC):
             return tuple(self._condition_keys)
         return condition_keys_for(self.problem)
 
+    @cached_property
+    def image_condition_keys(self) -> tuple[str, ...]:
+        """Image condition channels this model consumes, in input-channel order.
+
+        The image counterpart of `condition_keys`, with the same precedence:
+        the checkpoint's recorded schema wins over the problem's current one.
+        """
+        if self._image_condition_keys is not None:
+            return tuple(self._image_condition_keys)
+        return image_condition_keys_for(self.problem)
+
     @property
     def n_conds(self) -> int:
         """Number of scalar conditioning variables this model consumes."""
         return len(self.condition_keys)
+
+    @property
+    def n_image_conds(self) -> int:
+        """Number of image conditioning channels this model consumes."""
+        return len(self.image_condition_keys)
 
     # ------------------------------------------------------------------
     # Checkpoint plumbing shared by every adapter

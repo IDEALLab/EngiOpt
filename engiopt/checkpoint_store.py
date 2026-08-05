@@ -85,6 +85,7 @@ def save_checkpoint_package(
     config_fingerprint: str | None = None,
     is_default_config: bool = True,
     condition_keys: list[str] | tuple[str, ...] | None = None,
+    image_condition_keys: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     """Save a checkpoint package to HuggingFace.
 
@@ -106,7 +107,9 @@ def save_checkpoint_package(
 
     Pass `condition_keys` (from `engiopt.transforms.condition_keys`) so the
     checkpoint records the condition schema it was trained under; loading then
-    rebuilds the network for exactly those columns.
+    rebuilds the network for exactly those columns. Image-conditioned models
+    pass `image_condition_keys` (from `engiopt.transforms.image_condition_keys`)
+    the same way.
 
     W&B is no longer a checkpoint storage backend; the active W&B run still
     receives a summary pointing at the HF package for traceability.
@@ -128,6 +131,7 @@ def save_checkpoint_package(
         primary_files=primary_files,
         metadata=metadata,
         condition_keys=condition_keys,
+        image_condition_keys=image_condition_keys,
     )
     base_metadata.update(_build_wandb_run_metadata())
 
@@ -381,6 +385,7 @@ def _build_metadata(
     primary_files: list[str] | None,
     metadata: dict[str, Any] | None,
     condition_keys: list[str] | tuple[str, ...] | None = None,
+    image_condition_keys: list[str] | tuple[str, ...] | None = None,
 ) -> dict[str, Any]:
     payload = dict(metadata or {})
     payload.update(
@@ -395,6 +400,8 @@ def _build_metadata(
     )
     if condition_keys is not None:
         payload["condition_keys"] = list(condition_keys)
+    if image_condition_keys is not None:
+        payload["image_condition_keys"] = list(image_condition_keys)
     return payload
 
 

@@ -131,18 +131,57 @@ applies to `Problem` classes, so the name-to-model mapping stays unambiguous.
 
 ### Conditions
 
-`_sample` receives a `ConditionBatch`, not a bare tensor:
+`_sample` receives a `ConditionBatch`, not a bare tensor. A design requirement
+comes in two shapes, and they cannot share a tensor:
 
 ```python
-cond = conditions.require_tensor(self.algo_id)  # (n, n_conds) on your device
-conditions.dataset  # original columns, if you need them
-conditions.keys  # condition names, in column order
+cond = conditions.require_tensor(self.algo_id)   # (n, n_conds)             scalars
+masks = conditions.require_images(self.algo_id)  # (n, n_image_conds, H, W) fields
+conditions.dataset      # original columns, if you need them
+conditions.keys         # scalar names, in column order
+conditions.image_keys   # image names, in channel order
 ```
 
 Most models want `require_tensor`. Reach for `dataset` only when your model
 preprocesses conditions the way `vqgan` does (dropping constant columns,
 re-normalizing). Unconditional models ignore the argument entirely — and the
 conditional-adherence metrics are what will show that.
+
+### Image conditions
+
+Some problems state part of the requirement as a *field* rather than a number.
+thermoelastic2d gives four 65×65 masks — where the part is held, where it is
+loaded in x and y, and where it is cooled. A volume budget is a scalar; "this
+corner is bolted down" is not.
+
+**As an algorithm developer**, three lines:
+
+```python
+image_conditional = True                                   # 1. declare it
+
+n_image_conds = len(image_condition_keys_for(problem, resolved))  # 2. size the network
+
+masks = conditions.require_images(self.algo_id)            # 3. use it in _sample
+```
+
+Declaring it means the evaluator refuses to pair your model with a problem that
+has no field conditions, rather than handing you `None`. Sizing from
+`image_condition_keys_for` means your network is rebuilt for the channels the
+checkpoint actually saw, exactly as `condition_keys_for` does for scalars. In
+training, pass `image_condition_keys=...` to `save_checkpoint_package` alongside
+`condition_keys` so the schema travels with the weights.
+
+**Masks arrive at the problem's native resolution.** thermoelastic2d's are 65×65
+while its designs are 64×64: the conditions live on finite-element *nodes*, the
+design on *elements*. Resize explicitly (`transforms.resize_to`) — the contract
+will not resample one onto the other behind your back.
+
+**As a problem developer**, there is nothing to do. Any condition your EngiBench
+problem declares as an array is detected automatically by
+`transforms.image_condition_keys(problem)` and stacked into the batch, in
+`conditions_keys` order. Conditions whose shapes differ from one another cannot
+stack into one tensor; you get a clear error naming them, and they remain
+readable from `conditions.dataset`.
 
 ## 4. Check it
 

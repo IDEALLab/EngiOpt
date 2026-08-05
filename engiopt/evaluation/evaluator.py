@@ -132,11 +132,18 @@ class Evaluator:
                 f"{generator.algo_id!r} supports {generator.design_kinds} design spaces, "
                 f"but {self.problem_id!r} is {kind!r}."
             )
+        if generator.image_conditional and not self.resolved.image_condition_keys:
+            raise ValueError(
+                f"{generator.algo_id!r} is image-conditioned, but {self.problem_id!r} declares no "
+                "image conditions. Only problems with field conditions can serve it."
+            )
         designs = generator.sample(
             ConditionBatch(
                 tensor=self.resolved.conditions_tensor,
+                images=self.resolved.image_conditions_tensor,
                 dataset=self.resolved.conditions,
                 keys=self.resolved.condition_keys,
+                image_keys=self.resolved.image_condition_keys,
             ),
             n=self.resolved.n_samples,
             seed=getattr(generator, "seed", None),

@@ -23,7 +23,9 @@ import numpy as np
 import torch as th
 
 from engiopt.dataset_sample_conditions import sample_conditions
+from engiopt.transforms import get_image_condition_keys
 from engiopt.transforms import get_scalar_condition_keys
+from engiopt.transforms import stack_image_conditions
 
 if TYPE_CHECKING:
     from datasets import Dataset
@@ -197,6 +199,7 @@ class EvalSpec:
                 f"(expected {self.condition_digest}, got {digest}). The dataset or sampling changed: "
                 "freeze a new spec version rather than comparing across the change."
             )
+        image_keys = tuple(get_image_condition_keys(problem, problem.dataset["test"]))
         return ResolvedSpec(
             spec=self,
             conditions_tensor=conditions_tensor,
@@ -204,6 +207,8 @@ class EvalSpec:
             ref_designs=ref_designs,
             indices=np.asarray(indices),
             condition_keys=tuple(get_scalar_condition_keys(problem, problem.dataset["test"])),
+            image_conditions_tensor=stack_image_conditions(conditions, image_keys, device),
+            image_condition_keys=image_keys,
         )
 
     def check_problem_definition(self, problem: Problem) -> None:
@@ -289,6 +294,10 @@ class ResolvedSpec:
     conditions cannot travel in a dense tensor. See
     `engiopt.transforms.get_scalar_condition_keys`.
     """
+    image_conditions_tensor: th.Tensor | None = None
+    """`(n, n_image_conds, H, W)` field conditions, or None if the problem has none."""
+    image_condition_keys: tuple[str, ...] = ()
+    """Names of the channels in `image_conditions_tensor`, in order."""
 
     @property
     def n_samples(self) -> int:

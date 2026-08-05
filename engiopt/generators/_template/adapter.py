@@ -37,7 +37,12 @@ class MyModel(Generator):
     """Must equal this directory's name."""
 
     conditional = True
-    """Does `_sample` use the conditions it is given?"""
+    """Does `_sample` use the scalar conditions it is given (volume budget, filter radius)?"""
+
+    image_conditional = False
+    """Does `_sample` use the *field* conditions -- masks for where a part is
+    held, loaded, or cooled? Set True and the evaluator will only pair this model
+    with problems that have them. See the image-conditions block in `_sample`."""
 
     design_kinds = ("2d",)
     """Design spaces this model can serve: any of `1d`, `2d`, `3d`, `dict`."""
@@ -104,6 +109,16 @@ class MyModel(Generator):
 
         Use `conditions.require_tensor(self.algo_id)` for the usual `(n, n_conds)`
         tensor, or `conditions.dataset` if you need the original columns.
+
+        If you set `image_conditional = True`, the field conditions arrive as a
+        `(n, n_image_conds, H, W)` tensor at the problem's native resolution --
+        65x65 on thermoelastic2d, whose designs are 64x64, because the masks live
+        on finite-element nodes rather than elements. Resize to your own grid
+        explicitly; the contract will not do it silently::
+
+            masks = conditions.require_images(self.algo_id)  # (n, 4, 65, 65)
+            masks = resize_to(masks, *self.design_shape)  # (n, 4, 64, 64)
+            return self.net(z, cond, masks)
         """
         cond = conditions.require_tensor(self.algo_id)
         z = th.randn((n, self.latent_dim), device=self.device)
