@@ -6,6 +6,7 @@ from typing import Any, TYPE_CHECKING
 
 import torch as th
 
+from engiopt.core import condition_keys_for
 from engiopt.core import ConditionBatch
 from engiopt.core import Generator
 from engiopt.generators.cgan_cnn_3d.cgan_cnn_3d import Generator3D
@@ -51,7 +52,7 @@ class CGANCNN3D(Generator):
         config = resolved.run_config
         net = Generator3D(
             latent_dim=config["latent_dim"],
-            n_conds=len(problem.conditions_keys),
+            n_conds=len(condition_keys_for(problem, resolved)),
             design_shape=problem.design_space.shape,
         )
         net.load_state_dict(th.load(resolved.files["generator_3d.pth"], map_location=device)[cls.primary_state_key])

@@ -72,6 +72,10 @@ class MyModel(Generator):
         #
         #     net = MyNet(
         #         latent_dim=config["latent_dim"],
+        #         # Size the conditioning from the schema the run was trained on --
+        #         # not `len(problem.conditions_keys)`, which counts array-valued
+        #         # and solver-only conditions your tensor will never carry.
+        #         n_conds=len(condition_keys_for(problem, resolved)),
         #         design_shape=design_shape_of(problem),
         #     ).to(device)
         #     state = th.load(resolved.files["generator.pth"], map_location=device)

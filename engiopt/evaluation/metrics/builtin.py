@@ -57,7 +57,7 @@ def dpp(ctx: EvaluationContext) -> float:
 
 
 # ----------------------------------------------------------------------
-# Feasibility: does the design respect its stated budget?
+# Feasibility: is the design admissible, and does it respect its budget?
 # ----------------------------------------------------------------------
 
 
@@ -66,10 +66,14 @@ def dpp(ctx: EvaluationContext) -> float:
     family="feasibility",
     cost="expensive",
     higher_is_better=False,
-    description="Fraction of designs missing their volume-fraction target beyond tolerance.",
+    description="Fraction of designs violating the problem's constraints or their volume budget.",
 )
 def viol(ctx: EvaluationContext) -> float:
-    """Fraction of designs that miss their volume-fraction target.
+    """Fraction of infeasible designs; see `EvaluationContext.is_infeasible`.
+
+    Defined for every problem: `problem.check_constraints` always applies, and
+    the spec's `volume_condition` adds the volume-fraction budget for problems
+    that have one.
 
     Marked expensive only because it is computed during the shared
     optimizer/simulator pass; the arithmetic itself is trivial.

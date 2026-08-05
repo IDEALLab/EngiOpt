@@ -48,6 +48,7 @@ from engiopt.generators.vqgan.utils import UpSampleBlock
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
+from engiopt.transforms import condition_keys
 from engiopt.transforms import drop_constant
 from engiopt.transforms import normalize
 from engiopt.transforms import resize_to
@@ -691,7 +692,9 @@ if __name__ == "__main__":
     image_channels = training_ds["optimal_upsampled"][:].shape[1]
     latent_size = args.image_size // (2 ** (len(args.encoder_channels) - 2))
 
-    conditions = problem.conditions_keys
+    # Only the scalar conditions can be stacked into the condition tensor;
+    # array-valued and solver-only keys are excluded.
+    conditions = condition_keys(problem)
     # Optionally drop condition columns that are constant like overhang_constraint in beams2d
     if args.drop_constant_conditions:
         training_ds, conditions = drop_constant(training_ds, conditions)
@@ -743,7 +746,7 @@ if __name__ == "__main__":
 
         # Optionally drop condition columns that are constant like overhang_constraint in beams2d
         if args.drop_constant_conditions:
-            to_drop = [c for c in problem.conditions_keys if c not in conditions]
+            to_drop = [c for c in condition_keys(problem) if c not in conditions]
             if to_drop:
                 val_ds = val_ds.remove_columns(to_drop)
 
@@ -995,6 +998,7 @@ if __name__ == "__main__":
                         checkpoint_files={"cvqgan.pth": "cvqgan.pth"},
                         run_config=vars(args),
                         **checkpoint_identity(args),
+                        condition_keys=conditions,
                         metadata={"stage": "cvqgan"},
                         primary_files=["cvqgan.pth"],
                     )
@@ -1115,6 +1119,7 @@ if __name__ == "__main__":
                     },
                     run_config=vars(args),
                     **checkpoint_identity(args),
+                    condition_keys=conditions,
                     metadata={"stage": "vqgan"},
                     primary_files=["vqgan.pth"],
                 )
@@ -1260,6 +1265,7 @@ if __name__ == "__main__":
             checkpoint_files=checkpoint_files,
             run_config=vars(args),
             **checkpoint_identity(args),
+            condition_keys=conditions,
             metadata={"stage": "transformer"},
             primary_files=["transformer.pth"],
         )

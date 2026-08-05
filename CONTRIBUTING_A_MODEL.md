@@ -41,6 +41,7 @@ save_checkpoint_package(
     checkpoint_files={"generator.pth": "generator.pth"},
     run_config=vars(args),  # everything needed to rebuild the model
     primary_files=["generator.pth"],
+    condition_keys=cond_keys,  # the condition schema you trained against
     **checkpoint_identity(args),  # files this run under its own hyperparameters
 )
 ```
@@ -53,6 +54,35 @@ sweep therefore can never redefine what your model means.
 
 `run_config` matters: it is what `from_pretrained` reads to reconstruct your
 network, so every architectural hyperparameter must be in `Args`.
+
+### How many conditions does your model have?
+
+Not `len(problem.conditions_keys)`. That is the full contract, and it is wider
+than a dense condition tensor can carry: thermoelastic2d declares seven
+conditions, four of which are 65x65 boundary matrices, and photonics2d declares
+solver settings that are not dataset columns at all. Size your network from the
+*scalar* conditions instead:
+
+```python
+from engiopt.transforms import condition_keys
+
+cond_keys = condition_keys(problem)   # e.g. ("volume_fraction_target", "rmin", "weight")
+n_conds = len(cond_keys)
+```
+
+Use `cond_keys` for your dataloader columns too, and pass it to
+`save_checkpoint_package` as above. Your adapter then rebuilds the network for
+exactly the columns the run saw:
+
+```python
+from engiopt.core import condition_keys_for
+
+n_conds = len(condition_keys_for(problem, resolved))
+```
+
+That is what keeps a checkpoint loadable after a problem gains a condition, and
+what makes the evaluator refuse -- with a clear message -- to feed your model
+conditions it was not trained on.
 
 Also reuse the shared helpers rather than rewriting them:
 

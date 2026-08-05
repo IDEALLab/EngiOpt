@@ -1,6 +1,8 @@
 {
-  "condition_digest": "50961cce837117ed",
+  "condition_digest": "40030d1b2482e003",
   "condition_seed": 1,
+  "dataset_id": "IDEALLab/heat_conduction_2d_v0",
+  "dataset_revision": "9f07c1e70d244f783e34a71c96db621173871dc1",
   "engibench_version": "0.2.0",
   "metrics": [
     "mmd",
@@ -11,9 +13,12 @@
     "fog"
   ],
   "n_samples": 50,
-  "notes": "",
+  "notes": "Feasibility = EngiBench constraints plus the volume budget.",
+  "objective_weight_condition": null,
+  "objective_weights": null,
   "problem_id": "heatconduction2d",
   "sigma": 10.0,
   "version": "v1",
-  "volfrac_tol": 0.01
+  "volfrac_tol": 0.01,
+  "volume_condition": "volume"
 }

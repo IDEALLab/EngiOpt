@@ -25,6 +25,7 @@ from engiopt.core import checkpoint_identity
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
+from engiopt.transforms import condition_keys
 from engiopt.transforms import flatten_dict_factory
 import wandb
 
@@ -164,7 +165,7 @@ def prepare_data(problem: Problem, device: th.device) -> tuple[th.utils.data.Ten
 
     training_ds = th.utils.data.TensorDataset(
         transform(training_ds["optimal_design"][:]),
-        *[training_ds[key][:] for key in problem.conditions_keys],
+        *[training_ds[key][:] for key in condition_keys(problem)],
     )
 
     # Create design normalizer

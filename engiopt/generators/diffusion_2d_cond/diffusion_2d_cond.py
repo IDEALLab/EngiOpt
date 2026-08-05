@@ -22,6 +22,7 @@ from engiopt.core import checkpoint_identity
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
+from engiopt.transforms import condition_keys
 import wandb
 
 if TYPE_CHECKING:
@@ -323,7 +324,10 @@ if __name__ == "__main__":
 
     # Loss function
     adversarial_loss: th.nn.Module = th.nn.MSELoss()
-    encoder_hid_dim = len(problem.conditions_keys)
+    # The scalar conditions the generator is conditioned on; array-valued and
+    # solver-only entries of `problem.conditions_keys` cannot enter a dense tensor.
+    cond_keys = condition_keys(problem)
+    encoder_hid_dim = len(cond_keys)
     # Initialize UNet from Huggingface
     model = UNet2DConditionModel(
         sample_size=design_shape,
@@ -349,10 +353,8 @@ if __name__ == "__main__":
         filtered_ds[i] = training_ds[i]["optimal_design"][:].reshape(1, design_shape[0], design_shape[1])
     filtered_ds_min, filtered_ds_max = get_design_bounds(problem, filtered_ds, device)
     filtered_ds_norm = normalize_designs_to_diffusion_range(filtered_ds, filtered_ds_min, filtered_ds_max)
-    training_ds = th.utils.data.TensorDataset(
-        filtered_ds_norm.flatten(1), *[training_ds[key][:] for key in problem.conditions_keys]
-    )
-    cond_tensors = th.stack(training_ds.tensors[1 : len(problem.conditions_keys) + 1])
+    training_ds = th.utils.data.TensorDataset(filtered_ds_norm.flatten(1), *[training_ds[key][:] for key in cond_keys])
+    cond_tensors = th.stack(training_ds.tensors[1 : len(cond_keys) + 1])
     conds_min = cond_tensors.amin(dim=tuple(range(1, cond_tensors.ndim)))
     conds_max = cond_tensors.amax(dim=tuple(range(1, cond_tensors.ndim)))
 
@@ -472,7 +474,7 @@ if __name__ == "__main__":
                         img = design.cpu().numpy()  # Extract x and y coordinates
                         dc = hidden_states[j, 0, :].cpu()
                         axes[j].imshow(img[0])  # image plot
-                        title = [(problem.conditions_keys[i], f"{dc[i]:.2f}") for i in range(len(problem.conditions_keys))]
+                        title = [(cond_keys[i], f"{dc[i]:.2f}") for i in range(len(cond_keys))]
                         title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
                         axes[j].title.set_text(title_string)  # Set title
                         axes[j].set_xticks([])  # Hide x ticks
@@ -512,6 +514,7 @@ if __name__ == "__main__":
                     checkpoint_files={"model.pth": "model.pth"},
                     run_config=vars(args),
                     **checkpoint_identity(args),
+                    condition_keys=cond_keys,
                     primary_files=["model.pth"],
                 )
 

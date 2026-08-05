@@ -6,6 +6,7 @@ from typing import Any, TYPE_CHECKING
 
 import torch as th
 
+from engiopt.core import condition_keys_for
 from engiopt.core import ConditionBatch
 from engiopt.core import Generator
 from engiopt.generators.cgan_cnn_3d.adapter import center_crop_3d
@@ -38,7 +39,7 @@ class CGANVAE(Generator):
         config = resolved.run_config
         net = Generator3D(
             latent_dim=config["latent_dim"],
-            n_conds=len(problem.conditions_keys),
+            n_conds=len(condition_keys_for(problem, resolved)),
             design_shape=problem.design_space.shape,
         )
         checkpoint = th.load(resolved.files["multiview_3d_vaegan.pth"], map_location=device)

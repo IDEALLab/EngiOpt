@@ -46,6 +46,10 @@ class EvalSpec:
         metrics: Metric names to compute, in leaderboard column order.
         sigma: Gaussian-kernel bandwidth for MMD and DPP.
         volfrac_tol: Tolerance for the volume-fraction violation check.
+        volume_condition: Name of the condition holding the volume-fraction
+            budget a design must hit, e.g. beams2d's `volfrac`. Feasibility is
+            otherwise `problem.check_constraints` alone, which is the right
+            answer for problems with no volume budget (photonics2d).
         objective_weights: Fixed weights over `problem.objectives`, for
             multi-objective problems. Summing or averaging objectives with
             different units is not a valid default, so one of these two fields
@@ -54,10 +58,18 @@ class EvalSpec:
             trade-off instead of fixing it. thermoelastic2d's `weight` splits
             the first two objectives as `(w, 1 - w)`, so a purely structural
             sample (`w = 1`) is unaffected by thermal compliance.
-        condition_digest: Hash of the drawn conditions and reference designs.
-            Recomputed at evaluation time and compared, so an upstream dataset
-            change is caught instead of silently shifting every number.
+        condition_digest: Hash of the drawn indices, condition values, and
+            reference designs. Recomputed at evaluation time and compared, so an
+            upstream dataset change is caught instead of silently shifting every
+            number.
+        dataset_id: HuggingFace dataset the conditions were drawn from.
+        dataset_revision: The dataset commit they were drawn at. A spec loads
+            the dataset at exactly this revision, so a new upload to the dataset
+            repo cannot change what a leaderboard row means. Leave it empty to
+            follow the dataset's current main branch.
         engibench_version: EngiBench version the digest was recorded under.
+            Provenance only -- a package version does not identify a dataset,
+            which is what `dataset_revision` is for.
         notes: Free-text rationale for this version.
     """
 
@@ -68,9 +80,12 @@ class EvalSpec:
     metrics: tuple[str, ...] = ("mmd", "dpp", "viol", "iog", "cog", "fog")
     sigma: float = 10.0
     volfrac_tol: float = 0.01
+    volume_condition: str | None = None
     objective_weights: tuple[float, ...] | None = None
     objective_weight_condition: str | None = None
     condition_digest: str | None = None
+    dataset_id: str | None = None
+    dataset_revision: str | None = None
     engibench_version: str | None = None
     notes: str = ""
 
@@ -123,10 +138,11 @@ class EvalSpec:
                 re-frozen under a new version.
         """
         device = device or th.device("cpu")
+        self.pin_dataset(problem)
         conditions_tensor, conditions, ref_designs, indices = sample_conditions(
             problem=problem, n_samples=self.n_samples, device=device, seed=self.condition_seed
         )
-        digest = _digest(indices, ref_designs)
+        digest = _digest(indices, conditions, ref_designs)
         if self.condition_digest is not None and digest != self.condition_digest:
             raise ValueError(
                 f"Eval spec {self.problem_id}/{self.version} no longer reproduces its frozen conditions "
@@ -142,17 +158,37 @@ class EvalSpec:
             condition_keys=tuple(get_scalar_condition_keys(problem, problem.dataset["test"])),
         )
 
+    def pin_dataset(self, problem: Problem) -> None:
+        """Point `problem.dataset` at this spec's frozen dataset revision.
+
+        `Problem.dataset` lazily loads `dataset_id` from the Hub's main branch,
+        with no hook for a revision, so the spec loads the pinned revision and
+        seeds the problem's cache before anything reads it.
+        """
+        if not self.dataset_revision:
+            return
+        from datasets import load_dataset
+
+        dataset_id = self.dataset_id or getattr(problem, "dataset_id", None)
+        if dataset_id is None:
+            raise ValueError(f"Spec {self.problem_id}/{self.version} pins a dataset revision but names no dataset.")
+        problem._dataset = load_dataset(dataset_id, revision=self.dataset_revision)  # noqa: SLF001
+
     def freeze(self, problem: Problem) -> EvalSpec:
-        """Return a copy with `condition_digest` and `engibench_version` filled in."""
+        """Return a copy with the digest, dataset revision, and versions filled in."""
         import engibench
 
-        _, _, ref_designs, indices = sample_conditions(
+        dataset_id = self.dataset_id or getattr(problem, "dataset_id", None)
+        revision = self.dataset_revision or _dataset_revision(dataset_id)
+        frozen = EvalSpec(**{**asdict(self), "dataset_id": dataset_id, "dataset_revision": revision})
+        frozen.pin_dataset(problem)
+        _, conditions, ref_designs, indices = sample_conditions(
             problem=problem, n_samples=self.n_samples, device=th.device("cpu"), seed=self.condition_seed
         )
         return EvalSpec(
             **{
-                **asdict(self),
-                "condition_digest": _digest(indices, ref_designs),
+                **asdict(frozen),
+                "condition_digest": _digest(indices, conditions, ref_designs),
                 "engibench_version": getattr(engibench, "__version__", None),
             }
         )
@@ -181,12 +217,44 @@ class ResolvedSpec:
         return self.spec.n_samples
 
 
-def _digest(indices: npt.NDArray[Any], ref_designs: npt.NDArray[Any]) -> str:
-    """Stable hash of the drawn sample indices and their reference designs."""
+def _digest(indices: npt.NDArray[Any], conditions: Dataset, ref_designs: npt.NDArray[Any]) -> str:
+    """Stable hash of everything a model is scored against.
+
+    Covers the drawn indices, the condition columns *and their values*, and the
+    reference designs. Hashing only the indices would let an upstream edit
+    change a condition value -- and so every score -- without tripping the
+    check, since row 7 is still row 7.
+    """
     hasher = hashlib.sha256()
     hasher.update(np.asarray(indices).astype(np.int64).tobytes())
+    for name in sorted(conditions.column_names):
+        hasher.update(name.encode())
+        hasher.update(_condition_bytes(conditions[name]))
     hasher.update(np.asarray(ref_designs, dtype=np.float64).round(8).tobytes())
     return hasher.hexdigest()[:16]
+
+
+def _condition_bytes(values: Any) -> bytes:
+    """Stable byte representation of one condition column.
+
+    Numeric columns (including the array-valued ones, e.g. thermoelastic2d's
+    boundary matrices) are rounded before hashing so that float noise below the
+    tolerance the metrics themselves use cannot invalidate a spec; anything
+    non-numeric falls back to its JSON form.
+    """
+    array = np.asarray(values)
+    if array.dtype.kind in "fiub":
+        return np.ascontiguousarray(array, dtype=np.float64).round(8).tobytes()
+    return json.dumps(values, sort_keys=True, default=str).encode()
+
+
+def _dataset_revision(dataset_id: str | None) -> str | None:
+    """Current commit of a HuggingFace dataset repo, or None if it cannot be read."""
+    if dataset_id is None:
+        return None
+    from huggingface_hub import HfApi
+
+    return HfApi().dataset_info(dataset_id).sha
 
 
 def freeze_spec(
@@ -199,11 +267,13 @@ def freeze_spec(
     sigma: float = 10.0,
     objective_weights: tuple[float, ...] | None = None,
     objective_weight_condition: str | None = None,
+    notes: str = "",
 ) -> Path:
     """Draw a problem's test conditions once and commit them as a spec.
 
     Run this once per problem, then never again for that version -- the point of
-    a spec is that it stops moving.
+    a spec is that it stops moving. The dataset revision in force is recorded,
+    so later uploads to the dataset repo cannot change what the spec means.
 
     Returns:
         Path to the written spec file.
@@ -221,9 +291,13 @@ def freeze_spec(
         sigma=sigma,
         objective_weights=objective_weights,
         objective_weight_condition=objective_weight_condition,
+        notes=notes,
     ).freeze(problem)
     path = spec.save()
-    print(f"Froze {problem_id}/{version}: digest={spec.condition_digest} n={spec.n_samples} -> {path}")
+    print(
+        f"Froze {problem_id}/{version}: digest={spec.condition_digest} n={spec.n_samples} "
+        f"dataset={spec.dataset_id}@{spec.dataset_revision} -> {path}"
+    )
     return path
 
 

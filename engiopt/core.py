@@ -27,6 +27,7 @@ import numpy as np
 import torch as th
 
 from engiopt.checkpoint_store import resolve_named_checkpoint
+from engiopt.transforms import condition_keys as scalar_condition_keys
 
 if TYPE_CHECKING:
     from datasets import Dataset
@@ -164,6 +165,32 @@ def config_path_parts(config_fingerprint_value: str | None) -> list[str] | None:
     return [f"cfg_{config_fingerprint_value}"]
 
 
+CONDITION_KEYS_METADATA_FIELD = "condition_keys"
+"""Checkpoint-metadata field recording which conditions a model was trained on."""
+
+
+def condition_keys_for(problem: Problem, resolved: ResolvedCheckpoint | None = None) -> tuple[str, ...]:
+    """Which conditions a generator consumes, in the order its input tensor holds them.
+
+    A checkpoint records the exact condition schema it was trained under, so a
+    network is always rebuilt for the columns it actually saw. Checkpoints
+    written before that was recorded fall back to the problem's current scalar
+    conditions, which is what those runs used.
+
+    Args:
+        problem: The problem the checkpoint was trained on.
+        resolved: A downloaded checkpoint package, when one is available.
+
+    Returns:
+        Condition names, in `problem.conditions_keys` order.
+    """
+    if resolved is not None:
+        recorded = resolved.metadata.get(CONDITION_KEYS_METADATA_FIELD)
+        if recorded:
+            return tuple(str(key) for key in recorded)
+    return tuple(scalar_condition_keys(problem))
+
+
 def design_shape_of(problem: Problem) -> tuple[int, ...]:
     """Shape of a single design for `problem`.
 
@@ -221,12 +248,20 @@ class Generator(abc.ABC):
         seed: int,
         device: th.device,
         run_config: dict[str, Any] | None = None,
+        condition_keys: tuple[str, ...] | None = None,
+        checkpoint_revision: str | None = None,
+        checkpoint_hash: str | None = None,
     ) -> None:
         self.problem = problem
         self.problem_id = problem_id
         self.seed = seed
         self.device = device
         self.run_config: dict[str, Any] = run_config or {}
+        self._condition_keys = condition_keys
+        self.checkpoint_revision = checkpoint_revision
+        """Commit the checkpoint was downloaded at, when it came from the Hub."""
+        self.checkpoint_hash = checkpoint_hash
+        """Content hash of the weight files, identifying the exact weights scored."""
         self.last_sample_seconds: float | None = None
         """Wall-clock seconds for the most recent `sample` call (cost metrics)."""
 
@@ -274,6 +309,7 @@ class Generator(abc.ABC):
         model_source: ModelSource = "auto",
         hf_entity: str = DEFAULT_HF_ENTITY,
         hf_repo_prefix: str = DEFAULT_HF_REPO_PREFIX,
+        local_model_dir: str | None = None,
         config_fingerprint: str | None = None,
         **kwargs: Any,
     ) -> Generator:
@@ -287,6 +323,8 @@ class Generator(abc.ABC):
             model_source: `auto`, `hf`, or `local`.
             hf_entity: HF org/user holding the checkpoint repos.
             hf_repo_prefix: Prefix of the per-model-family repo.
+            local_model_dir: Directory holding an unpacked checkpoint package,
+                for `local` (or as the fallback under `auto`).
             config_fingerprint: Load one specific hyperparameter configuration;
                 omit for the canonical default-hyperparameter checkpoint.
             **kwargs: Passed through to `build`, for model-specific options.
@@ -301,6 +339,7 @@ class Generator(abc.ABC):
             model_source=model_source,
             hf_entity=hf_entity,
             hf_repo_prefix=hf_repo_prefix,
+            local_model_dir=local_model_dir,
             config_fingerprint=config_fingerprint,
         )
         return cls.build(
@@ -310,6 +349,9 @@ class Generator(abc.ABC):
             problem_id=problem_id,
             seed=seed,
             run_config=resolved.run_config,
+            condition_keys=condition_keys_for(problem, resolved),
+            checkpoint_revision=resolved.revision,
+            checkpoint_hash=resolved.content_hash,
             **kwargs,
         )
 
@@ -365,6 +407,9 @@ class Generator(abc.ABC):
         start = time.perf_counter()
         with th.no_grad():
             raw = self._sample(batch, n)
+        # CUDA and MPS queue work asynchronously, so the elapsed time is only
+        # the sampling cost once the device has actually finished.
+        self._synchronize_device()
         self.last_sample_seconds = time.perf_counter() - start
 
         designs = raw.detach().cpu().numpy() if isinstance(raw, th.Tensor) else np.asarray(raw)
@@ -373,19 +418,40 @@ class Generator(abc.ABC):
             designs = np.clip(designs, *self.output_clip)
         return designs
 
+    def _synchronize_device(self) -> None:
+        """Wait for queued device work, so timings measure sampling rather than dispatch."""
+        if self.device.type == "cuda":
+            th.cuda.synchronize(self.device)
+        elif self.device.type == "mps":
+            th.mps.synchronize()
+
     def _as_batch(self, conditions: ConditionBatch | th.Tensor | npt.NDArray[Any] | None) -> ConditionBatch:
         """Normalize whatever the caller passed into a `ConditionBatch` on this device."""
         if isinstance(conditions, ConditionBatch):
+            self._check_condition_keys(conditions.keys)
             tensor = conditions.tensor
             moved = None if tensor is None else tensor.to(device=self.device, dtype=th.float)
             return ConditionBatch(tensor=moved, dataset=conditions.dataset, keys=conditions.keys)
         if conditions is None:
-            return ConditionBatch(tensor=None, keys=tuple(self.problem.conditions_keys))
+            return ConditionBatch(tensor=None, keys=self.condition_keys)
         tensor = conditions if isinstance(conditions, th.Tensor) else th.as_tensor(np.asarray(conditions))
-        return ConditionBatch(
-            tensor=tensor.to(device=self.device, dtype=th.float),
-            keys=tuple(self.problem.conditions_keys),
-        )
+        return ConditionBatch(tensor=tensor.to(device=self.device, dtype=th.float), keys=self.condition_keys)
+
+    def _check_condition_keys(self, keys: tuple[str, ...]) -> None:
+        """Refuse conditions whose columns are not the ones this model was trained on.
+
+        Silently accepting them produces either a shape error deep inside the
+        network or, worse, a design conditioned on the wrong numbers.
+
+        Raises:
+            ValueError: If the caller's condition columns differ from the
+                checkpoint's.
+        """
+        if keys and self.condition_keys and tuple(keys) != self.condition_keys:
+            raise ValueError(
+                f"{self.algo_id} was trained on conditions {self.condition_keys} but was given {tuple(keys)}. "
+                "Re-train against the current problem, or evaluate the checkpoint that matches it."
+            )
 
     @cached_property
     def design_shape(self) -> tuple[int, ...]:
@@ -397,10 +463,21 @@ class Generator(abc.ABC):
         """Fingerprint of this checkpoint's hyperparameters; see `config_fingerprint`."""
         return config_fingerprint(self.run_config)
 
+    @cached_property
+    def condition_keys(self) -> tuple[str, ...]:
+        """Condition columns this model consumes, in input-tensor order.
+
+        Taken from the checkpoint when it recorded them, so a model keeps
+        working even if the problem later gains a condition.
+        """
+        if self._condition_keys is not None:
+            return tuple(self._condition_keys)
+        return condition_keys_for(self.problem)
+
     @property
     def n_conds(self) -> int:
-        """Number of scalar conditioning variables for this problem."""
-        return len(self.problem.conditions_keys)
+        """Number of scalar conditioning variables this model consumes."""
+        return len(self.condition_keys)
 
     # ------------------------------------------------------------------
     # Checkpoint plumbing shared by every adapter

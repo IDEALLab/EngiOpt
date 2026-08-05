@@ -1,6 +1,8 @@
 {
-  "condition_digest": "ade3d18084b31b5e",
+  "condition_digest": "6b8330bee5a8718c",
   "condition_seed": 1,
+  "dataset_id": "IDEALLab/photonics_2d_120_120_v1",
+  "dataset_revision": "be811ff69d67cd8c79148e29f2a68d293ec00955",
   "engibench_version": "0.2.0",
   "metrics": [
     "mmd",
@@ -11,9 +13,12 @@
     "fog"
   ],
   "n_samples": 50,
-  "notes": "",
+  "notes": "No volume budget: feasibility is EngiBench's declared constraints alone.",
+  "objective_weight_condition": null,
+  "objective_weights": null,
   "problem_id": "photonics2d",
   "sigma": 10.0,
   "version": "v1",
-  "volfrac_tol": 0.01
+  "volfrac_tol": 0.01,
+  "volume_condition": null
 }

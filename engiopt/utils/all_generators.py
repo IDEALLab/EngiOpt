@@ -78,22 +78,3 @@ def generators_for(problem: Problem) -> dict[str, type[Generator]]:
     """Return the generators whose `design_kinds` cover this problem's design space."""
     kind = design_kind_of(problem)
     return {name: g for name, g in BUILTIN_GENERATORS.items() if kind in g.design_kinds}
-
-
-def problem_id_of(problem: Problem | type[Problem]) -> str:
-    """Reverse-look-up a problem's registry key.
-
-    EngiBench problems do not carry their own id, but checkpoint paths and
-    leaderboard rows are keyed by it.
-
-    Raises:
-        ValueError: If the problem is not a built-in EngiBench problem.
-    """
-    from engibench.utils.all_problems import BUILTIN_PROBLEMS
-
-    problem_cls = problem if isinstance(problem, type) else type(problem)
-    for name, candidate in BUILTIN_PROBLEMS.items():
-        if candidate is problem_cls:
-            return name
-    msg = f"{problem_cls.__name__} is not a built-in EngiBench problem; pass problem_id explicitly."
-    raise ValueError(msg)

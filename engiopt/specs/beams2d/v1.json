@@ -1,6 +1,8 @@
 {
-  "condition_digest": "67f84c4e50c355cf",
+  "condition_digest": "f65e2c02551e7e08",
   "condition_seed": 1,
+  "dataset_id": "IDEALLab/beams_2d_50_100_v0",
+  "dataset_revision": "ccb64d4f09cf66a5ed9ba2081438d695b9e2438d",
   "engibench_version": "0.2.0",
   "metrics": [
     "mmd",
@@ -11,9 +13,12 @@
     "fog"
   ],
   "n_samples": 50,
-  "notes": "",
+  "notes": "Feasibility = EngiBench constraints plus the volfrac budget.",
+  "objective_weight_condition": null,
+  "objective_weights": null,
   "problem_id": "beams2d",
   "sigma": 10.0,
   "version": "v1",
-  "volfrac_tol": 0.01
+  "volfrac_tol": 0.01,
+  "volume_condition": "volfrac"
 }

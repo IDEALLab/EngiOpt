@@ -28,6 +28,7 @@ from engiopt.metrics import mmd
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
+from engiopt.transforms import condition_keys
 import wandb
 
 
@@ -369,7 +370,9 @@ if __name__ == "__main__":
     if len(design_shape) != DESIGN_SHAPE_LEN:
         raise ValueError(f"Expected 3D design shape, got {design_shape}")
 
-    conditions = problem.conditions_keys
+    # The scalar conditions the generator is conditioned on; array-valued and
+    # solver-only entries of `problem.conditions_keys` cannot enter a dense tensor.
+    conditions = condition_keys(problem)
     n_conds = len(conditions)
     condition_names = [cond[0] for cond in conditions]
 
@@ -419,7 +422,7 @@ if __name__ == "__main__":
 
     # Extract 3D designs and conditions
     designs_3d = training_ds["optimal_design"][:]  # Should be (N, D, H, W)
-    condition_tensors = [training_ds[key][:] for key in problem.conditions_keys]
+    condition_tensors = [training_ds[key][:] for key in conditions]
 
     training_ds = th.utils.data.TensorDataset(designs_3d, *condition_tensors)
     dataloader = th.utils.data.DataLoader(
@@ -698,6 +701,7 @@ if __name__ == "__main__":
                 checkpoint_files={"generator_3d.pth": "generator_3d.pth", "discriminator_3d.pth": "discriminator_3d.pth"},
                 run_config=vars(args),
                 **checkpoint_identity(args),
+                condition_keys=conditions,
                 primary_files=["generator_3d.pth"],
             )
 

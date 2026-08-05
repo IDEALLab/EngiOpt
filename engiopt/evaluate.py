@@ -16,6 +16,7 @@ loaded and called their generator -- now the `Generator` contract's job.
 from __future__ import annotations
 
 import dataclasses
+import sys
 from typing import TYPE_CHECKING
 
 import pandas as pd
@@ -73,7 +74,13 @@ class Args:
     Makes a checkpoint self-describing: whoever downloads it sees how it scored
     without needing the leaderboard."""
     model_source: str = "auto"
-    """Checkpoint backend: `auto`, `hf`, `wandb`, or `local`."""
+    """Checkpoint backend: `auto`, `hf`, or `local`."""
+    local_model_dir: str | None = None
+    """Directory holding an unpacked checkpoint package, for `--model-source local`.
+
+    The package layout is the one `save_checkpoint_package` writes: the weight
+    files plus `run_config.json` and `metadata.json`. `{algo}` and `{seed}` are
+    substituted, so one directory template can serve a multi-model run."""
     hf_entity: str = "IDEALLab"
     """HF org/user holding the checkpoints."""
     hf_repo_prefix: str = "engiopt"
@@ -134,6 +141,7 @@ def _load_generators(args: Args, evaluator: Evaluator) -> list[Generator]:
                             model_source=args.model_source,  # type: ignore[arg-type]
                             hf_entity=args.hf_entity,
                             hf_repo_prefix=args.hf_repo_prefix,
+                            local_model_dir=_local_dir_for(args, name, seed),
                             config_fingerprint=fingerprint,
                         )
                     )
@@ -144,6 +152,34 @@ def _load_generators(args: Args, evaluator: Evaluator) -> list[Generator]:
                     label = f"{name} seed {seed}" + (f" cfg {fingerprint}" if fingerprint else "")
                     print(f"  could not load {label}: {exc}")
     return generators
+
+
+def _local_dir_for(args: Args, algo: str, seed: int) -> str | None:
+    """Fill `{algo}` / `{seed}` into `--local-model-dir`, so one template serves a run."""
+    if args.local_model_dir is None:
+        return None
+    return args.local_model_dir.format(algo=algo, seed=seed, problem_id=args.problem_id)
+
+
+def _drop_already_published(args: Args, evaluator: Evaluator, generators: list[Generator]) -> list[Generator]:
+    """Drop generators the published board already holds rows for, under `--skip-existing`."""
+    if not (args.push_to and args.skip_existing):
+        return generators
+    published = load_from_hub(args.push_to)
+    remaining = [
+        generator
+        for generator in generators
+        if not already_evaluated(
+            published,
+            problem_id=args.problem_id,
+            algo_id=generator.algo_id,
+            config_fingerprint=generator.config_fingerprint,
+            seed=generator.seed,
+            spec_version=evaluator.spec.version,
+        )
+    ]
+    print(f"{len(remaining)} generator(s) left after skipping already-published rows.")
+    return remaining
 
 
 def _attach_metrics_to_checkpoints(args: Args, board: pd.DataFrame) -> None:
@@ -165,38 +201,37 @@ def _attach_metrics_to_checkpoints(args: Args, board: pd.DataFrame) -> None:
             print(f"  could not attach metrics for {row['algo_id']}: {exc}")
 
 
-def main(args: Args) -> None:
-    """Evaluate the requested generators and append the results to a CSV."""
+def main(args: Args) -> int:
+    """Evaluate the requested generators and append the results to a CSV.
+
+    Returns:
+        A process exit status: non-zero when nothing could be evaluated, so a
+        batch run that loaded no checkpoints does not look like a clean sweep.
+        A partially successful run still succeeds -- one bad checkpoint must not
+        discard the rest of the results.
+    """
     if args.list_generators:
         _print_generators()
     if args.list_metrics:
         _print_metrics()
     if args.list_generators or args.list_metrics:
-        return
+        return 0
 
     spec = args.spec or f"{args.problem_id}/v1"
     evaluator = Evaluator.for_problem(args.problem_id, spec=spec)
     print(f"Problem {args.problem_id} | spec {evaluator.spec.version} | n={evaluator.spec.n_samples}")
 
-    published = load_from_hub(args.push_to) if (args.push_to and args.skip_existing) else None
     generators = _load_generators(args, evaluator)
-    if published is not None:
-        generators = [
-            g
-            for g in generators
-            if not already_evaluated(
-                published,
-                problem_id=args.problem_id,
-                algo_id=g.algo_id,
-                config_fingerprint=g.config_fingerprint,
-                seed=g.seed,
-                spec_version=evaluator.spec.version,
-            )
-        ]
-        print(f"{len(generators)} generator(s) left after skipping already-published rows.")
+    loaded = len(generators)
+    generators = _drop_already_published(args, evaluator, generators)
     if not generators:
-        print("No generators loaded; nothing to evaluate.")
-        return
+        # Having skipped everything already on the board is a finished job;
+        # having loaded nothing at all is a failed one.
+        if loaded:
+            print("Everything requested is already published; nothing to evaluate.")
+            return 0
+        print("No generators could be loaded; nothing was evaluated.")
+        return 1
 
     board = evaluator.leaderboard(
         generators,
@@ -204,10 +239,19 @@ def main(args: Args) -> None:
         include_expensive=args.include_expensive,
         on_error=args.on_error,
     )
+    if board.empty:
+        print("Every generator failed to evaluate; no rows produced.")
+        return 1
     destination = append_rows(board, args.output_csv.format(problem_id=args.problem_id))
     print(f"\n{board.to_string(index=False)}\n")
     print(f"Wrote {len(board)} rows to {destination}")
 
+    _publish(args, board)
+    return 0
+
+
+def _publish(args: Args, board: pd.DataFrame) -> None:
+    """Push the results wherever the flags asked, then print the ranking comparison."""
     if args.push_to:
         merged = push_to_hub(board, args.push_to)
         print(f"Published {len(board)} row(s) to {args.push_to}; board now holds {len(merged)} rows.")
@@ -223,4 +267,4 @@ def main(args: Args) -> None:
 
 
 if __name__ == "__main__":
-    main(tyro.cli(Args))
+    sys.exit(main(tyro.cli(Args)))

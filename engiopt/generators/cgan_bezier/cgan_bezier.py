@@ -24,6 +24,7 @@ from engiopt.core import checkpoint_identity
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
+from engiopt.transforms import condition_keys
 import wandb
 
 if TYPE_CHECKING:
@@ -460,7 +461,7 @@ def prepare_data(
     training_ds = th.utils.data.TensorDataset(
         th.stack(coords_set),
         th.stack(design_scalars).unsqueeze(1),
-        *[problem_dataset[key][:] for key in problem.conditions_keys],
+        *[problem_dataset[key][:] for key in condition_keys(problem)],
     )
 
     cond_tensors = th.stack(training_ds.tensors[2:])
@@ -504,6 +505,9 @@ if __name__ == "__main__":
 
     bezier_control_pts = args.bezier_control_pts
     n_data_points = problem.design_space["coords"].shape[1]  # for airfoil, 192
+    # The scalar conditions the generator is conditioned on; array-valued and
+    # solver-only entries of `problem.conditions_keys` cannot enter a dense tensor.
+    cond_keys = condition_keys(problem)
 
     # The Discriminator uses shape [N, 2, #points].
     training_ds, conds_normalizer, design_scalars_normalizer, design_scalar_keys = prepare_data(problem, device)
@@ -519,7 +523,7 @@ if __name__ == "__main__":
     discriminator = Discriminator(
         latent_dim=args.latent_dim,
         design_scalars=len(design_scalar_keys),
-        num_conds=len(problem.conditions_keys),
+        num_conds=len(cond_keys),
         design_shape=problem.design_space["coords"].shape,
         conds_normalizer=conds_normalizer,
         design_scalars_normalizer=design_scalars_normalizer,
@@ -528,7 +532,7 @@ if __name__ == "__main__":
     generator = Generator(
         latent_dim=args.latent_dim,
         noise_dim=args.noise_dim,
-        num_conds=len(problem.conditions_keys),
+        num_conds=len(cond_keys),
         n_control_points=bezier_control_pts,
         n_data_points=n_data_points,
         conds_normalizer=conds_normalizer,
@@ -640,7 +644,7 @@ if __name__ == "__main__":
                     ax.figure.canvas.draw()
                     img = np.array(fig.canvas.renderer.buffer_rgba())
                     axes[j].imshow(img)
-                    title = [(problem.conditions_keys[i - 1], f"{do1[i]:.2f}") for i in range(1, len(do1))]
+                    title = [(cond_keys[i - 1], f"{do1[i]:.2f}") for i in range(1, len(do1))]
                     title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
                     axes[j].title.set_text(title_string)  # Set title
                     axes[j].set_xticks([])
@@ -688,6 +692,7 @@ if __name__ == "__main__":
                     },
                     run_config=vars(args),
                     **checkpoint_identity(args),
+                    condition_keys=cond_keys,
                     primary_files=["bezier_generator.pth"],
                 )
 

@@ -26,6 +26,16 @@ if TYPE_CHECKING:
     import numpy.typing as npt
 
 
+def _as_arrays(conditions: dict[str, Any] | None) -> dict[str, Any]:
+    """Give array-valued conditions back their array type before constraint checking.
+
+    A HuggingFace dataset hands back thermoelastic2d's boundary matrices as
+    nested lists, and EngiBench's bound checks compare them numerically, which
+    raises `TypeError: '<=' not supported between 'float' and 'list'`.
+    """
+    return {key: np.asarray(value) if isinstance(value, list) else value for key, value in (conditions or {}).items()}
+
+
 class MultiObjectiveScalarizationError(ValueError):
     """Raised when a multi-objective problem has no declared scalarization.
 
@@ -59,7 +69,7 @@ class OptimizationResults:
     fog: list[float] = field(default_factory=list)
     """Final optimality gap at the end of re-optimization."""
     viol: list[bool] = field(default_factory=list)
-    """Whether each design missed its volume-fraction target beyond tolerance."""
+    """Whether each design is infeasible; see `EvaluationContext.is_infeasible`."""
 
 
 @dataclass
@@ -74,6 +84,10 @@ class EvaluationContext:
         conditions: The conditions each design was asked to satisfy.
         sigma: Gaussian-kernel bandwidth for MMD and DPP.
         volfrac_tol: Tolerance used by the volume-fraction violation check.
+        volume_condition: Name of the condition holding the volume-fraction
+            budget a design must hit, when the problem has one. Declared by the
+            spec rather than guessed, so a problem without a volume budget
+            (photonics2d) is not silently scored against a missing column.
         sample_seconds: Wall-clock seconds the generator took to produce
             `gen_designs`, recorded as leaderboard provenance.
         objective_weights: Fixed weights over `problem.objectives`, used to
@@ -90,6 +104,7 @@ class EvaluationContext:
     conditions: Dataset | None = None
     sigma: float = 10.0
     volfrac_tol: float = 0.01
+    volume_condition: str | None = None
     sample_seconds: float | None = None
     objective_weights: tuple[float, ...] | None = None
     objective_weight_condition: str | None = None
@@ -239,9 +254,45 @@ class EvaluationContext:
             results.iog.append(self.scalarize_gap(np.asarray(generated_objective) - np.asarray(reference_optimum), i))
             results.cog.append(sum(self.scalarize_gap(step_gap, i) for step_gap in gaps))
             results.fog.append(self.scalarize_gap(gaps[-1], i))
-
-            if conditions:
-                target_vol = conditions.get("volfrac") or conditions.get("volume")
-                if target_vol is not None:
-                    results.viol.append(bool(np.abs(np.mean(design) - target_vol) >= self.volfrac_tol))
+            results.viol.append(self.is_infeasible(design, conditions))
         return results
+
+    def is_infeasible(self, design: Any, conditions: dict[str, Any] | None) -> bool:
+        """Whether one generated design fails the problem's declared feasibility.
+
+        Two sources, both of which the problem itself defines:
+
+        1. `problem.check_constraints`, EngiBench's own contract -- the design
+           must lie in the design space and satisfy every declared constraint.
+           This is what a new problem gets for free.
+        2. The volume-fraction budget named by the spec's `volume_condition`,
+           when the problem has one. Missing that target is a design failing to
+           honour its brief rather than an invalid design, and no EngiBench
+           constraint covers it.
+
+        A problem with neither -- photonics2d has no volume budget -- is scored
+        on (1) alone, rather than reporting NaN.
+        """
+        violations = self.problem.check_constraints(self._as_space_dtype(design), _as_arrays(conditions))
+        if getattr(violations, "violations", None):
+            return True
+        if self.volume_condition is not None and conditions is not None:
+            target = conditions.get(self.volume_condition)
+            # An explicit None test, so a legitimate target of 0.0 still counts.
+            if target is not None:
+                return bool(np.abs(np.mean(design) - float(target)) >= self.volfrac_tol)
+        return False
+
+    def _as_space_dtype(self, design: Any) -> Any:
+        """Cast a design to the design space's own dtype before the membership check.
+
+        `Box.contains` requires a safely castable dtype, so a float64 design is
+        rejected by a float32 space no matter what its values are -- which would
+        mark thermoelastic2d's own dataset-optimal designs infeasible. The cast
+        makes the check about the values, which is what it is meant to test.
+        """
+        space = self.problem.design_space
+        dtype = getattr(space, "dtype", None)
+        if self.is_dict_space or dtype is None:
+            return design
+        return np.asarray(design).astype(dtype, copy=False)

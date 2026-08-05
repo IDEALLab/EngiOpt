@@ -22,6 +22,14 @@ class FakeOptiStep:
     obj_values: Any
 
 
+@dataclass
+class FakeViolations:
+    """Stand-in for `engibench.constraint.Violations`."""
+
+    violations: list[str]
+    n_constraints: int = 1
+
+
 class FakeProblem:
     """A minimal stand-in exposing the parts of `Problem` the evaluator touches.
 
@@ -36,6 +44,7 @@ class FakeProblem:
         *,
         n_objectives: int = 1,
         directions: tuple[str, ...] | None = None,
+        infeasible: bool = False,
     ):
         self.design_space = spaces.Box(low=0.0, high=1.0, shape=shape, dtype=np.float64)
         self.conditions_keys = list(conditions_keys)
@@ -43,8 +52,27 @@ class FakeProblem:
         # Mirrors `Problem.objectives`: (name, direction) pairs in simulate order.
         directions = directions or ("MINIMIZE",) * n_objectives
         self.objectives = tuple((f"objective_{i}", directions[i]) for i in range(n_objectives))
+        self.infeasible = infeasible
+        """Whether `check_constraints` reports every design as violating."""
         self.reset_calls = 0
         self.optimize_calls = 0
+
+    @property
+    def dataset(self) -> dict[str, Any]:
+        """One split whose columns are the declared conditions, all scalar."""
+        rows = 3
+        return {"train": FakeDataset({key: [0.5] * rows for key in self.conditions_keys})}
+
+    def check_constraints(self, design: Any, config: dict[str, Any]) -> FakeViolations:
+        """Mirror `Problem.check_constraints`: declared constraints plus design-space membership.
+
+        Like the real one, `design` is passed to `contains` exactly as given --
+        dtype included, since that is what `Box.contains` is strict about.
+        """
+        violations = ["forced"] if self.infeasible else []
+        if not self.design_space.contains(design):
+            violations.append("design not in design_space")
+        return FakeViolations(violations=violations)
 
     def reset(self, seed: int | None = None) -> None:
         """Record that the evaluator reset us between solver calls."""

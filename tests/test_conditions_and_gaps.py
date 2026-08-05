@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from gymnasium import spaces
 import numpy as np
 import pytest
 
@@ -15,6 +16,7 @@ from engiopt.evaluation.context import EvaluationContext
 from engiopt.evaluation.context import MultiObjectiveScalarizationError
 from engiopt.transforms import get_image_condition_keys
 from engiopt.transforms import get_scalar_condition_keys
+from tests.conftest import FakeViolations
 
 
 class _Problem:
@@ -268,3 +270,79 @@ def test_signs_are_per_objective_for_mixed_directions() -> None:
     assert list(ctx.objective_signs) == [1.0, -1.0]
     # Both objectives beat the reference by 1.0, so both should read as -0.5.
     assert ctx.scalarize_gap(np.array([-1.0, 1.0]), 0) == pytest.approx(-1.0)
+
+
+# ----------------------------------------------------------------------
+# Feasibility
+# ----------------------------------------------------------------------
+
+
+def _feasibility_context(problem: Any, design_value: float, **kwargs: Any) -> EvaluationContext:
+    designs = np.full((1, *problem.design_space.shape), design_value)
+    return EvaluationContext(
+        problem=problem,
+        problem_id="fake",
+        gen_designs=designs,
+        ref_designs=designs.copy(),
+        **kwargs,
+    )
+
+
+def test_feasibility_falls_back_to_the_problems_own_constraints(fake_problem: Any) -> None:
+    """Every problem has `check_constraints`, so `viol` is defined even without a volume budget.
+
+    photonics2d has no volume-fraction condition; before this it returned NaN.
+    """
+    ctx = _feasibility_context(fake_problem, 0.5)
+    assert ctx.is_infeasible(np.full(fake_problem.design_space.shape, 0.5), {"lambda1": 1.5}) is False
+
+    fake_problem.infeasible = True
+    assert ctx.is_infeasible(np.full(fake_problem.design_space.shape, 0.5), {"lambda1": 1.5}) is True
+
+
+def test_volume_budget_is_checked_when_the_spec_names_one(fake_problem: Any) -> None:
+    """Missing the declared volume target is a violation of the design's brief."""
+    ctx = _feasibility_context(fake_problem, 0.5, volume_condition="volfrac", volfrac_tol=0.01)
+    design = np.full(fake_problem.design_space.shape, 0.5)
+    assert ctx.is_infeasible(design, {"volfrac": 0.5}) is False
+    assert ctx.is_infeasible(design, {"volfrac": 0.9}) is True
+
+
+def test_a_zero_volume_target_is_still_a_target(fake_problem: Any) -> None:
+    """`conditions.get(a) or conditions.get(b)` silently skipped a legitimate 0.0."""
+    ctx = _feasibility_context(fake_problem, 0.5, volume_condition="volfrac", volfrac_tol=0.01)
+    assert ctx.is_infeasible(np.full(fake_problem.design_space.shape, 0.5), {"volfrac": 0.0}) is True
+
+
+def test_an_unnamed_volume_condition_is_not_guessed(fake_problem: Any) -> None:
+    """Without a declared `volume_condition`, only the problem's constraints apply."""
+    ctx = _feasibility_context(fake_problem, 0.5)
+    assert ctx.is_infeasible(np.full(fake_problem.design_space.shape, 0.5), {"volfrac": 0.9}) is False
+
+
+def test_a_design_is_judged_on_its_values_not_its_dtype(fake_problem: Any) -> None:
+    """`Box.contains` rejects an uncastable dtype outright.
+
+    thermoelastic2d's space is float32 while its designs are float64, so without
+    the cast every design -- including the dataset's own optima -- is infeasible.
+    """
+    fake_problem.design_space = spaces.Box(low=0.0, high=1.0, shape=(8, 10), dtype=np.float32)
+    ctx = _feasibility_context(fake_problem, 0.5)
+    assert ctx.is_infeasible(np.full(fake_problem.design_space.shape, 0.5, dtype=np.float64), {}) is False
+    assert ctx.is_infeasible(np.full(fake_problem.design_space.shape, 5.0, dtype=np.float64), {}) is True
+
+
+def test_array_valued_conditions_survive_the_constraint_check(fake_problem: Any) -> None:
+    """A HuggingFace dataset hands matrices back as nested lists, which bound checks cannot compare."""
+    seen: dict[str, Any] = {}
+
+    def record(design: Any, config: dict[str, Any]) -> Any:
+        seen.update(config)
+        return FakeViolations(violations=[])
+
+    fake_problem.check_constraints = record
+    ctx = _feasibility_context(fake_problem, 0.5)
+    ctx.is_infeasible(np.full(fake_problem.design_space.shape, 0.5), {"fixed_elements": [[0, 1], [1, 0]], "rmin": 2.0})
+
+    assert isinstance(seen["fixed_elements"], np.ndarray)
+    assert seen["rmin"] == 2.0

@@ -42,6 +42,26 @@ def get_scalar_condition_keys(problem: Problem, dataset: Dataset, *, drop_consta
     return scalar_keys
 
 
+def condition_keys(problem: Problem, split: str = "train") -> list[str]:
+    """The scalar condition columns a generator is conditioned on, in tensor order.
+
+    This is the one definition of "how many conditions does this problem have"
+    that training, checkpoint loading, and sampling all share. Using
+    `len(problem.conditions_keys)` instead builds a network for columns that
+    never reach it: thermoelastic2d declares 7 conditions, of which 4 are 65x65
+    boundary matrices, so a generator sized for 7 fails on a 3-column tensor.
+
+    Args:
+        problem: An EngiBench problem instance.
+        split: Dataset split to inspect; the schema is the same in all of them.
+
+    Returns:
+        Condition names, in `conditions_keys` order.
+    """
+    dataset = problem.dataset
+    return get_scalar_condition_keys(problem, dataset[split] if split in dataset else next(iter(dataset.values())))
+
+
 def get_image_condition_keys(problem: Problem, dataset: Dataset) -> list[str]:
     """Return the array-valued condition keys present in the dataset.
 

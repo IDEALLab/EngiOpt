@@ -7,6 +7,7 @@ from typing import Any, TYPE_CHECKING
 from diffusers import UNet2DConditionModel
 import torch as th
 
+from engiopt.core import condition_keys_for
 from engiopt.core import ConditionBatch
 from engiopt.core import Generator
 from engiopt.generators.diffusion_2d_cond.diffusion_2d_cond import beta_schedule
@@ -67,7 +68,7 @@ class Diffusion2DCond(Generator):
             up_block_types=("UpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D", "CrossAttnUpBlock2D"),
             layers_per_block=config["layers_per_block"],
             transformer_layers_per_block=1,
-            encoder_hid_dim=len(problem.conditions_keys),
+            encoder_hid_dim=len(condition_keys_for(problem, resolved)),
             only_cross_attention=True,
         ).to(device)
         net.load_state_dict(checkpoint[cls.primary_state_key])

@@ -6,6 +6,7 @@ from typing import Any, TYPE_CHECKING
 
 import torch as th
 
+from engiopt.core import condition_keys_for
 from engiopt.core import ConditionBatch
 from engiopt.core import Generator
 from engiopt.generators.cgan_cnn_2d.cgan_cnn_2d import Generator as CGANCNN2DNet
@@ -38,7 +39,7 @@ class CGANCNN2D(Generator):
         config = resolved.run_config
         net = CGANCNN2DNet(
             latent_dim=config["latent_dim"],
-            n_conds=len(problem.conditions_keys),
+            n_conds=len(condition_keys_for(problem, resolved)),
             design_shape=problem.design_space.shape,
             generator_output_activation=config.get("generator_output_activation", "tanh"),
         )

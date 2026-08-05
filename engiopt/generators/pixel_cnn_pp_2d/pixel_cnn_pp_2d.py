@@ -29,6 +29,7 @@ from engiopt.core import checkpoint_identity
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
+from engiopt.transforms import condition_keys
 import wandb
 
 
@@ -711,7 +712,9 @@ if __name__ == "__main__":
 
     design_shape = problem.design_space.shape
 
-    conditions = problem.conditions_keys
+    # The scalar conditions the generator is conditioned on; array-valued and
+    # solver-only entries of `problem.conditions_keys` cannot enter a dense tensor.
+    conditions = condition_keys(problem)
     nr_conditions = len(conditions)
 
     # Logging
@@ -751,7 +754,7 @@ if __name__ == "__main__":
 
     # Configure data loader
     training_ds = problem.dataset.with_format("torch", device=device)["train"]
-    condition_tensors = [training_ds[key][:] for key in problem.conditions_keys]
+    condition_tensors = [training_ds[key][:] for key in conditions]
 
     training_ds = th.utils.data.TensorDataset(training_ds["optimal_design"][:], *condition_tensors)
 
@@ -871,7 +874,7 @@ if __name__ == "__main__":
                         dc = desired_conds[j].cpu().squeeze()  # Extract design conditions
 
                         axes[j].imshow(img)  # image plot
-                        title = [(problem.conditions_keys[i][0], f"{dc[i]:.2f}") for i in range(nr_conditions)]
+                        title = [(conditions[i], f"{dc[i]:.2f}") for i in range(nr_conditions)]
                         title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
                         axes[j].title.set_text(title_string)  # Set title
                         axes[j].set_xticks([])  # Hide x ticks
@@ -908,6 +911,7 @@ if __name__ == "__main__":
                     checkpoint_files={"model.pth": "model.pth"},
                     run_config=vars(args),
                     **checkpoint_identity(args),
+                    condition_keys=conditions,
                     primary_files=["model.pth"],
                 )
 

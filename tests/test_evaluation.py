@@ -196,8 +196,50 @@ def test_rank_aggregates_seeds_with_the_median_by_default() -> None:
 def test_disagreement_surfaces_conflicting_rankings() -> None:
     """The two metrics crown different winners; the view must show both."""
     table = disagreement(_board(), ["mmd", "dpp"])
-    assert table.loc[("p", "b"), "mmd"] == 1
-    assert table.loc[("p", "a"), "dpp"] == 1
+    assert table.loc[("p", "b", "cfg_b", "v1"), "mmd"] == 1
+    assert table.loc[("p", "a", "cfg_a", "v1"), "dpp"] == 1
+
+
+def _two_configs_board() -> pd.DataFrame:
+    """One algorithm, two hyperparameter settings, both evaluated at seed 1."""
+    return pd.DataFrame(
+        [
+            {"problem_id": "p", "algo_id": "a", "config_fingerprint": "cfg_a", "seed": 1, "spec_version": "v1",
+             "mmd": 0.1},
+            {"problem_id": "p", "algo_id": "a", "config_fingerprint": "cfg_b", "seed": 1, "spec_version": "v1",
+             "mmd": 0.9},
+        ]
+    )  # fmt: skip
+
+
+def test_rank_keeps_hyperparameter_configurations_apart() -> None:
+    """Two configs are two entries, not one averaged score over a phantom two seeds."""
+    ranked = rank(_two_configs_board(), "mmd")
+    assert len(ranked) == 2
+    assert set(ranked["config_fingerprint"]) == {"cfg_a", "cfg_b"}
+    assert list(ranked["n_seeds"]) == [1, 1]
+    assert ranked.iloc[0]["mmd_median"] == pytest.approx(0.1)
+
+
+def test_rank_keeps_spec_versions_apart() -> None:
+    """A score under v1 and one under v2 measure different protocols."""
+    frame = pd.DataFrame(
+        [
+            {"problem_id": "p", "algo_id": "a", "config_fingerprint": "cfg", "seed": 1, "spec_version": "v1",
+             "mmd": 0.1},
+            {"problem_id": "p", "algo_id": "a", "config_fingerprint": "cfg", "seed": 1, "spec_version": "v2",
+             "mmd": 0.9},
+        ]
+    )  # fmt: skip
+    ranked = rank(frame, "mmd")
+    assert len(ranked) == 2
+    assert set(ranked["spec_version"]) == {"v1", "v2"}
+
+
+def test_disagreement_keeps_hyperparameter_configurations_apart() -> None:
+    """The disagreement view groups exactly as `rank` does."""
+    table = disagreement(_two_configs_board(), ["mmd"])
+    assert len(table) == 2
 
 
 def test_append_rows_supersedes_a_rerun_instead_of_duplicating(tmp_path: Any) -> None:

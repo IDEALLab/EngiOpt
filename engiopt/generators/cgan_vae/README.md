@@ -24,30 +24,20 @@ This implementation combines VAE and GAN architectures to generate 3D engineerin
 ### Basic Training
 ```bash
 # Train with default parameters
-python cgan_vae.py --problem_id heatconduction3d --n_epochs 300
+python engiopt/generators/cgan_vae/cgan_vae.py --problem-id heatconduction3d --n-epochs 300
 
-# Save model for later evaluation
-python cgan_vae.py --save_model --track
+# Save the checkpoint for later evaluation
+python engiopt/generators/cgan_vae/cgan_vae.py --save-model --track
 ```
 
 ### Evaluation
 ```bash
-# Evaluate trained model using EngiBench metrics
-python evaluate_cgan_vae.py --seed 1 --n_samples 50
+# Score the trained checkpoint under the problem's frozen eval spec
+python -m engiopt.evaluate --problem-id heatconduction3d --generators cgan_vae --seeds 1
 
-# Batch evaluation across multiple seeds
-for seed in {1..5}; do
-    python evaluate_cgan_vae.py --seed $seed --n_samples 100
-done
+# Several seeds at once, including the simulator-backed metrics
+python -m engiopt.evaluate --problem-id heatconduction3d --generators cgan_vae --seeds 1 2 3 --include-expensive
 ```
-
-### Hyperparameter Sweep
-```bash
-# Run Bayesian optimization sweep
-wandb sweep sweep_cgan_vae.yaml
-wandb agent <sweep_id>
-```
-!! Change the path of cgan_vae.py to your project path
 
 ## Key Parameters
 

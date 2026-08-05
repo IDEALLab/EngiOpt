@@ -26,6 +26,7 @@ from engiopt.core import checkpoint_identity
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
+from engiopt.transforms import condition_keys
 from engiopt.transforms import flatten_dict_factory
 import wandb
 
@@ -192,7 +193,7 @@ def prepare_data(problem: Problem, device: th.device) -> tuple[th.utils.data.Ten
 
     training_ds = th.utils.data.TensorDataset(
         transform(training_ds["optimal_design"][:]),
-        *[training_ds[key][:] for key in problem.conditions_keys],
+        *[training_ds[key][:] for key in cond_keys],
     )
 
     # Create condition normalizer
@@ -223,7 +224,10 @@ if __name__ == "__main__":
     else:
         dummy_design, _ = problem.random_design()
         design_shape = spaces.flatten(problem.design_space, dummy_design).shape
-    n_conds = len(problem.conditions_keys)
+    # The scalar conditions the generator is conditioned on; array-valued and
+    # solver-only entries of `problem.conditions_keys` cannot enter a dense tensor.
+    cond_keys = condition_keys(problem)
+    n_conds = len(cond_keys)
 
     # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
@@ -370,7 +374,7 @@ if __name__ == "__main__":
                         ax.figure.canvas.draw()
                         img = np.array(fig.canvas.renderer.buffer_rgba())
                         axes[j].imshow(img)
-                        title = [(problem.conditions_keys[i], f"{dc[i]:.2f}") for i in range(n_conds)]
+                        title = [(cond_keys[i], f"{dc[i]:.2f}") for i in range(n_conds)]
                         title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
                         axes[j].title.set_text(title_string)  # Set title
                         axes[j].set_xticks([])  # Hide x ticks
@@ -415,6 +419,7 @@ if __name__ == "__main__":
                     checkpoint_files={"generator.pth": "generator.pth", "discriminator.pth": "discriminator.pth"},
                     run_config=vars(args),
                     **checkpoint_identity(args),
+                    condition_keys=cond_keys,
                     primary_files=["generator.pth"],
                 )
 

@@ -14,6 +14,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import field
 import datetime as dt
+import functools
+import importlib.metadata
+from pathlib import Path
+import subprocess
 from typing import Any, TYPE_CHECKING
 
 import pandas as pd
@@ -45,9 +49,18 @@ PROVENANCE_COLUMNS = (
     "spec_version",
     "n_samples",
     "sample_seconds",
+    "checkpoint_revision",
+    "checkpoint_hash",
+    "code_version",
     "evaluated_at",
 )
-"""Columns identifying *what was measured*, as opposed to metric values."""
+"""Columns identifying *what was measured*, as opposed to metric values.
+
+`config_fingerprint` and `seed` say which configuration produced the row;
+`checkpoint_hash` says which *weights* did. Re-training the same configuration
+and seed, or changing the training code, yields different weights under the same
+name, so without it a row cannot be traced back to the model that earned it.
+"""
 
 
 @dataclass
@@ -136,6 +149,7 @@ class Evaluator:
             conditions=self.resolved.conditions,
             sigma=self.spec.sigma,
             volfrac_tol=self.spec.volfrac_tol,
+            volume_condition=self.spec.volume_condition,
             sample_seconds=generator.last_sample_seconds,
             objective_weights=self.spec.objective_weights,
             objective_weight_condition=self.spec.objective_weight_condition,
@@ -193,6 +207,9 @@ class Evaluator:
             "spec_version": self.spec.version,
             "n_samples": ctx.n_samples,
             "sample_seconds": ctx.sample_seconds,
+            "checkpoint_revision": getattr(generator, "checkpoint_revision", None),
+            "checkpoint_hash": getattr(generator, "checkpoint_hash", None),
+            "code_version": code_version(),
             "evaluated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         }
 
@@ -231,6 +248,31 @@ class Evaluator:
                     raise
                 print(f"[leaderboard] skipping {generator.algo_id}: {exc}")
         return order_columns(pd.DataFrame(rows))
+
+
+@functools.cache
+def code_version() -> str:
+    """Which EngiOpt produced a result: the installed version, plus a git sha in a checkout.
+
+    Two evaluations of the same checkpoint can differ if the evaluation code
+    changed between them, so the row records which code it was.
+    """
+    try:
+        version = importlib.metadata.version("engiopt")
+    except importlib.metadata.PackageNotFoundError:
+        version = "unknown"
+    try:
+        sha = subprocess.run(
+            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        ).stdout.strip()
+    # Outside a checkout (an installed wheel, a container) the version is all there is.
+    except (OSError, subprocess.SubprocessError):
+        return version
+    return f"{version}+{sha}" if sha else version
 
 
 def _as_columns(spec: MetricSpec, value: float | dict[str, float]) -> dict[str, float]:

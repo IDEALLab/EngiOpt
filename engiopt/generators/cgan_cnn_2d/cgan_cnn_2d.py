@@ -23,6 +23,7 @@ from engiopt.core import checkpoint_identity
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
+from engiopt.transforms import condition_keys
 import wandb
 
 GeneratorOutputActivation = Literal["tanh", "sigmoid"]
@@ -262,7 +263,10 @@ if __name__ == "__main__":
     problem.reset(seed=args.seed)
 
     design_shape = problem.design_space.shape
-    n_conds = len(problem.conditions_keys)
+    # The scalar conditions the generator is conditioned on; array-valued and
+    # solver-only entries of `problem.conditions_keys` cannot enter a dense tensor.
+    cond_keys = condition_keys(problem)
+    n_conds = len(cond_keys)
 
     # Logging
     run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
@@ -302,7 +306,7 @@ if __name__ == "__main__":
     # Configure data loader
     training_ds = problem.dataset.with_format("torch", device=device)["train"]
     training_ds = th.utils.data.TensorDataset(
-        training_ds["optimal_design"][:].flatten(1), *[training_ds[key][:] for key in problem.conditions_keys]
+        training_ds["optimal_design"][:].flatten(1), *[training_ds[key][:] for key in cond_keys]
     )
     dataloader = th.utils.data.DataLoader(
         training_ds,
@@ -408,7 +412,7 @@ if __name__ == "__main__":
                         img = tensor.cpu().numpy().reshape(design_shape[0], design_shape[1])  # Extract x and y coordinates
                         dc = desired_conds[j].cpu()
                         axes[j].imshow(img)  # Scatter plot
-                        title = [(problem.conditions_keys[i], f"{dc[i]:.2f}") for i in range(n_conds)]
+                        title = [(cond_keys[i], f"{dc[i]:.2f}") for i in range(n_conds)]
                         title_string = "\n ".join(f"{condition}: {value}" for condition, value in title)
                         axes[j].title.set_text(title_string)  # Set title
                         axes[j].set_xticks([])  # Hide x ticks
@@ -455,6 +459,7 @@ if __name__ == "__main__":
                     },
                     run_config=vars(args),
                     **checkpoint_identity(args),
+                    condition_keys=cond_keys,
                     primary_files=["generator.pth"],
                 )
 

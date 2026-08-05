@@ -30,6 +30,15 @@ algorithm. Without it a 50-config sweep would collapse onto one row per seed,
 silently keeping only whichever ran last.
 """
 
+ENTRY_KEY = ["problem_id", "algo_id", "config_fingerprint", "spec_version"]
+"""What a *ranked entry* is: one configuration of one algorithm under one spec.
+
+`ROW_KEY` minus `seed`, because seeds are what a ranking aggregates over.
+Everything else must match: averaging one configuration's score with another's,
+or a score under `v1` with a score under `v2`, produces a number that describes
+no model and no protocol.
+"""
+
 LEADERBOARD_FILE = "leaderboard.csv"
 """Filename used inside a published HuggingFace dataset repo."""
 
@@ -72,8 +81,8 @@ def rank(
             run otherwise decides the ranking.
 
     Returns:
-        One row per `(problem_id, algo_id)` sorted best-first, with a `rank`
-        column and the seed count that produced each value.
+        One row per `ENTRY_KEY` sorted best-first, with a `rank` column and the
+        seed count that produced each value.
     """
     from engiopt.evaluation.registry import METRICS
 
@@ -82,13 +91,26 @@ def rank(
         raise ValueError(f"Metric {metric!r} has no ranking direction; it is diagnostic only.")
 
     grouped = (
-        frame.groupby(["problem_id", "algo_id"], as_index=False)
+        frame.groupby(entry_key(frame), as_index=False)
         .agg(value=(metric, aggregate), n_seeds=(metric, "count"))
         .sort_values("value", ascending=not spec.higher_is_better)
         .reset_index(drop=True)
     )
     grouped["rank"] = grouped.index + 1
     return grouped.rename(columns={"value": f"{metric}_{aggregate}"})
+
+
+def entry_key(frame: pd.DataFrame) -> list[str]:
+    """The `ENTRY_KEY` columns present in `frame`, for grouping.
+
+    Raises:
+        ValueError: If none of them are, since grouping would then silently
+            pool every result in the table into one number.
+    """
+    key = [col for col in ENTRY_KEY if col in frame.columns]
+    if not key:
+        raise ValueError(f"Leaderboard is missing all of {ENTRY_KEY}; cannot tell entries apart.")
+    return key
 
 
 def disagreement(
@@ -105,12 +127,13 @@ def disagreement(
     one-off.
 
     Returns:
-        A table indexed by model, one column of ranks per metric.
+        A table indexed by `ENTRY_KEY`, one column of ranks per metric.
     """
+    key = entry_key(frame)
     boards = []
     for metric in metrics:
         board = rank(frame, metric, registry=registry, aggregate=aggregate)
-        boards.append(board.set_index(["problem_id", "algo_id"])["rank"].rename(metric))
+        boards.append(board.set_index(key)["rank"].rename(metric))
     return pd.concat(boards, axis=1).sort_values(metrics[0])
 
 
@@ -129,14 +152,34 @@ def merge_rows(existing: pd.DataFrame, new_rows: pd.DataFrame) -> pd.DataFrame:
 
 
 def load_from_hub(repo_id: str, *, token: str | None = None) -> pd.DataFrame:
-    """Download the published leaderboard, or an empty frame if none exists yet."""
+    """Download the published leaderboard, or an empty frame if none exists yet.
+
+    Raises:
+        HfHubHTTPError: On any failure other than "no board published yet".
+            Treating an auth or network error as an empty board would let the
+            next `push_to_hub` upload only the new rows, deleting everyone
+            else's.
+    """
+    return _load_from_hub(repo_id, token=token)[0]
+
+
+def _load_from_hub(repo_id: str, *, token: str | None = None) -> tuple[pd.DataFrame, str | None]:
+    """Download the board together with the repo commit it was read at."""
     from huggingface_hub import hf_hub_download
+    from huggingface_hub import HfApi
+    from huggingface_hub.errors import EntryNotFoundError
+    from huggingface_hub.errors import RepositoryNotFoundError
+    from huggingface_hub.errors import RevisionNotFoundError
 
     try:
-        path = hf_hub_download(repo_id=repo_id, filename=LEADERBOARD_FILE, repo_type="dataset", token=token)
-    except Exception:  # noqa: BLE001 - a missing or private board is not an error here
-        return pd.DataFrame()
-    return pd.read_csv(path)
+        revision = HfApi(token=token).repo_info(repo_id=repo_id, repo_type="dataset").sha
+        path = hf_hub_download(
+            repo_id=repo_id, filename=LEADERBOARD_FILE, repo_type="dataset", revision=revision, token=token
+        )
+    # Only "there is nothing published yet" is a normal, empty-board outcome.
+    except (EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError):
+        return pd.DataFrame(), None
+    return pd.read_csv(path), revision
 
 
 def push_to_hub(
@@ -146,11 +189,16 @@ def push_to_hub(
     token: str | None = None,
     private: bool = False,
     commit_message: str | None = None,
+    max_attempts: int = 3,
 ) -> pd.DataFrame:
     """Merge `new_rows` into the published leaderboard and upload the result.
 
     The existing board is downloaded first and merged on `ROW_KEY`, so adding a
     model never requires re-running anyone else's evaluation.
+
+    The upload is conditional on the revision the board was read at. If another
+    job published in between, the commit is rejected rather than overwriting it,
+    and the read-merge-upload cycle is retried against the newer board.
 
     Args:
         new_rows: Rows to publish, as returned by `Evaluator.leaderboard`.
@@ -158,29 +206,49 @@ def push_to_hub(
         token: HF token; falls back to the ambient login.
         private: Create the repo private if it does not exist yet.
         commit_message: Defaults to a summary of what was added.
+        max_attempts: How many times to retry after losing a race.
 
     Returns:
         The full merged leaderboard as uploaded.
+
+    Raises:
+        RuntimeError: If every attempt lost the race to a concurrent publisher.
     """
     from huggingface_hub import HfApi
+    from huggingface_hub.errors import HfHubHTTPError
 
     api = HfApi(token=token)
     api.create_repo(repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True)
-
-    merged = merge_rows(load_from_hub(repo_id, token=token), new_rows)
-
     models = ", ".join(sorted(new_rows["algo_id"].unique())) if "algo_id" in new_rows else "results"
-    with tempfile.TemporaryDirectory() as tmp:
-        local = Path(tmp) / LEADERBOARD_FILE
-        merged.to_csv(local, index=False)
-        api.upload_file(
-            path_or_fileobj=str(local),
-            path_in_repo=LEADERBOARD_FILE,
-            repo_id=repo_id,
-            repo_type="dataset",
-            commit_message=commit_message or f"Add {len(new_rows)} row(s): {models}",
-        )
-    return merged
+
+    for attempt in range(max_attempts):
+        existing, revision = _load_from_hub(repo_id, token=token)
+        merged = merge_rows(existing, new_rows)
+        with tempfile.TemporaryDirectory() as tmp:
+            local = Path(tmp) / LEADERBOARD_FILE
+            merged.to_csv(local, index=False)
+            try:
+                api.upload_file(
+                    path_or_fileobj=str(local),
+                    path_in_repo=LEADERBOARD_FILE,
+                    repo_id=repo_id,
+                    repo_type="dataset",
+                    commit_message=commit_message or f"Add {len(new_rows)} row(s): {models}",
+                    parent_commit=revision,
+                )
+            except HfHubHTTPError as exc:
+                if not _is_stale_commit(exc) or attempt == max_attempts - 1:
+                    raise
+                print(f"[leaderboard] {repo_id} moved under us; re-merging (attempt {attempt + 2}/{max_attempts}).")
+                continue
+        return merged
+    raise RuntimeError(f"Could not publish to {repo_id} in {max_attempts} attempts: it kept changing underneath.")
+
+
+def _is_stale_commit(exc: Exception) -> bool:
+    """Whether an upload failed because `parent_commit` was no longer the head."""
+    status = getattr(getattr(exc, "response", None), "status_code", None)
+    return status == 412 or "parent_commit" in str(exc).lower()  # noqa: PLR2004 - HTTP 412 Precondition Failed
 
 
 def already_evaluated(board: pd.DataFrame, **key: Any) -> bool:

@@ -6,6 +6,7 @@ from typing import Any, TYPE_CHECKING
 
 import torch as th
 
+from engiopt.core import condition_keys_for
 from engiopt.core import ConditionBatch
 from engiopt.core import design_shape_of
 from engiopt.core import Generator
@@ -43,7 +44,7 @@ class CGAN1D(Generator):
         _, conds_normalizer, design_normalizer = prepare_data(problem, device)
         net = CGAN1DNet(
             latent_dim=config["latent_dim"],
-            n_conds=len(problem.conditions_keys),
+            n_conds=len(condition_keys_for(problem, resolved)),
             design_shape=design_shape_of(problem),
             design_normalizer=design_normalizer,
             conds_normalizer=conds_normalizer,

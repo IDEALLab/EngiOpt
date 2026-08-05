@@ -6,6 +6,7 @@ from typing import Any, TYPE_CHECKING
 
 import torch as th
 
+from engiopt.core import condition_keys_for
 from engiopt.core import ConditionBatch
 from engiopt.core import Generator
 from engiopt.generators.cgan_bezier.cgan_bezier import _EPS
@@ -49,7 +50,7 @@ class CGANBezier(Generator):
         net = CBezierGANNet(
             latent_dim=config["latent_dim"],
             noise_dim=config["noise_dim"],
-            num_conds=len(problem.conditions_keys),
+            num_conds=len(condition_keys_for(problem, resolved)),
             n_control_points=config["bezier_control_pts"],
             n_data_points=problem.design_space["coords"].shape[1],
             conds_normalizer=conds_normalizer,

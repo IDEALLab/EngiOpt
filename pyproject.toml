@@ -69,6 +69,11 @@ engiopt = [
 
 ############################################# Linters and Test tools #######################################################
 
+[tool.pytest.ini_options]
+markers = [
+    "network: needs the HuggingFace Hub (downloads a dataset or checkpoint). Skip with -m 'not network'.",
+]
+
 [tool.ruff]
 # Exclude a variety of commonly ignored directories.
 exclude = [

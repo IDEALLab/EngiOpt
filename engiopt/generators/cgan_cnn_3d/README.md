@@ -23,30 +23,20 @@ This implementation extends the classic 2D cDCGAN architecture to 3D volumetric 
 ### Basic Training
 ```bash
 # Train with default parameters
-python cgan_cnn_3d.py --problem_id heatconduction3d --n_epochs 300
+python engiopt/generators/cgan_cnn_3d/cgan_cnn_3d.py --problem-id heatconduction3d --n-epochs 300
 
-# Save model for later evaluation
-python cgan_cnn_3d.py --save_model --track
+# Save the checkpoint for later evaluation
+python engiopt/generators/cgan_cnn_3d/cgan_cnn_3d.py --save-model --track
 ```
 
 ### Evaluation
 ```bash
-# Evaluate trained model using EngiBench metrics
-python evaluate_cgan_cnn_3d.py --seed 1 --n_samples 50
+# Score the trained checkpoint under the problem's frozen eval spec
+python -m engiopt.evaluate --problem-id heatconduction3d --generators cgan_cnn_3d --seeds 1
 
-# Batch evaluation across multiple seeds
-for seed in {1..5}; do
-    python evaluate_cgan_cnn_3d.py --seed $seed --n_samples 100
-done
+# Several seeds at once, including the simulator-backed metrics
+python -m engiopt.evaluate --problem-id heatconduction3d --generators cgan_cnn_3d --seeds 1 2 3 --include-expensive
 ```
-
-### Hyperparameter Sweep
-```bash
-# Run Bayesian optimization sweep
-wandb sweep sweep_cgan_cnn_3d.yaml
-wandb agent <sweep_id>
-```
-!! Change the path of cgan_cnn_3d.py to your project path
 
 ## Key Parameters
 

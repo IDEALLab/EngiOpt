@@ -6,6 +6,7 @@ from typing import Any, TYPE_CHECKING
 
 import torch as th
 
+from engiopt.core import condition_keys_for
 from engiopt.core import ConditionBatch
 from engiopt.core import Generator
 from engiopt.generators.pixel_cnn_pp_2d.pixel_cnn_pp_2d import PixelCNNpp
@@ -52,7 +53,7 @@ class PixelCNNpp2D(Generator):
             resnet_nonlinearity=config["resnet_nonlinearity"],
             dropout_p=config["dropout_p"],
             input_channels=1,
-            nr_conditions=len(problem.conditions_keys),
+            nr_conditions=len(condition_keys_for(problem, resolved)),
         )
         net.load_state_dict(th.load(resolved.files["model.pth"], map_location=device)[cls.primary_state_key])
         net.eval().to(device)
