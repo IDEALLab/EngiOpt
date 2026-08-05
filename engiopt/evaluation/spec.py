@@ -34,6 +34,43 @@ SPEC_ROOT = Path(__file__).resolve().parent.parent / "specs"
 """Directory holding committed specs, `engiopt/specs/<problem_id>/<version>.json`."""
 
 
+class ProblemDefinitionMismatchError(ValueError):
+    """Raised when the installed EngiBench defines a problem differently than a spec expects.
+
+    Distinct from a digest mismatch: the data did not change underneath us, the
+    *problem* did. Nothing about the spec can be reproduced until the EngiBench
+    versions agree, so this says which side moved rather than reporting two
+    hashes that will not match.
+    """
+
+    def __init__(
+        self,
+        *,
+        problem_id: str,
+        version: str,
+        expected_conditions: tuple[str, ...],
+        found_conditions: tuple[str, ...],
+        expected_dataset: str | None,
+        found_dataset: str | None,
+        engibench_version: str | None,
+    ) -> None:
+        self.expected_conditions = expected_conditions
+        self.found_conditions = found_conditions
+        details = [
+            f"Eval spec {problem_id}/{version} was frozen against a different definition of {problem_id!r}.",
+            f"  conditions expected: {list(expected_conditions)}",
+            f"  conditions found:    {list(found_conditions)}",
+        ]
+        if expected_dataset != found_dataset:
+            details.append(f"  dataset expected:    {expected_dataset}")
+            details.append(f"  dataset found:       {found_dataset}")
+        details.append(
+            f"The spec was frozen under EngiBench {engibench_version or 'unknown'}. Install an EngiBench whose "
+            f"{problem_id!r} matches, or freeze a new spec version against the one you have."
+        )
+        super().__init__("\n".join(details))
+
+
 @dataclass(frozen=True)
 class EvalSpec:
     """The frozen contract for evaluating models on one problem.
@@ -67,9 +104,16 @@ class EvalSpec:
             the dataset at exactly this revision, so a new upload to the dataset
             repo cannot change what a leaderboard row means. Leave it empty to
             follow the dataset's current main branch.
-        engibench_version: EngiBench version the digest was recorded under.
-            Provenance only -- a package version does not identify a dataset,
-            which is what `dataset_revision` is for.
+        problem_conditions: The problem's full condition list when the spec was
+            frozen. Pinning the dataset is not enough on its own: which
+            conditions exist, and which dataset a problem points at, are defined
+            by the installed EngiBench, so a spec frozen against a different
+            EngiBench draws different columns. Checked before the digest, so
+            that case reports itself instead of surfacing as an opaque hash
+            mismatch.
+        engibench_version: EngiBench version the spec was frozen under. Recorded
+            for provenance; `problem_conditions` is what actually gets checked,
+            since a version string does not pin a problem definition either.
         notes: Free-text rationale for this version.
     """
 
@@ -86,6 +130,7 @@ class EvalSpec:
     condition_digest: str | None = None
     dataset_id: str | None = None
     dataset_revision: str | None = None
+    problem_conditions: tuple[str, ...] | None = None
     engibench_version: str | None = None
     notes: str = ""
 
@@ -98,6 +143,8 @@ class EvalSpec:
         object.__setattr__(self, "metrics", tuple(self.metrics))
         if self.objective_weights is not None:
             object.__setattr__(self, "objective_weights", tuple(self.objective_weights))
+        if self.problem_conditions is not None:
+            object.__setattr__(self, "problem_conditions", tuple(self.problem_conditions))
 
     # ------------------------------------------------------------------
     # Persistence
@@ -138,6 +185,7 @@ class EvalSpec:
                 re-frozen under a new version.
         """
         device = device or th.device("cpu")
+        self.check_problem_definition(problem)
         self.pin_dataset(problem)
         conditions_tensor, conditions, ref_designs, indices = sample_conditions(
             problem=problem, n_samples=self.n_samples, device=device, seed=self.condition_seed
@@ -157,6 +205,36 @@ class EvalSpec:
             indices=np.asarray(indices),
             condition_keys=tuple(get_scalar_condition_keys(problem, problem.dataset["test"])),
         )
+
+    def check_problem_definition(self, problem: Problem) -> None:
+        """Verify the installed EngiBench defines this problem the way the spec was frozen against.
+
+        A pinned dataset revision fixes the *data*; it does not fix which
+        conditions the problem declares or which dataset it points at, both of
+        which live in EngiBench. A spec frozen against a different EngiBench
+        draws different condition columns and so computes a different digest --
+        which, without this check, surfaces only as an unexplained hash
+        mismatch.
+
+        Raises:
+            ProblemDefinitionMismatchError: If the installed problem declares
+                different conditions, or points at a different dataset.
+        """
+        if self.problem_conditions is None:
+            return
+        current = tuple(problem.conditions_keys)
+        current_dataset = getattr(problem, "dataset_id", None)
+        dataset_moved = self.dataset_id is not None and current_dataset is not None and current_dataset != self.dataset_id
+        if current != self.problem_conditions or dataset_moved:
+            raise ProblemDefinitionMismatchError(
+                problem_id=self.problem_id,
+                version=self.version,
+                expected_conditions=self.problem_conditions,
+                found_conditions=current,
+                expected_dataset=self.dataset_id,
+                found_dataset=current_dataset,
+                engibench_version=self.engibench_version,
+            )
 
     def pin_dataset(self, problem: Problem) -> None:
         """Point `problem.dataset` at this spec's frozen dataset revision.
@@ -189,6 +267,7 @@ class EvalSpec:
             **{
                 **asdict(frozen),
                 "condition_digest": _digest(indices, conditions, ref_designs),
+                "problem_conditions": tuple(problem.conditions_keys),
                 "engibench_version": getattr(engibench, "__version__", None),
             }
         )

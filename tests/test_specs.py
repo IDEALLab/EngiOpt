@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import dataclasses
 import json
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import pytest
@@ -18,6 +18,7 @@ import pytest
 from engiopt.evaluation.registry import METRICS
 from engiopt.evaluation.spec import _digest
 from engiopt.evaluation.spec import EvalSpec
+from engiopt.evaluation.spec import ProblemDefinitionMismatchError
 from engiopt.evaluation.spec import SPEC_ROOT
 
 SPEC_PATHS = sorted(SPEC_ROOT.glob("*/*.json"))
@@ -133,12 +134,21 @@ def test_committed_spec_reproduces_its_frozen_conditions(path: Any) -> None:
 
     `resolve` raises if the digest no longer matches, so this fails loudly when
     a dataset moves out from under a published spec.
+
+    A spec frozen against a *different definition of the problem* is skipped
+    rather than failed: the installed EngiBench cannot draw those conditions at
+    all, so there is nothing here to verify. The skip names the mismatch, and a
+    digest mismatch under a matching definition still fails.
     """
     from engibench.utils.all_problems import BUILTIN_PROBLEMS
 
     spec = EvalSpec.load(str(path))
     problem = BUILTIN_PROBLEMS[spec.problem_id]()
     problem.reset(seed=spec.condition_seed)
+    try:
+        spec.check_problem_definition(problem)
+    except ProblemDefinitionMismatchError as mismatch:
+        pytest.skip(str(mismatch))
 
     resolved = spec.resolve(problem)
 
@@ -146,3 +156,44 @@ def test_committed_spec_reproduces_its_frozen_conditions(path: Any) -> None:
     assert resolved.conditions_tensor.shape == (spec.n_samples, len(resolved.condition_keys))
     if spec.volume_condition is not None:
         assert spec.volume_condition in problem.conditions_keys
+
+
+def test_a_differently_defined_problem_reports_itself() -> None:
+    """A pinned dataset does not pin the problem definition, which also lives in EngiBench.
+
+    Without this check the case shows up only as two hashes that will never
+    match, giving no hint that the EngiBench versions disagree.
+    """
+
+    class _Problem:
+        conditions_keys: ClassVar[list[str]] = ["volfrac", "rmin", "weight"]
+        dataset_id = "IDEALLab/thermoelastic_2d_v0"
+
+    spec = EvalSpec(
+        problem_id="thermoelastic2d",
+        problem_conditions=("volume_fraction_target", "rmin", "weight"),
+        dataset_id="IDEALLab/thermoelastic_2d_v1",
+        engibench_version="0.2.0",
+    )
+    with pytest.raises(ProblemDefinitionMismatchError) as caught:
+        spec.check_problem_definition(_Problem())
+
+    message = str(caught.value)
+    assert "volume_fraction_target" in message
+    assert "volfrac" in message
+    assert "thermoelastic_2d_v0" in message
+
+
+def test_a_matching_problem_definition_passes() -> None:
+    """The check must not fire when the installed EngiBench agrees with the spec."""
+
+    class _Problem:
+        conditions_keys: ClassVar[list[str]] = ["volfrac", "rmin"]
+        dataset_id = "IDEALLab/beams_2d_50_100_v0"
+
+    spec = EvalSpec(
+        problem_id="beams2d",
+        problem_conditions=("volfrac", "rmin"),
+        dataset_id="IDEALLab/beams_2d_50_100_v0",
+    )
+    spec.check_problem_definition(_Problem())

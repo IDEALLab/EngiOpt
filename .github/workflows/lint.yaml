@@ -37,6 +37,13 @@ jobs:
           python-version: "3.12"
       - uses: actions/checkout@v4
       - run: pip install -e ".[testing]"
-      # Every committed eval spec must still resolve against its pinned dataset
-      # revision, so a spec cannot silently stop reproducing its own conditions.
+      # Installed last so it wins: the committed eval specs are frozen against
+      # the current EngiBench, whose photonics2d and thermoelastic2d read the v1
+      # datasets. The newest release on PyPI (0.2.0) still points those two at
+      # v0, so the PyPI build draws different conditions and no spec could
+      # reproduce itself. Pinned to a commit rather than a branch so CI cannot
+      # drift; bump it together with the specs' `engibench_version`.
+      - run: pip install "engibench[all] @ git+https://github.com/IDEALLab/EngiBench.git@0a028c03d02b266cb4394968c386e45781f4605b"
+      # Every committed spec must still resolve: same problem definition, same
+      # pinned dataset revision, same digest.
       - run: pytest tests/ -v

@@ -3,7 +3,7 @@
   "condition_seed": 1,
   "dataset_id": "IDEALLab/thermoelastic_2d_v1",
   "dataset_revision": "7d5b4a694bd1a8f3f25fd745ac9f669764e29ea5",
-  "engibench_version": "0.2.0",
+  "engibench_version": "0.2.0+0a028c03d02b",
   "metrics": [
     "mmd",
     "dpp",
@@ -16,6 +16,15 @@
   "notes": "Objectives combined per-sample by the `weight` condition. Feasibility = EngiBench constraints plus the volume_fraction_target budget.",
   "objective_weight_condition": "weight",
   "objective_weights": null,
+  "problem_conditions": [
+    "fixed_elements",
+    "force_elements_x",
+    "force_elements_y",
+    "heatsink_elements",
+    "volume_fraction_target",
+    "rmin",
+    "weight"
+  ],
   "problem_id": "thermoelastic2d",
   "sigma": 10.0,
   "version": "v1",

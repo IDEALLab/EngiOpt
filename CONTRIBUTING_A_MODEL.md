@@ -66,7 +66,7 @@ solver settings that are not dataset columns at all. Size your network from the
 ```python
 from engiopt.transforms import condition_keys
 
-cond_keys = condition_keys(problem)   # e.g. ("volume_fraction_target", "rmin", "weight")
+cond_keys = condition_keys(problem)  # e.g. ("volume_fraction_target", "rmin", "weight")
 n_conds = len(cond_keys)
 ```
 

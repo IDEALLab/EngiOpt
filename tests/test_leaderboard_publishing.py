@@ -15,8 +15,29 @@ from huggingface_hub.errors import HfHubHTTPError
 from huggingface_hub.errors import RepositoryNotFoundError
 import pandas as pd
 import pytest
+import requests
 
 from engiopt.evaluation import leaderboard as lb
+
+
+def hub_error(error_cls: type[Exception], message: str, status: int = 500) -> Exception:
+    """Build a `huggingface_hub` error the way the library itself would.
+
+    Versions disagree about `response`: newer ones require it as a keyword-only
+    argument, and they read attributes off it (`request`, `headers`). A stub
+    would raise `TypeError`/`AttributeError` in place of the error under test,
+    turning a real assertion into a confusing failure -- so this passes a
+    genuine `requests.Response`, which satisfies every version.
+    """
+    response = requests.Response()
+    response.status_code = status
+    response.reason = message
+    response._content = message.encode()
+    response.request = requests.Request(method="GET", url="https://huggingface.co/api").prepare()
+    try:
+        return error_cls(message, response=response)  # type: ignore[call-arg]
+    except TypeError:
+        return error_cls(message)
 
 
 def _row(algo: str, mmd: float) -> dict[str, Any]:
@@ -46,7 +67,7 @@ class _FakeApi:
 
     def repo_info(self, **_kwargs: Any) -> Any:
         if self.revision is None:
-            raise RepositoryNotFoundError("no such repo")
+            raise hub_error(RepositoryNotFoundError, "no such repo", status=404)
         return type("Info", (), {"sha": self.revision})()
 
     def upload_file(self, **kwargs: Any) -> None:
@@ -54,7 +75,7 @@ class _FakeApi:
         if self.fail_first and len(self.uploads) == 1:
             # What the Hub returns when `parent_commit` is no longer the head.
             self.revision = "sha2"
-            raise HfHubHTTPError("412 Client Error: parent_commit is out of date")
+            raise hub_error(HfHubHTTPError, "412 Client Error: parent_commit is out of date", status=412)
 
 
 @pytest.fixture
@@ -87,7 +108,7 @@ def test_missing_file_in_an_existing_repo_reads_as_empty(monkeypatch: pytest.Mon
     monkeypatch.setattr("huggingface_hub.HfApi", _FakeApi())
 
     def fake_download(**_kwargs: Any) -> str:
-        raise EntryNotFoundError("no leaderboard.csv")
+        raise hub_error(EntryNotFoundError, "no leaderboard.csv", status=404)
 
     monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_download)
     assert lb.load_from_hub("org/board").empty
@@ -98,7 +119,7 @@ def test_transient_download_failure_is_not_an_empty_board(monkeypatch: pytest.Mo
     monkeypatch.setattr("huggingface_hub.HfApi", _FakeApi())
 
     def fake_download(**_kwargs: Any) -> str:
-        raise HfHubHTTPError("503 Server Error: Service Unavailable")
+        raise hub_error(HfHubHTTPError, "503 Server Error: Service Unavailable", status=503)
 
     monkeypatch.setattr("huggingface_hub.hf_hub_download", fake_download)
     with pytest.raises(HfHubHTTPError):
@@ -110,7 +131,7 @@ def test_auth_failure_is_not_an_empty_board(monkeypatch: pytest.MonkeyPatch) -> 
     api = _FakeApi()
 
     def raise_auth(**_kwargs: Any) -> Any:
-        raise HfHubHTTPError("401 Client Error: Unauthorized")
+        raise hub_error(HfHubHTTPError, "401 Client Error: Unauthorized", status=401)
 
     api.repo_info = raise_auth  # type: ignore[method-assign]
     monkeypatch.setattr("huggingface_hub.HfApi", api)
@@ -162,7 +183,7 @@ def test_push_gives_up_rather_than_forcing_a_write(monkeypatch: pytest.MonkeyPat
     class _AlwaysStale(_FakeApi):
         def upload_file(self, **kwargs: Any) -> None:
             self.uploads.append(kwargs)
-            raise HfHubHTTPError("412 Client Error: parent_commit is out of date")
+            raise hub_error(HfHubHTTPError, "412 Client Error: parent_commit is out of date", status=412)
 
     monkeypatch.setattr("huggingface_hub.HfApi", _AlwaysStale())
     with pytest.raises(HfHubHTTPError):

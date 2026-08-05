@@ -3,7 +3,7 @@
   "condition_seed": 1,
   "dataset_id": "IDEALLab/beams_2d_50_100_v0",
   "dataset_revision": "ccb64d4f09cf66a5ed9ba2081438d695b9e2438d",
-  "engibench_version": "0.2.0",
+  "engibench_version": "0.2.0+0a028c03d02b",
   "metrics": [
     "mmd",
     "dpp",
@@ -16,6 +16,12 @@
   "notes": "Feasibility = EngiBench constraints plus the volfrac budget.",
   "objective_weight_condition": null,
   "objective_weights": null,
+  "problem_conditions": [
+    "volfrac",
+    "rmin",
+    "forcedist",
+    "overhang_constraint"
+  ],
   "problem_id": "beams2d",
   "sigma": 10.0,
   "version": "v1",

@@ -52,12 +52,17 @@ pip install -e .
 
 You might want to install a specific PyTorch version, e.g., with CUDA on top of it, see [PyTorch install](https://pytorch.org/get-started/locally/).
 
-If you're modifying EngiBench, you can install it from source and as editable:
+**Evaluation needs EngiBench from source.** The committed evaluation specs are frozen
+against the current EngiBench, whose `photonics2d` and `thermoelastic2d` read the `v1`
+datasets; the newest PyPI release (0.2.0) still points those two at `v0`. Installing
+EngiBench from PyPI therefore draws different conditions, and the specs report a clear
+mismatch rather than scoring against the wrong data:
 ```
 git clone git@github.com:IDEALLab/EngiBench.git
 cd EngiBench/
 pip install -e ".[all]"
 ```
+This is also what CI installs, pinned to a commit. Training is unaffected.
 
 ## Running the code
 
