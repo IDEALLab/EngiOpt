@@ -141,26 +141,58 @@ def lv_paired_distance(ctx: EvaluationContext) -> float:
 
 
 @register_metric(
-    "cond_recovery",
+    "cond_err",
     family="conditions",
     cost="cheap",
     higher_is_better=False,
+    description="Exact error between a design's realized volume fraction and the one requested.",
+)
+def cond_err(ctx: EvaluationContext) -> float:
+    """Did the design hit the volume fraction it was asked for?
+
+    Read analytically -- the volume fraction of a density field *is* its mean,
+    so there is nothing to fit and nothing to approximate. `metric_suite.md`
+    calls for the analytic readout wherever one exists, and this is the case
+    where one does.
+
+    Returns NaN on problems with no volume budget (photonics2d), which is
+    reported rather than papered over.
+    """
+    if ctx.volume_condition is None or ctx.conditions is None:
+        return float("nan")
+
+    requested = np.asarray(ctx.conditions[ctx.volume_condition], dtype=np.float64)
+    realized = ctx.gen_flat.mean(axis=1)
+    return float(np.abs(realized - requested).mean())
+
+
+@register_metric(
+    "cond_recovery",
+    family="conditions",
+    cost="cheap",
     outputs=("cond_recovery_err", "cond_probe_r2"),
-    description="Error in reading the requested condition back out of a generated design's latent code.",
+    higher_is_better=False,
+    description="Probe-based condition readout, for conditions with no closed form. See cond_err first.",
 )
 def cond_recovery(ctx: EvaluationContext) -> dict[str, float]:
-    """Whether a generated design still carries the condition it was asked for.
+    """The fallback for conditions that cannot be read off a design directly.
 
-    A linear probe is fitted on training data to read conditions out of frozen
-    latent codes, then applied to generated designs. Large error means the model
-    produced something whose latent code no longer says what was requested --
-    the model ignored its input, or drifted off the manifold where the mapping
-    holds.
+    Where a closed form exists, use it: `cond_err` computes the volume-fraction
+    error exactly, and no fitted probe can improve on an identity. This metric
+    exists for the rest -- `rmin`, `forcedist`, `overhang_constraint` -- where
+    the only way to ask "does this design still reflect its condition" is to
+    learn the readout.
 
-    `cond_probe_r2` is reported alongside because the error is only
-    interpretable if the probe works at all: a low R-squared on training data
-    means conditions are not linearly readable from this encoder, and the error
-    column then says nothing about the generator.
+    A least-squares matrix is fitted on training codes, deliberately not a
+    network: the question is whether the condition is *linearly readable* from a
+    frozen encoder, and a model with its own capacity could recover a condition
+    the codes barely encode, answering something else.
+
+    Costs a pass over the full training split, so it is worth selecting only
+    when those non-analytic conditions matter. `cond_probe_r2` decides whether
+    the error column means anything at all -- a low training R-squared says the
+    conditions are not linearly readable here, and the error then describes the
+    probe rather than the generator.
     """
     weights, r_squared = ctx.condition_probe
     generated, _ = ctx.latent_codes
