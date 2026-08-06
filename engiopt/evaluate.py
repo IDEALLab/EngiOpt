@@ -105,13 +105,27 @@ def _print_generators() -> None:
 
 
 def _print_metrics() -> None:
-    """Print every registered metric grouped by the question it answers."""
+    """Print every registered metric grouped by the question it answers.
+
+    Metrics needing something the spec must supply are marked, so the ones that
+    are not simply available are visible before a run rather than after it.
+    """
+    width = max(len(spec.name) for spec in METRICS.values())
+    needs_setup = [spec for spec in METRICS.values() if spec.requires]
+
     print(f"{len(METRICS)} metrics registered:\n")
     for family in sorted({spec.family for spec in METRICS.values()}):
         print(f"  [{family}]")
         for spec in METRICS.select(family=family):
-            direction = {True: "higher better", False: "lower better", None: "diagnostic"}[spec.higher_is_better]
-            print(f"    {spec.name:<10} {spec.cost:<10} {direction:<14} {spec.description}")
+            direction = {True: "higher", False: "lower", None: "diagnostic"}[spec.higher_is_better]
+            mark = "*" if spec.requires else " "
+            print(f"   {mark}{spec.name:<{width}}  {spec.cost:<9} {direction:<10} {spec.description}")
+
+    if needs_setup:
+        print(
+            f"\n  * needs an eval spec that pins a latent instrument ({len(needs_setup)} of {len(METRICS)}). "
+            "\n    Everything unmarked runs on any problem with no extra setup."
+        )
 
 
 def _resolve_generator_names(requested: tuple[str, ...], problem_id: str) -> list[str]:

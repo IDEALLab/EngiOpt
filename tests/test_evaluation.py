@@ -7,6 +7,7 @@ diverse), rather than by pinning historical numbers.
 
 from __future__ import annotations
 
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -460,3 +461,55 @@ def test_cost_metrics_are_nan_when_unmeasured(fake_problem: Any) -> None:
     ctx = _context(fake_problem, rng.random((4, *shape)), rng.random((4, *shape)))
     assert np.isnan(METRICS["gen_seconds"].fn(ctx))
     assert np.isnan(METRICS["params"].fn(ctx))
+
+
+# ----------------------------------------------------------------------
+# Declared requirements
+# ----------------------------------------------------------------------
+
+
+def _evaluator_with(spec: EvalSpec) -> Any:
+    """An Evaluator stub carrying only what metric selection reads."""
+    from types import SimpleNamespace
+
+    from engiopt.evaluation.evaluator import Evaluator
+
+    evaluator = Evaluator.__new__(Evaluator)
+    evaluator.registry = METRICS
+    evaluator.resolved = SimpleNamespace(spec=spec)
+    return evaluator
+
+
+def test_a_metric_needing_an_instrument_is_refused_before_anything_is_scored() -> None:
+    """Failing partway through a leaderboard discards everything already computed."""
+    evaluator = _evaluator_with(EvalSpec(problem_id="beams2d", metrics=("mmd", "lv_mmd")))
+    with pytest.raises(ValueError, match="latent_instrument"):
+        evaluator._selected(None, include_expensive=False)
+
+
+def test_the_dual_gap_requirement_is_reported_separately() -> None:
+    """A pinned instrument is not enough; the gap also needs its companion."""
+    from engiopt.evaluation.spec import LatentInstrument
+
+    spec = EvalSpec(
+        problem_id="beams2d",
+        metrics=("lv_mmd", "lv_dual_gap"),
+        latent_instrument=LatentInstrument(algo="constrained_plvae_2d", seed=1, config_fingerprint="abc"),
+    )
+    with pytest.raises(ValueError, match="recon_only_config_fingerprint"):
+        _evaluator_with(spec)._selected(None, include_expensive=False)
+
+
+def test_metrics_without_requirements_need_no_setup() -> None:
+    """The default path for a new contributor stays free of latent machinery."""
+    evaluator = _evaluator_with(EvalSpec(problem_id="beams2d", metrics=("mmd", "dpp", "viol", "novelty", "cond_err")))
+    selected = evaluator._selected(None, include_expensive=False)
+    assert {spec.name for spec in selected} == {"mmd", "dpp", "viol", "novelty", "cond_err"}
+
+
+def test_the_committed_specs_need_no_instrument() -> None:
+    """v1 is what a contributor evaluates against by default; it must work unconfigured."""
+    for path in Path("engiopt/specs").glob("*/v1.json"):
+        spec = EvalSpec.load(f"{path.parent.name}/v1")
+        required = {req for name in spec.metrics for req in METRICS[name].requires}
+        assert not required, f"{path.parent.name}/v1 selects metrics requiring {required}"

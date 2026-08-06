@@ -174,8 +174,28 @@ Declare `cost="expensive"` if it touches `ctx.optimization` (the simulator or
 optimizer). The registry enforces the split, so a cheap run can never
 accidentally launch a simulation.
 
+If your metric needs something the *spec* has to supply rather than something
+it can compute from the designs, say so with `requires=`:
+
+```python
+@register_metric("my_latent_metric", family="latent", cost="cheap",
+                 higher_is_better=False, requires=("latent_instrument",))
+```
+
+The evaluator then refuses the run up front with a message naming what is
+missing, instead of failing partway through a leaderboard, and
+`--list-metrics` marks it so nobody expects it to work unconfigured.
+
 Importing the module is what registers it — which means you can define a metric
 in a notebook cell and it will appear in the next leaderboard you build.
+
+### Do you need a new metric?
+
+Most of the obvious ones exist. Before adding another, check it is not a
+restatement of one already there — a rate and its magnitude (`viol` and
+`cond_err`), or two diversity measures over the same kernel, will correlate
+near-perfectly and add a column without adding information. `--list-metrics`
+groups by the question each one answers, which makes the overlap easy to spot.
 
 ## 6. Where things live
 

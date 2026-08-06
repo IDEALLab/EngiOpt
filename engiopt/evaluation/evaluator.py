@@ -309,7 +309,37 @@ class Evaluator:
         specs = self.registry.select(names)
         if not include_expensive:
             specs = [spec for spec in specs if spec.cost == "cheap"]
+        self._check_requirements(specs)
         return specs
+
+    def _check_requirements(self, specs: list[MetricSpec]) -> None:
+        """Reject a selection the spec cannot satisfy, before any model is scored.
+
+        Discovering a missing instrument partway through a leaderboard wastes
+        everything computed up to that point, and on a batch run the failure
+        surfaces far from its cause.
+
+        Raises:
+            ValueError: If a selected metric needs something the spec omits.
+        """
+        instrument = self.spec.latent_instrument
+        missing: dict[str, list[str]] = {}
+
+        for spec in specs:
+            for requirement in spec.requires:
+                if requirement == "latent_instrument" and instrument is None:
+                    missing.setdefault("latent_instrument", []).append(spec.name)
+                elif requirement.endswith("recon_only_config_fingerprint") and (
+                    instrument is None or not instrument.has_recon_only
+                ):
+                    missing.setdefault("latent_instrument.recon_only_config_fingerprint", []).append(spec.name)
+
+        if missing:
+            detail = "; ".join(f"{key} (needed by {', '.join(names)})" for key, names in missing.items())
+            raise ValueError(
+                f"spec {self.spec.problem_id}/{self.spec.version} does not supply: {detail}. "
+                "Pin it in the spec, or drop those metrics from the selection."
+            )
 
     def _provenance(self, generator: Generator, ctx: EvaluationContext) -> dict[str, Any]:
         return {

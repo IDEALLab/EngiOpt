@@ -51,6 +51,15 @@ class MetricSpec:
     """None for metrics with no intrinsic direction (e.g. a realized volume fraction)."""
     outputs: tuple[str, ...] = ()
     """Column names produced. Defaults to `(name,)` for single-valued metrics."""
+    requires: tuple[str, ...] = ()
+    """Spec entries this metric needs before it can run, e.g. `latent_instrument`.
+
+    Most metrics need only the designs. A few need something the spec has to
+    supply -- an autoencoder to measure in, a companion to difference against --
+    and declaring that here means the gap is visible in `--list-metrics` and
+    catchable before a run starts, rather than surfacing as an exception partway
+    through a leaderboard.
+    """
     description: str = ""
 
     @property
@@ -118,6 +127,7 @@ def register_metric(
     cost: MetricCost,
     higher_is_better: bool | None,
     outputs: tuple[str, ...] = (),
+    requires: tuple[str, ...] = (),
     description: str = "",
     registry: MetricRegistry | None = None,
 ) -> Callable[[MetricFn], MetricFn]:
@@ -129,6 +139,7 @@ def register_metric(
         cost: `cheap` if it never runs a simulator, `expensive` otherwise.
         higher_is_better: Ranking direction, or None if the metric is diagnostic.
         outputs: Column names, when the metric returns a dict of several values.
+        requires: Spec entries the metric needs, e.g. `("latent_instrument",)`.
         description: One-line explanation, surfaced by `engiopt.evaluate --list-metrics`.
         registry: Target registry; defaults to the global one.
 
@@ -145,6 +156,7 @@ def register_metric(
                 cost=cost,
                 higher_is_better=higher_is_better,
                 outputs=outputs,
+                requires=requires,
                 description=description or (fn.__doc__ or "").strip().split("\n")[0],
             )
         )

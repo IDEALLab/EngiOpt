@@ -56,6 +56,7 @@ def _residuals(designs: npt.NDArray, projected: npt.NDArray) -> npt.NDArray:
 
 @register_metric(
     "lv_residual",
+    requires=("latent_instrument",),
     family="latent",
     cost="cheap",
     higher_is_better=False,
@@ -82,6 +83,7 @@ def lv_residual(ctx: EvaluationContext) -> dict[str, float]:
 
 @register_metric(
     "lv_dual_gap",
+    requires=("latent_instrument", "latent_instrument.recon_only_config_fingerprint"),
     family="latent",
     cost="cheap",
     higher_is_better=False,
@@ -115,6 +117,7 @@ def lv_dual_gap(ctx: EvaluationContext) -> float:
 
 @register_metric(
     "lv_paired_distance",
+    requires=("latent_instrument",),
     family="conditions",
     cost="cheap",
     higher_is_better=False,
@@ -179,6 +182,7 @@ def cond_err(ctx: EvaluationContext) -> float:
 
 @register_metric(
     "lv_mmd",
+    requires=("latent_instrument",),
     family="latent",
     cost="cheap",
     higher_is_better=False,
@@ -192,6 +196,7 @@ def lv_mmd(ctx: EvaluationContext) -> float:
 
 @register_metric(
     "lv_coverage",
+    requires=("latent_instrument",),
     family="latent",
     cost="cheap",
     higher_is_better=True,
@@ -219,6 +224,7 @@ def lv_coverage(ctx: EvaluationContext) -> float:
 
 @register_metric(
     "lv_vendi",
+    requires=("latent_instrument",),
     family="diversity",
     cost="cheap",
     higher_is_better=True,
