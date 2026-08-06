@@ -72,6 +72,76 @@ def get_image_condition_keys(problem: Problem, dataset: Dataset) -> list[str]:
     return [key for key in problem.conditions_keys if key in dataset.column_names and np.asarray(dataset[0][key]).ndim > 0]
 
 
+def get_image_condition_shape(dataset: Dataset, img_keys: list[str]) -> tuple[int, ...]:
+    """Return the spatial shape of the first image condition.
+
+    All image conditions on a problem are assumed to share spatial dimensions.
+
+    Args:
+        dataset: A dataset split.
+        img_keys: Image condition keys, from `get_image_condition_keys`.
+
+    Returns:
+        The shape, e.g. `(65, 65)`.
+    """
+    return tuple(np.asarray(dataset[0][img_keys[0]]).shape)
+
+
+def rasterize_index_conditions(dataset: Dataset, keys: list[str], grid_shape: tuple[int, int]) -> th.Tensor:
+    """Turn sparse node-index conditions into dense binary masks.
+
+    Several problems store boundary conditions as variable-length arrays of flat
+    node indices, e.g. `fixed_elements = [23, 24, 25, ...]`. Those cannot travel
+    in a dense condition tensor, but they are exactly the information a
+    conditional decoder needs, so they are rasterized onto the mesh instead.
+
+    For a design grid of `(H, W)` the node grid is usually `(H + 1, W + 1)` --
+    pixel corners rather than pixel centres -- so pass the *node* grid shape or
+    indices will unravel onto the wrong rows.
+
+    Args:
+        dataset: A dataset split.
+        keys: Condition keys holding flat node indices.
+        grid_shape: `(H, W)` of the node grid to rasterize onto.
+
+    Returns:
+        Float tensor of dense masks, shape `(N, len(keys), H, W)`.
+    """
+    n_samples = len(dataset[keys[0]])
+    height, width = grid_shape
+    masks = th.zeros(n_samples, len(keys), height, width)
+    for channel, key in enumerate(keys):
+        for index in range(n_samples):
+            indices = th.as_tensor(np.asarray(dataset[index][key])).long()
+            if indices.numel() == 0:
+                continue
+            rows, cols = indices // width, indices % width
+            valid = (rows >= 0) & (rows < height) & (cols >= 0) & (cols < width)
+            masks[index, channel, rows[valid], cols[valid]] = 1.0
+    return masks
+
+
+def get_performance_target(problem: Problem, dataset: Dataset) -> th.Tensor:
+    """Build the performance target a predictor regresses onto.
+
+    Multi-objective problems return the full objective vector rather than a
+    scalarization: the predictor should learn each objective independently, and
+    scalarizing here would bake in a weighting the model cannot undo.
+
+    Args:
+        problem: The problem, which declares the objectives.
+        dataset: A dataset split holding the objective columns.
+
+    Returns:
+        Tensor of shape `(N, 1)` for single-objective problems, `(N, n_objs)`
+        otherwise.
+    """
+    obj_keys = [name for name, _ in problem.objectives]
+    if len(obj_keys) == 1:
+        return th.as_tensor(dataset[obj_keys[0]][:]).float().unsqueeze(-1)
+    return th.stack([th.as_tensor(dataset[key][:]).float() for key in obj_keys], dim=-1)
+
+
 def flatten_dict_factory(problem: Problem, device: th.device) -> Callable:
     """Factory function to create a flatten_dict function."""
 
