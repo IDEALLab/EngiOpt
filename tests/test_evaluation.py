@@ -25,7 +25,8 @@ from engiopt.evaluation.registry import METRICS
 from engiopt.evaluation.registry import MetricSpec
 from engiopt.evaluation.registry import register_metric
 from engiopt.evaluation.spec import EvalSpec
-from engiopt.lvae.components import Encoder2D
+from tests.stubs import stub_lvae
+from tests.stubs import StubConditions
 
 # Importing the metrics package registers the built-ins.
 import engiopt.evaluation.metrics  # noqa: F401  # isort: skip
@@ -101,19 +102,30 @@ def test_builtin_metrics_declare_their_cost() -> None:
 def test_cheap_metrics_never_touch_the_solver(fake_problem: Any) -> None:
     """Running every cheap metric must not call `problem.reset`, which only the solver path does.
 
-    Latent metrics need an instrument, so they get a stub encoder here; without
-    one they would raise before proving anything about solver access.
+    Every dependency a cheap metric may have is supplied here -- instrument,
+    companion, probe data, conditions -- so each one actually runs. A metric
+    that raised for a missing input would pass this test without ever proving
+    it stays off the solver.
     """
     rng = np.random.default_rng(4)
+    shape = fake_problem.design_space.shape
     ctx = _context(
         fake_problem,
-        rng.random((6, *fake_problem.design_space.shape)),
-        rng.random((6, *fake_problem.design_space.shape)),
+        rng.random((6, *shape)),
+        rng.random((6, *shape)),
+        conditions=StubConditions(6),
     )
-    ctx.latent_encoder = Encoder2D(latent_dim=4, design_shape=fake_problem.design_space.shape)
+    ctx.latent_lvae = stub_lvae(shape)
+    ctx.latent_recon_lvae = stub_lvae(shape)
+    ctx.probe_designs = rng.random((12, *shape))
+    ctx.probe_conditions = rng.random((12, 2))
 
+    ran = 0
     for spec in METRICS.select(cost="cheap"):
         spec.fn(ctx)
+        ran += 1
+
+    assert ran == len(list(METRICS.select(cost="cheap")))
     assert fake_problem.reset_calls == 0
 
 

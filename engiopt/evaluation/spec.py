@@ -95,6 +95,12 @@ class LatentInstrument:
             Without it, `seed_N` resolves to whatever the default config was.
         revision: HuggingFace commit the package is read at.
         expected_n_active: Active latent dimensions the instrument should report.
+        recon_only_config_fingerprint: The companion autoencoder trained at the
+            *same* reconstruction threshold but without the performance
+            constraint. The dual-LVAE gap is the distance between what these two
+            reconstruct, so it isolates the effect of the performance constraint
+            alone -- which only holds if the reconstruction budget matches.
+        recon_only_seed: Training seed of the companion; defaults to `seed`.
         hf_entity: HF org/user holding the checkpoint repo.
         hf_repo_prefix: Prefix of the per-model-family repo.
     """
@@ -104,8 +110,15 @@ class LatentInstrument:
     config_fingerprint: str | None = None
     revision: str | None = None
     expected_n_active: int | None = None
+    recon_only_config_fingerprint: str | None = None
+    recon_only_seed: int | None = None
     hf_entity: str = "IDEALLab"
     hf_repo_prefix: str = "engiopt"
+
+    @property
+    def has_recon_only(self) -> bool:
+        """Whether a companion is pinned, which is what the dual gap needs."""
+        return self.recon_only_config_fingerprint is not None
 
 
 @dataclass(frozen=True)

@@ -14,22 +14,29 @@ Nothing in this module imports W&B.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, TYPE_CHECKING
 
+import numpy as np
 import torch as th
 
 from engiopt.checkpoint_store import resolve_named_checkpoint
 from engiopt.lvae.components import Encoder2D
+from engiopt.lvae.components import TrueSNDecoder2D
 from engiopt.lvae.config import LVAEConfig
+from engiopt.lvae.encode import decode_designs
+from engiopt.lvae.encode import encode_designs
 from engiopt.lvae.encode import PrunedEncoder
 
 if TYPE_CHECKING:
+    import numpy.typing as npt
     from torch import nn
 
     from engiopt.checkpoint_store import ModelSource
     from engiopt.checkpoint_store import ResolvedCheckpoint
 
 ENCODER_STATE_KEY = "encoder"
+DECODER_STATE_KEY = "decoder"
 PRUNING_MASK_KEY = "pruning_mask"
 PRUNING_FROZEN_Z_KEY = "pruning_frozen_z"
 
@@ -72,6 +79,90 @@ def build_encoder(checkpoint: dict[str, Any], config: LVAEConfig, device: th.dev
         encoder = PrunedEncoder(raw, checkpoint[PRUNING_MASK_KEY], checkpoint[PRUNING_FROZEN_Z_KEY])
 
     return encoder.to(device).eval()
+
+
+def build_decoder(checkpoint: dict[str, Any], config: LVAEConfig, device: th.device) -> nn.Module:
+    """Rebuild a decoder from a loaded checkpoint dict.
+
+    Args:
+        checkpoint: The deserialized `.pth` payload.
+        config: Architecture arguments recovered from `run_config.json`.
+        device: Device to place the decoder on.
+
+    Returns:
+        An eval-mode decoder.
+
+    Raises:
+        KeyError: If the checkpoint holds no decoder state dict.
+    """
+    if DECODER_STATE_KEY not in checkpoint:
+        raise KeyError(f"checkpoint has no {DECODER_STATE_KEY!r} state dict; keys are {sorted(checkpoint)}")
+
+    decoder = TrueSNDecoder2D(
+        latent_dim=config.latent_dim,
+        design_shape=config.design_shape,
+        lipschitz_scale=config.decoder_lipschitz_scale,
+    )
+    decoder.load_state_dict(checkpoint[DECODER_STATE_KEY])
+    return decoder.to(device).eval()
+
+
+@dataclass(frozen=True)
+class LoadedLVAE:
+    """A trained LVAE with both halves available.
+
+    Encoder-only loading is enough for distribution metrics, but anything that
+    measures a design *against the manifold* -- the projection residual, the
+    dual-LVAE gap, encode-decode projection -- has to decode as well.
+
+    Attributes:
+        encoder: Eval-mode encoder, pruning wrapper included.
+        decoder: Eval-mode decoder.
+        config: Architecture arguments recovered from `run_config.json`.
+        resolved: The checkpoint package, whose `revision` and `content_hash`
+            identify exactly which instrument produced a number.
+    """
+
+    encoder: nn.Module
+    decoder: nn.Module
+    config: LVAEConfig
+    resolved: ResolvedCheckpoint
+
+    def project(self, designs: npt.NDArray, batch_size: int = 256) -> npt.NDArray:
+        """Project designs onto the learned manifold by encoding then decoding.
+
+        Args:
+            designs: Designs of shape `(N, H, W)` or `(N, 1, H, W)`.
+            batch_size: Designs per forward pass.
+
+        Returns:
+            Reconstructed designs of shape `(N, H, W)`, clamped to `[0, 1]`.
+            The decoder is deliberately unbounded during training so its
+            Lipschitz bound holds exactly; clamping belongs at inference.
+        """
+        device = next(self.decoder.parameters()).device
+        codes = encode_designs(self.encoder, designs, device, batch_size)
+        return np.clip(decode_designs(self.decoder, codes, device, batch_size), 0.0, 1.0)
+
+
+def load_lvae(**kwargs: Any) -> LoadedLVAE:
+    """Load both halves of a trained LVAE.
+
+    Takes the same arguments as `load_lvae_encoder`.
+
+    Returns:
+        The encoder, decoder, config, and resolved checkpoint.
+    """
+    encoder, config, resolved = load_lvae_encoder(**kwargs)
+    device = next(encoder.parameters()).device
+    filename = resolved.files and next(iter(resolved.files))
+    checkpoint = th.load(resolved.files[filename], map_location=device, weights_only=False)
+    return LoadedLVAE(
+        encoder=encoder,
+        decoder=build_decoder(checkpoint, config, device),
+        config=config,
+        resolved=resolved,
+    )
 
 
 def load_lvae_encoder(

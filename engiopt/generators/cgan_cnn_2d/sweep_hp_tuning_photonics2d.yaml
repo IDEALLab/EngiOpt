@@ -1,0 +1,44 @@
+method: grid
+command:
+  - "python"
+  - "engiopt/generators/cgan_cnn_2d/cgan_cnn_2d.py"
+  - "--save-model"
+  - "${args}"
+
+metric:
+  name: g_loss
+  goal: minimize
+parameters:
+  problem_id:
+    value: "photonics2d"
+  lr_gen:
+    distribution: log_uniform_values
+    min: 0.00005
+    max: 0.005
+  lr_disc:
+    distribution: log_uniform_values
+    min: 0.00005
+    max: 0.005
+  latent_dim:
+    distribution: categorical
+    values:
+      - 16
+      - 32
+      - 64
+      - 128
+  batch_size:
+    distribution: categorical
+    values:
+      - 16
+      - 32
+      - 64
+  n_epochs:
+    distribution: categorical
+    values:
+      - 100
+      - 200
+      - 300
+  seed:
+    value: 1
+  wandb_project:
+    value: "engiopt"

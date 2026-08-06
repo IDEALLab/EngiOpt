@@ -20,6 +20,7 @@ from pathlib import Path
 import subprocess
 from typing import Any, TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
 from engiopt.core import ConditionBatch
@@ -153,11 +154,33 @@ class Evaluator:
             sample_seconds=generator.last_sample_seconds,
             objective_weights=self.spec.objective_weights,
             objective_weight_condition=self.spec.objective_weight_condition,
-            latent_encoder=self.latent_encoder,
+            latent_lvae=self.latent_lvae,
+            latent_recon_lvae=self.latent_recon_lvae,
+            sigma_designs=self.sigma_designs,
+            probe_designs=self.probe_data[0],
+            probe_conditions=self.probe_data[1],
+        )
+
+    def _load_instrument(self, *, config_fingerprint: str | None, seed: int) -> Any:
+        """Load one pinned LVAE, both halves."""
+        from engiopt.lvae.checkpoints import load_lvae
+
+        instrument = self.spec.latent_instrument
+        assert instrument is not None
+        return load_lvae(
+            problem_id=self.problem_id,
+            design_shape=tuple(self.problem.design_space.shape),  # type: ignore[arg-type]
+            algo=instrument.algo,
+            seed=seed,
+            config_fingerprint=config_fingerprint,
+            revision=instrument.revision,
+            hf_entity=instrument.hf_entity,
+            hf_repo_prefix=instrument.hf_repo_prefix,
+            device=self.device,
         )
 
     @functools.cached_property
-    def latent_encoder(self) -> Any:
+    def latent_lvae(self) -> Any:
         """The instrument pinned by the spec, loaded once and shared.
 
         Returns `None` when the spec pins no instrument; latent metrics then
@@ -172,28 +195,65 @@ class Evaluator:
         if instrument is None:
             return None
 
-        from engiopt.lvae.checkpoints import load_lvae_encoder
         from engiopt.lvae.encode import get_active_mask
 
-        encoder, _config, _resolved = load_lvae_encoder(
-            problem_id=self.problem_id,
-            design_shape=tuple(self.problem.design_space.shape),  # type: ignore[arg-type]
-            algo=instrument.algo,
-            seed=instrument.seed,
-            config_fingerprint=instrument.config_fingerprint,
-            revision=instrument.revision,
-            hf_entity=instrument.hf_entity,
-            hf_repo_prefix=instrument.hf_repo_prefix,
-        )
+        lvae = self._load_instrument(config_fingerprint=instrument.config_fingerprint, seed=instrument.seed)
 
-        n_active = int(get_active_mask(encoder).sum())
+        n_active = int(get_active_mask(lvae.encoder).sum())
         if instrument.expected_n_active is not None and n_active != instrument.expected_n_active:
             raise ValueError(
                 f"latent instrument for {self.problem_id!r} reports {n_active} active dimensions but the spec "
                 f"pinned {instrument.expected_n_active}. Latent metrics are only comparable across rows when "
                 "the instrument is identical; refusing to score against a different one."
             )
-        return encoder
+        return lvae
+
+    @functools.cached_property
+    def latent_recon_lvae(self) -> Any:
+        """The reconstruction-only companion, if the spec pins one.
+
+        Only the dual gap needs it, so its absence is not an error until that
+        metric is actually selected.
+        """
+        instrument = self.spec.latent_instrument
+        if instrument is None or not instrument.has_recon_only:
+            return None
+        return self._load_instrument(
+            config_fingerprint=instrument.recon_only_config_fingerprint,
+            seed=instrument.recon_only_seed if instrument.recon_only_seed is not None else instrument.seed,
+        )
+
+    @functools.cached_property
+    def probe_data(self) -> tuple[Any, Any]:
+        """Training designs and conditions used to fit the condition-recovery probe.
+
+        Train is the only split this touches, and only to fit the probe -- no
+        reported number is computed on it.
+
+        Returns `(None, None)` when the problem has no training split.
+        """
+        dataset = getattr(self.problem, "dataset", None)
+        if dataset is None or "train" not in dataset:
+            return None, None
+        split = dataset["train"]
+        keys = list(self.resolved.condition_keys)
+        if not keys:
+            return None, None
+        designs = np.asarray(split["optimal_design"])
+        conditions = np.stack([np.asarray(split[key], dtype=np.float64) for key in keys], axis=-1)
+        return designs, conditions
+
+    @functools.cached_property
+    def sigma_designs(self) -> Any:
+        """Validation designs used to calibrate the latent kernel bandwidth.
+
+        Returns `None` when the problem has no validation split, in which case
+        the context falls back to the reference set and says so.
+        """
+        dataset = getattr(self.problem, "dataset", None)
+        if dataset is None or "val" not in dataset:
+            return None
+        return np.asarray(dataset["val"]["optimal_design"])
 
     def score(
         self,

@@ -18,6 +18,10 @@ if TYPE_CHECKING:
 MIN_PRDC_SAMPLES = 2
 """Below two samples per set there is no neighbourhood to measure."""
 
+EIGENVALUE_FLOOR = 1e-12
+"""Eigenvalues below this are treated as zero: a PSD matrix can return
+slightly negative ones, and exact zeros would send the entropy to -inf."""
+
 
 def mmd(x: np.ndarray, y: np.ndarray, sigma: float = 1.0) -> float:
     """Compute the Maximum Mean Discrepancy (MMD) between two sets of samples.
@@ -93,6 +97,44 @@ def log_dpp_diversity(x: np.ndarray, sigma: float = 1.0) -> float:
     if sign <= 0 or not np.isfinite(logabsdet):
         return float("-inf")
     return float(logabsdet)
+
+
+def vendi_score(x: np.ndarray, sigma: float = 1.0) -> float:
+    """Effective number of distinct samples in a set.
+
+    The exponential of the von Neumann entropy of the normalized similarity
+    matrix, which reads directly as a count: `n` identical samples score 1, and
+    `n` mutually dissimilar ones score `n`.
+
+    Preferred over `dpp_diversity` for diversity. A determinant rewards any
+    perturbation that makes samples less similar, so adding noise to a collapsed
+    set *raises* it -- exactly the gaming this measure is meant to resist. The
+    entropy of the eigenvalue spectrum does not move that way, because noise
+    spreads eigenvalues without adding modes.
+
+    See Friedman & Dieng (2023), "The Vendi Score".
+
+    Args:
+        x: Samples of shape `(n, ...)`; flattened internally.
+        sigma: Bandwidth of the Gaussian kernel.
+
+    Returns:
+        The effective sample count, in `[1, n]`.
+    """
+    x_flat = x.reshape(x.shape[0], -1)
+    n = x_flat.shape[0]
+    if n == 0:
+        return 0.0
+
+    kernel = np.exp(-cdist(x_flat, x_flat, "sqeuclidean") / (2 * sigma**2)) / n
+    eigenvalues = np.linalg.eigvalsh(kernel)
+
+    # Clip: eigenvalues of a PSD matrix can come back slightly negative, and
+    # zero eigenvalues contribute nothing to entropy but would produce -inf.
+    positive = eigenvalues[eigenvalues > EIGENVALUE_FLOOR]
+    if positive.size == 0:
+        return 1.0
+    return float(np.exp(-np.sum(positive * np.log(positive))))
 
 
 def compute_median_sigma(x: np.ndarray, y: np.ndarray | None = None) -> float:

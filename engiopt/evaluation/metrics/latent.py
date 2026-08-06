@@ -1,29 +1,180 @@
-"""Latent-space metrics.
+"""Latent-space metrics, per `claude_markdowns/metric_suite.md`.
 
-Pixel-space distances treat every cell of a design as an independent coordinate,
-which makes them sensitive to things a designer does not care about -- a
-one-pixel translation, a little additive noise -- and insensitive to things they
-do, like whether a structure is connected. Measuring in the active latent
-subspace of a least-volume autoencoder instead puts distance in a space where
-directions correspond to variation the data actually contains.
+Three axes, each answering a different question about a generated design:
 
-The cost is that these metrics depend on a fitted instrument as well as on the
-designs, so the spec must pin one. See `engiopt.evaluation.spec.LatentInstrument`.
+- **Is it a valid design?** -- projection residual `r`, and optionally the
+  dual-LVAE gap. Both are measured in *pixel* space on purpose: latent-space
+  per-sample distances are uninformative here, because even a bad design gets
+  mapped to a normal-looking latent code.
+- **Does it match its stated condition?** -- paired latent distance `l_perf`
+  and condition-recovery error `e`.
+- **Is the set as a whole right?** -- LV-MMD, coverage, and LV-Vendi diversity.
 
-Bandwidths use the median heuristic rather than the spec's fixed `sigma`: the
-latent space and pixel space differ in scale by orders of magnitude, and a
-bandwidth chosen for one saturates in the other.
+Two deliberate exclusions, both from the same document:
+
+- **Conditional MMD** is degenerate here. `p(design | c)` is close to a point
+  mass -- one optimum per condition -- so estimating a per-condition
+  distribution is ill-posed. `l_perf` and condition-recovery replace it.
+- **DPP diversity** is inflated by noise, which is the failure mode the suite
+  exists to catch. LV-Vendi is the diversity measure instead.
+
+Pixel-space equivalents are registered alongside as the baselines each latent
+metric has to beat, not as competing recommendations.
+
+The bandwidth is calibrated on the validation split, so nothing reported is
+tuned on the reference set it scores against.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import numpy as np
+
 from engiopt import metrics as metrics_mod
 from engiopt.evaluation.registry import register_metric
 
 if TYPE_CHECKING:
+    import numpy.typing as npt
+
     from engiopt.evaluation.context import EvaluationContext
+
+COVERAGE_QUANTILE = 0.05
+"""Neighbour radius tau, as a quantile of reference-to-reference distances."""
+
+
+def _residuals(designs: npt.NDArray, projected: npt.NDArray) -> npt.NDArray:
+    """Per-sample L2 distance between designs and their manifold projections."""
+    flat = np.asarray(designs).reshape(len(designs), -1)
+    return np.linalg.norm(flat - np.asarray(projected).reshape(len(projected), -1), axis=1)
+
+
+# ----------------------------------------------------------------------
+# Axis 1 -- is it a valid design?
+# ----------------------------------------------------------------------
+
+
+@register_metric(
+    "lv_residual",
+    family="latent",
+    cost="cheap",
+    higher_is_better=False,
+    outputs=("lv_residual_mean", "lv_residual_p90"),
+    description="Pixel-space distance from each generated design to its projection on the LVAE manifold.",
+)
+def lv_residual(ctx: EvaluationContext) -> dict[str, float]:
+    """How far each generated design sits off the manifold of real optima.
+
+    Measured in pixel space rather than latent space: the encoder maps an
+    invalid design to a perfectly ordinary-looking code, so the distance only
+    becomes visible after decoding back out.
+
+    The p90 is reported alongside the mean because a generator that is usually
+    fine and occasionally far off-manifold is a different failure from one that
+    is uniformly mediocre, and the mean alone cannot tell them apart.
+    """
+    residuals = _residuals(ctx.gen_designs, ctx.gen_projected)
+    return {
+        "lv_residual_mean": float(residuals.mean()),
+        "lv_residual_p90": float(np.percentile(residuals, 90)),
+    }
+
+
+@register_metric(
+    "lv_dual_gap",
+    family="latent",
+    cost="cheap",
+    higher_is_better=False,
+    description="Distance between the performance-constrained and reconstruction-only reconstructions.",
+)
+def lv_dual_gap(ctx: EvaluationContext) -> float:
+    """What the performance constraint changes about a design's reconstruction.
+
+    Two autoencoders trained to the same reconstruction budget, one of which
+    also had to predict performance, will reconstruct the same design
+    differently exactly where performance-relevant structure lives. The size of
+    that disagreement is the signal.
+
+    `metric_suite.md` marks this provisional: keep it only if it earns its place
+    against the residual in a `COG ~ r + gap` regression, and drop it if the two
+    turn out to be strongly correlated.
+    """
+    perf = ctx.require_latent_lvae()
+    recon = ctx.require_recon_only_lvae()
+
+    designs = np.asarray(ctx.gen_designs)
+    perf_projection = perf.project(designs).reshape(len(designs), -1)
+    recon_projection = recon.project(designs).reshape(len(designs), -1)
+    return float(np.linalg.norm(perf_projection - recon_projection, axis=1).mean())
+
+
+# ----------------------------------------------------------------------
+# Axis 2 -- does it match the condition it was asked for?
+# ----------------------------------------------------------------------
+
+
+@register_metric(
+    "lv_paired_distance",
+    family="conditions",
+    cost="cheap",
+    higher_is_better=False,
+    description="Latent distance between each generated design and the known optimum for its condition.",
+)
+def lv_paired_distance(ctx: EvaluationContext) -> float:
+    """Distance to the design that condition should have produced.
+
+    Every generated design is paired with the dataset optimum for the same
+    condition, so this asks a sharper question than any distribution metric: not
+    "does this set look right" but "is *this* design what *this* condition
+    called for". Restricted to the performance-carrying latent dimensions, and
+    standardized per dimension so no single axis dominates by scale alone.
+    """
+    generated, reference = ctx.latent_codes
+    perf_dim = min(ctx.require_latent_lvae().config.perf_dim, generated.shape[1])
+
+    gen_slice = generated[:, :perf_dim]
+    ref_slice = reference[:, :perf_dim]
+
+    scale = ref_slice.std(axis=0)
+    scale[scale == 0] = 1.0
+    return float(np.linalg.norm((gen_slice - ref_slice) / scale, axis=1).mean())
+
+
+@register_metric(
+    "cond_recovery",
+    family="conditions",
+    cost="cheap",
+    higher_is_better=False,
+    outputs=("cond_recovery_err", "cond_probe_r2"),
+    description="Error in reading the requested condition back out of a generated design's latent code.",
+)
+def cond_recovery(ctx: EvaluationContext) -> dict[str, float]:
+    """Whether a generated design still carries the condition it was asked for.
+
+    A linear probe is fitted on training data to read conditions out of frozen
+    latent codes, then applied to generated designs. Large error means the model
+    produced something whose latent code no longer says what was requested --
+    the model ignored its input, or drifted off the manifold where the mapping
+    holds.
+
+    `cond_probe_r2` is reported alongside because the error is only
+    interpretable if the probe works at all: a low R-squared on training data
+    means conditions are not linearly readable from this encoder, and the error
+    column then says nothing about the generator.
+    """
+    weights, r_squared = ctx.condition_probe
+    generated, _ = ctx.latent_codes
+
+    requested = ctx.requested_conditions
+    predicted = np.hstack([generated, np.ones((len(generated), 1))]) @ weights
+
+    error = float(np.linalg.norm(predicted - requested, axis=1).mean())
+    return {"cond_recovery_err": error, "cond_probe_r2": float(np.nanmean(r_squared))}
+
+
+# ----------------------------------------------------------------------
+# Axis 3 -- is the set as a whole right?
+# ----------------------------------------------------------------------
 
 
 @register_metric(
@@ -35,44 +186,83 @@ if TYPE_CHECKING:
 )
 def lv_mmd(ctx: EvaluationContext) -> float:
     """Distribution distance measured in latent rather than pixel space."""
-    gen, ref = ctx.latent_codes
-    sigma = metrics_mod.compute_median_sigma(ref)
-    return float(metrics_mod.mmd(gen, ref, sigma=sigma))
+    generated, reference = ctx.latent_codes
+    return float(metrics_mod.mmd(generated, reference, sigma=ctx.latent_sigma))
 
 
 @register_metric(
-    "lv_dpp",
+    "lv_coverage",
     family="latent",
     cost="cheap",
     higher_is_better=True,
-    description="Log-determinant DPP diversity in the active latent subspace.",
+    description="Fraction of reference optima with a generated design within tau in latent space.",
 )
-def lv_dpp(ctx: EvaluationContext) -> float:
-    """Diversity measured in latent space, on a log scale.
+def lv_coverage(ctx: EvaluationContext) -> float:
+    """How much of the reference set the generator actually reaches.
 
-    Uses the log-determinant form because the raw determinant of a 50x50 kernel
-    matrix underflows toward the limit of double precision, at which point it
-    reports rounding error rather than diversity.
+    Distribution distance can look healthy while whole regions go unvisited, so
+    this counts reference optima directly: a mode the generator never produces
+    leaves its neighbourhood empty. `tau` is set from the reference set's own
+    nearest-neighbour spacing, so it adapts to the space rather than importing
+    an arbitrary radius.
     """
-    gen, ref = ctx.latent_codes
-    sigma = metrics_mod.compute_median_sigma(ref)
-    return metrics_mod.log_dpp_diversity(gen, sigma=sigma)
+    generated, reference = ctx.latent_codes
+    from scipy.spatial.distance import cdist
+
+    within_reference = cdist(reference, reference)
+    np.fill_diagonal(within_reference, np.inf)
+    tau = float(np.quantile(within_reference.min(axis=1), 1.0 - COVERAGE_QUANTILE))
+
+    nearest_generated = cdist(reference, generated).min(axis=1)
+    return float((nearest_generated <= tau).mean())
 
 
 @register_metric(
-    "lv_prdc",
-    family="latent",
+    "lv_vendi",
+    family="diversity",
     cost="cheap",
     higher_is_better=True,
-    outputs=("lv_precision", "lv_recall", "lv_density", "lv_coverage"),
-    description="Precision, recall, density, and coverage in the active latent subspace.",
+    description="Vendi score (effective number of distinct designs) over latent codes.",
 )
-def lv_prdc(ctx: EvaluationContext) -> dict[str, float]:
-    """Split latent-space fidelity from latent-space diversity.
+def lv_vendi(ctx: EvaluationContext) -> float:
+    """Effective number of distinct designs in the generated set.
 
-    A single distance conflates generating implausible designs with generating
-    too few distinct ones; these four separate the two failures.
+    The exponential of the von Neumann entropy of the normalized kernel matrix,
+    which reads directly as a count: a set of `n` identical designs scores 1, a
+    set of `n` mutually dissimilar ones scores `n`.
+
+    Preferred over DPP diversity because it is not inflated by noise -- adding
+    Gaussian noise to a collapsed set raises a determinant-based score while
+    leaving the effective count where it belongs.
     """
-    gen, ref = ctx.latent_codes
-    scores = metrics_mod.compute_prdc(ref, gen)
-    return {f"lv_{name}": value for name, value in scores.items()}
+    generated, _ = ctx.latent_codes
+    return metrics_mod.vendi_score(generated, sigma=ctx.latent_sigma)
+
+
+# ----------------------------------------------------------------------
+# Pixel-space baselines -- what the latent metrics have to beat
+# ----------------------------------------------------------------------
+
+
+@register_metric(
+    "pixel_paired_distance",
+    family="conditions",
+    cost="cheap",
+    higher_is_better=False,
+    description="Pixel-space distance between each generated design and the optimum for its condition.",
+)
+def pixel_paired_distance(ctx: EvaluationContext) -> float:
+    """The baseline `lv_paired_distance` has to beat."""
+    return float(np.linalg.norm(ctx.gen_flat - ctx.ref_flat, axis=1).mean())
+
+
+@register_metric(
+    "pixel_vendi",
+    family="diversity",
+    cost="cheap",
+    higher_is_better=True,
+    description="Vendi score over raw pixels, the baseline for lv_vendi.",
+)
+def pixel_vendi(ctx: EvaluationContext) -> float:
+    """The baseline `lv_vendi` has to beat."""
+    return metrics_mod.vendi_score(ctx.gen_flat, sigma=ctx.sigma)

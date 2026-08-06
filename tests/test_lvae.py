@@ -17,6 +17,8 @@ from engiopt.lvae.encode import encode_designs
 from engiopt.lvae.encode import get_active_mask
 from engiopt.lvae.encode import latent_dim_of
 from engiopt.lvae.encode import PrunedEncoder
+from tests.stubs import STUB_LATENT_DIM
+from tests.stubs import stub_lvae
 
 LATENT_DIM = 8
 DESIGN_SHAPE = (50, 100)
@@ -110,7 +112,7 @@ def test_config_rejects_a_non_lvae_package() -> None:
 
 
 # ----------------------------------------------------------------------
-# Latent-space metrics
+# Latent-space metrics (metric_suite.md roster)
 # ----------------------------------------------------------------------
 
 
@@ -120,66 +122,91 @@ class _StubProblem:
     design_space = type("Space", (), {"shape": DESIGN_SHAPE})()
 
 
-def _context(pruned: PrunedEncoder | None, n: int = 6) -> EvaluationContext:
+def _context(*, with_instrument: bool, with_companion: bool = False, n: int = 6) -> EvaluationContext:
     rng = np.random.default_rng(0)
     return EvaluationContext(
         problem=_StubProblem(),
         problem_id="beams2d",
         gen_designs=rng.random((n, *DESIGN_SHAPE)).astype(np.float32),
         ref_designs=rng.random((n, *DESIGN_SHAPE)).astype(np.float32),
-        latent_encoder=pruned,
+        latent_lvae=stub_lvae(DESIGN_SHAPE, pruned_dims=[1]) if with_instrument else None,
+        latent_recon_lvae=stub_lvae(DESIGN_SHAPE, pruned_dims=[1]) if with_companion else None,
     )
+
+
+LATENT_METRICS = ("lv_mmd", "lv_residual", "lv_coverage", "lv_vendi", "lv_paired_distance")
 
 
 def test_latent_metrics_refuse_to_run_without_a_pinned_instrument() -> None:
     """A latent number is meaningless unless the spec says what measured it."""
-    ctx = _context(None)
-    for name in ("lv_mmd", "lv_dpp", "lv_prdc"):
+    ctx = _context(with_instrument=False)
+    for name in LATENT_METRICS:
         with pytest.raises(LatentInstrumentUnavailableError):
             METRICS[name].fn(ctx)
 
 
-def test_latent_metrics_measure_only_the_active_subspace(pruned: PrunedEncoder) -> None:
+def test_the_dual_gap_names_its_missing_companion() -> None:
+    """Failing on the instrument would misdirect: it is the companion that is absent."""
+    ctx = _context(with_instrument=True)
+    with pytest.raises(LatentInstrumentUnavailableError, match="recon_only_config_fingerprint"):
+        METRICS["lv_dual_gap"].fn(ctx)
+
+
+def test_latent_metrics_measure_only_the_active_subspace() -> None:
     """Codes handed to the metrics exclude pruned dimensions."""
-    ctx = _context(pruned)
+    ctx = _context(with_instrument=True)
     generated, reference = ctx.latent_codes
-    expected = LATENT_DIM - len(PRUNED_DIMS)
-    assert generated.shape[1] == expected
-    assert reference.shape[1] == expected
+    assert generated.shape[1] == STUB_LATENT_DIM - 1
+    assert reference.shape[1] == STUB_LATENT_DIM - 1
 
 
-def test_latent_metrics_produce_finite_values(pruned: PrunedEncoder) -> None:
-    """The registered latent metrics return usable numbers."""
-    ctx = _context(pruned)
+def test_the_suite_produces_finite_values() -> None:
+    """Every registered latent metric returns a usable number."""
+    ctx = _context(with_instrument=True, with_companion=True)
     assert np.isfinite(METRICS["lv_mmd"].fn(ctx))
-    assert np.isfinite(METRICS["lv_dpp"].fn(ctx))
-    assert set(METRICS["lv_prdc"].fn(ctx)) == {"lv_precision", "lv_recall", "lv_density", "lv_coverage"}
+    assert np.isfinite(METRICS["lv_coverage"].fn(ctx))
+    assert np.isfinite(METRICS["lv_vendi"].fn(ctx))
+    assert np.isfinite(METRICS["lv_paired_distance"].fn(ctx))
+    assert np.isfinite(METRICS["lv_dual_gap"].fn(ctx))
+    assert set(METRICS["lv_residual"].fn(ctx)) == {"lv_residual_mean", "lv_residual_p90"}
 
 
-def test_log_dpp_survives_where_the_raw_determinant_underflows() -> None:
-    """At n=50 the raw determinant collapses toward floating-point zero.
+def test_the_residual_is_measured_in_pixel_space() -> None:
+    """A design already on the manifold has near-zero residual; an off-manifold one does not.
 
-    That is the regime every leaderboard row sits in, so the diversity column
-    would report rounding error rather than diversity.
+    The residual has to be a pixel-space quantity: the encoder maps an invalid
+    design to an ordinary-looking latent code, so the error only appears after
+    decoding back out.
     """
-    samples = np.random.default_rng(0).normal(size=(50, 100))
-    assert metrics_mod.dpp_diversity(samples, sigma=10.0) < 1e-9
-    assert np.isfinite(metrics_mod.log_dpp_diversity(samples, sigma=10.0))
+    ctx = _context(with_instrument=True)
+    projected = ctx.gen_projected
+    assert projected.shape == ctx.gen_designs.shape
+    on_manifold = np.linalg.norm(projected.reshape(len(projected), -1) - projected.reshape(len(projected), -1))
+    assert on_manifold == pytest.approx(0.0)
 
 
-def test_prdc_separates_fidelity_from_coverage() -> None:
-    """Identical sets score perfectly; disjoint sets score zero."""
+def test_vendi_is_not_inflated_by_noise_the_way_dpp_is() -> None:
+    """The reason metric_suite.md specifies Vendi over DPP for diversity.
+
+    Adding noise to a collapsed set makes its samples less similar, which a
+    determinant rewards. The effective-count reading resists that.
+    """
     rng = np.random.default_rng(0)
-    real = rng.normal(size=(40, 6))
-    assert metrics_mod.compute_prdc(real, real)["precision"] == 1.0
-    assert metrics_mod.compute_prdc(real, real + 50)["coverage"] == 0.0
+    collapsed = np.repeat(rng.normal(size=(1, 8)), 20, axis=0)
+    noisy = collapsed + rng.normal(scale=0.5, size=collapsed.shape)
+
+    dpp_inflation = metrics_mod.dpp_diversity(noisy, sigma=3.0) / metrics_mod.dpp_diversity(collapsed, sigma=3.0)
+    vendi_inflation = metrics_mod.vendi_score(noisy, sigma=3.0) / metrics_mod.vendi_score(collapsed, sigma=3.0)
+    assert dpp_inflation > vendi_inflation
 
 
-def test_prdc_is_nan_rather_than_wrong_on_tiny_sets() -> None:
-    """With one sample per set there is no neighbourhood to measure."""
+def test_vendi_counts_effective_samples() -> None:
+    """Identical samples collapse to one; the score reads as a count."""
     rng = np.random.default_rng(0)
-    scores = metrics_mod.compute_prdc(rng.normal(size=(1, 6)), rng.normal(size=(1, 6)))
-    assert all(np.isnan(value) for value in scores.values())
+    varied = rng.normal(size=(20, 8))
+    collapsed = np.repeat(varied[:1], 20, axis=0)
+    assert metrics_mod.vendi_score(collapsed, sigma=3.0) == pytest.approx(1.0, abs=1e-6)
+    assert metrics_mod.vendi_score(varied, sigma=3.0) > 1.0
 
 
 def test_median_sigma_adapts_to_the_scale_of_its_input() -> None:
