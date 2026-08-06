@@ -1021,7 +1021,10 @@ if __name__ == "__main__":
                         algo=args.algo,
                         seed=args.seed,
                         checkpoint_files={"cvqgan.pth": "cvqgan.pth"},
-                        run_config=vars(args),
+                        # Both are derived at runtime rather than passed as flags,
+                        # so recording them is what lets a checkpoint be rebuilt
+                        # from its own config without re-reading the dataset.
+                        run_config={**vars(args), "image_channels": image_channels, "latent_size": latent_size},
                         **checkpoint_identity(args),
                         condition_keys=conditions,
                         condition_stats=condition_stats,
@@ -1143,7 +1146,10 @@ if __name__ == "__main__":
                         "vqgan.pth": "vqgan.pth",
                         "discriminator.pth": "discriminator.pth",
                     },
-                    run_config=vars(args),
+                    # Both are derived at runtime rather than passed as flags,
+                    # so recording them is what lets a checkpoint be rebuilt
+                    # from its own config without re-reading the dataset.
+                    run_config={**vars(args), "image_channels": image_channels, "latent_size": latent_size},
                     **checkpoint_identity(args),
                     condition_keys=conditions,
                     condition_stats=condition_stats,
@@ -1290,7 +1296,10 @@ if __name__ == "__main__":
             algo=args.algo,
             seed=args.seed,
             checkpoint_files=checkpoint_files,
-            run_config=vars(args),
+            # The transformer stage writes last to the same package path, so
+            # this is the run_config.json a loader ultimately reads. It must
+            # carry the derived values too, or they are overwritten away.
+            run_config={**vars(args), "image_channels": image_channels, "latent_size": latent_size},
             **checkpoint_identity(args),
             condition_keys=conditions,
             condition_stats=condition_stats,

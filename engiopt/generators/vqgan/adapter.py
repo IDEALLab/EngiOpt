@@ -61,7 +61,10 @@ class VQGANGenerator(Generator):
             decoder_start_resolution=latent_size,
             decoder_attn_resolutions=config["decoder_attn_resolutions"],
             decoder_num_res_blocks=config["decoder_num_res_blocks"],
-            image_channels=config["image_channels"],
+            # Derived from the dataset at training time, so packages published
+            # before it was recorded do not carry it. Every 2D problem here is a
+            # single density field, which is what that default encodes.
+            image_channels=config.get("image_channels", 1),
             latent_dim=config["latent_dim"],
             num_codebook_vectors=config["num_codebook_vectors"],
         )
