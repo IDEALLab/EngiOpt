@@ -395,3 +395,68 @@ def test_already_evaluated_detects_published_work() -> None:
     assert not already_evaluated(board, algo_id="cgan_cnn_2d", config_fingerprint="bbbb2222", seed=1)
     assert not already_evaluated(board, algo_id="my_model", config_fingerprint="aaaa1111", seed=1)
     assert not already_evaluated(pd.DataFrame(), algo_id="anything")
+
+
+# ----------------------------------------------------------------------
+# Novelty, cost, and the linear baseline
+# ----------------------------------------------------------------------
+
+
+def _novelty_context(problem: Any, gen: np.ndarray, train: np.ndarray, ref: np.ndarray) -> EvaluationContext:
+    return _context(problem, gen, ref, train_designs=train, sigma_designs=train[:30], sigma=5.0)
+
+
+def test_distribution_metrics_reward_memorization_and_novelty_catches_it(fake_problem: Any) -> None:
+    """The gap novelty exists to close.
+
+    MMD is minimized by reproducing the training distribution, so a model that
+    replays its training set verbatim scores better than one that generalizes.
+    PCA-MMD inherits the same blind spot. Only distance-to-training-set falls.
+    """
+    rng = np.random.default_rng(0)
+    shape = fake_problem.design_space.shape
+    train = rng.random((60, *shape))
+    ref = train[:12] + rng.normal(scale=0.01, size=(12, *shape))
+
+    memorizer = _novelty_context(fake_problem, train[:12].copy(), train, ref)
+    honest = _novelty_context(fake_problem, ref + rng.normal(scale=0.05, size=ref.shape), train, ref)
+
+    # Lower MMD is "better", and the memorizer wins it.
+    assert METRICS["mmd"].fn(memorizer) < METRICS["mmd"].fn(honest)
+    assert METRICS["pca_mmd"].fn(memorizer) < METRICS["pca_mmd"].fn(honest)
+
+    # Novelty is the only column that tells them apart the right way round.
+    assert METRICS["novelty"].fn(memorizer) == pytest.approx(0.0, abs=1e-9)
+    assert METRICS["novelty"].fn(honest) > METRICS["novelty"].fn(memorizer)
+
+
+def test_novelty_is_nan_without_a_training_anchor(fake_problem: Any) -> None:
+    """Measured against train specifically; without it there is nothing to say."""
+    rng = np.random.default_rng(1)
+    shape = fake_problem.design_space.shape
+    ctx = _context(fake_problem, rng.random((4, *shape)), rng.random((4, *shape)))
+    assert np.isnan(METRICS["novelty"].fn(ctx))
+
+
+def test_cost_metrics_report_what_was_measured(fake_problem: Any) -> None:
+    """Sampling time was already recorded; registering it makes it rankable."""
+    rng = np.random.default_rng(2)
+    shape = fake_problem.design_space.shape
+    ctx = _context(
+        fake_problem,
+        rng.random((4, *shape)),
+        rng.random((4, *shape)),
+        sample_seconds=2.5,
+        model_params=1234,
+    )
+    assert METRICS["gen_seconds"].fn(ctx) == pytest.approx(2.5)
+    assert METRICS["params"].fn(ctx) == pytest.approx(1234)
+
+
+def test_cost_metrics_are_nan_when_unmeasured(fake_problem: Any) -> None:
+    """A missing measurement is reported as missing, not as zero cost."""
+    rng = np.random.default_rng(3)
+    shape = fake_problem.design_space.shape
+    ctx = _context(fake_problem, rng.random((4, *shape)), rng.random((4, *shape)))
+    assert np.isnan(METRICS["gen_seconds"].fn(ctx))
+    assert np.isnan(METRICS["params"].fn(ctx))

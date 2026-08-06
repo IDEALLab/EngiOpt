@@ -5,7 +5,9 @@ Importing this package registers every built-in metric in
 the same way: decorate a function with `@register_metric` and import the module.
 """
 
+from engiopt.evaluation.metrics import baselines
 from engiopt.evaluation.metrics import builtin
+from engiopt.evaluation.metrics import cost
 from engiopt.evaluation.metrics import latent
 
-__all__ = ["builtin", "latent"]
+__all__ = ["baselines", "builtin", "cost", "latent"]

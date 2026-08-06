@@ -63,6 +63,19 @@ and seed, or changing the training code, yields different weights under the same
 name, so without it a row cannot be traced back to the model that earned it.
 """
 
+NOVELTY_ANCHOR_SAMPLES = 1000
+"""Training designs sampled as the novelty anchor; see `Evaluator.train_designs`."""
+
+
+def _count_parameters(generator: Generator) -> int | None:
+    """Total parameters across every torch module a generator holds."""
+    import torch as th
+
+    modules = [value for value in vars(generator).values() if isinstance(value, th.nn.Module)]
+    if not modules:
+        return None
+    return sum(p.numel() for module in modules for p in module.parameters())
+
 
 @dataclass
 class Evaluator:
@@ -157,6 +170,8 @@ class Evaluator:
             latent_lvae=self.latent_lvae,
             latent_recon_lvae=self.latent_recon_lvae,
             sigma_designs=self.sigma_designs,
+            train_designs=self.train_designs,
+            model_params=_count_parameters(generator),
         )
 
     def _load_instrument(self, *, config_fingerprint: str | None, seed: int) -> Any:
@@ -220,6 +235,26 @@ class Evaluator:
             config_fingerprint=instrument.recon_only_config_fingerprint,
             seed=instrument.recon_only_seed if instrument.recon_only_seed is not None else instrument.seed,
         )
+
+    @functools.cached_property
+    def train_designs(self) -> Any:
+        """Training designs used as the novelty anchor.
+
+        Capped: novelty is a nearest-neighbour distance, and the nearest
+        neighbour stops moving long before the whole split is searched, so the
+        full set would cost memory for precision nobody reads. Sampling is
+        seeded so the anchor is the same for every model on the board.
+
+        Returns `None` when the problem has no training split.
+        """
+        dataset = getattr(self.problem, "dataset", None)
+        if dataset is None or "train" not in dataset:
+            return None
+        designs = np.asarray(dataset["train"]["optimal_design"])
+        if len(designs) <= NOVELTY_ANCHOR_SAMPLES:
+            return designs
+        rng = np.random.default_rng(self.spec.condition_seed)
+        return designs[rng.choice(len(designs), NOVELTY_ANCHOR_SAMPLES, replace=False)]
 
     @functools.cached_property
     def sigma_designs(self) -> Any:

@@ -139,6 +139,15 @@ class EvaluationContext:
     latent_recon_lvae: Any = None
     """Companion trained at the same reconstruction threshold without the
     performance constraint. Only the dual gap needs it."""
+    train_designs: npt.NDArray[Any] | None = None
+    """Training designs, the anchor `novelty` measures against.
+
+    It has to be *train* specifically: a model that memorized its training set
+    still looks novel against any other split, which is the failure novelty
+    exists to catch. `metric_suite.md` sanctions train for this one use.
+    """
+    model_params: int | None = None
+    """Parameter count of the generator that produced `gen_designs`."""
     sigma_designs: npt.NDArray[Any] | None = None
     """Validation-split designs used to calibrate the latent kernel bandwidth.
 
