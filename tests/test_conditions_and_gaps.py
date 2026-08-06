@@ -13,10 +13,14 @@ import numpy as np
 import pytest
 
 from engiopt.evaluation.context import EvaluationContext
+from engiopt.evaluation.registry import METRICS
 from engiopt.evaluation.context import MultiObjectiveScalarizationError
 from engiopt.transforms import get_image_condition_keys
 from engiopt.transforms import get_scalar_condition_keys
 from tests.conftest import FakeViolations
+
+# Importing the metrics package registers the built-ins.
+import engiopt.evaluation.metrics  # noqa: F401  # isort: skip
 
 
 class _Problem:
@@ -346,3 +350,29 @@ def test_array_valued_conditions_survive_the_constraint_check(fake_problem: Any)
 
     assert isinstance(seen["fixed_elements"], np.ndarray)
     assert seen["rmin"] == 2.0
+
+
+def test_feasibility_survives_an_optimizer_that_refuses_the_design(fake_problem: Any) -> None:
+    """An invalid design is exactly when `viol` matters, and when `optimize` may raise.
+
+    Computing feasibility inside the optimizer pass meant the metric was lost on
+    precisely the designs it was meant to flag.
+    """
+
+    def refuse(design: Any, config: Any = None) -> Any:
+        raise RuntimeError("optimizer rejected an invalid starting point")
+
+    fake_problem.optimize = refuse
+    fake_problem.infeasible = True
+    ctx = _feasibility_context(fake_problem, 0.5)
+
+    assert METRICS["viol"].fn(ctx) == 1.0
+
+
+def test_asking_only_for_viol_does_not_run_the_optimizer(fake_problem: Any) -> None:
+    """Feasibility is a constraint check, so it should not cost a full optimization."""
+    ctx = _feasibility_context(fake_problem, 0.5)
+
+    METRICS["viol"].fn(ctx)
+
+    assert fake_problem.optimize_calls == 0

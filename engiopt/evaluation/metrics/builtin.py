@@ -64,7 +64,7 @@ def dpp(ctx: EvaluationContext) -> float:
 @register_metric(
     "viol",
     family="feasibility",
-    cost="expensive",
+    cost="cheap",
     higher_is_better=False,
     description="Fraction of designs violating the problem's constraints or their volume budget.",
 )
@@ -75,10 +75,12 @@ def viol(ctx: EvaluationContext) -> float:
     the spec's `volume_condition` adds the volume-fraction budget for problems
     that have one.
 
-    Marked expensive only because it is computed during the shared
-    optimizer/simulator pass; the arithmetic itself is trivial.
+    Cheap, and deliberately so. Feasibility describes the design as generated,
+    so it is judged before any solver runs -- which means it still reports when
+    the optimizer refuses to start from an invalid design, the case where the
+    answer matters most.
     """
-    values = ctx.optimization.viol
+    values = ctx.feasibility
     return float(np.mean(values)) if values else float("nan")
 
 

@@ -132,23 +132,18 @@ def test_digest_covers_array_valued_conditions() -> None:
 def test_committed_spec_reproduces_its_frozen_conditions(path: Any) -> None:
     """The check the reviewer ran by hand: every spec must resolve, not just parse.
 
-    `resolve` raises if the digest no longer matches, so this fails loudly when
-    a dataset moves out from under a published spec.
+    `resolve` raises if the digest no longer matches, or if the installed
+    EngiBench defines the problem differently than the spec was frozen against.
 
-    A spec frozen against a *different definition of the problem* is skipped
-    rather than failed: the installed EngiBench cannot draw those conditions at
-    all, so there is nothing here to verify. The skip names the mismatch, and a
-    digest mismatch under a matching definition still fails.
+    Both are failures, not skips. Skipping the mismatch would mean this job goes
+    green precisely when the EngiBench pin has stopped taking effect -- which is
+    the one thing it exists to catch.
     """
     from engibench.utils.all_problems import BUILTIN_PROBLEMS
 
     spec = EvalSpec.load(str(path))
     problem = BUILTIN_PROBLEMS[spec.problem_id]()
     problem.reset(seed=spec.condition_seed)
-    try:
-        spec.check_problem_definition(problem)
-    except ProblemDefinitionMismatchError as mismatch:
-        pytest.skip(str(mismatch))
 
     resolved = spec.resolve(problem)
 

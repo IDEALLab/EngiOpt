@@ -699,9 +699,13 @@ if __name__ == "__main__":
     if args.drop_constant_conditions:
         training_ds, conditions = drop_constant(training_ds, conditions)
 
-    # Optionally normalize condition columns
+    # Optionally normalize condition columns. The statistics are recorded in the
+    # checkpoint so evaluation reproduces this exact scale rather than refitting
+    # on its own much smaller sample.
+    condition_stats = None
     if args.normalize_conditions:
         training_ds, mean, std = normalize(training_ds, conditions)
+        condition_stats = {"mean": mean.tolist(), "std": std.tolist()}
 
     n_conds = len(conditions)
     args.cond_dim = n_conds
@@ -999,6 +1003,7 @@ if __name__ == "__main__":
                         run_config=vars(args),
                         **checkpoint_identity(args),
                         condition_keys=conditions,
+                        condition_stats=condition_stats,
                         metadata={"stage": "cvqgan"},
                         primary_files=["cvqgan.pth"],
                     )
@@ -1120,6 +1125,7 @@ if __name__ == "__main__":
                     run_config=vars(args),
                     **checkpoint_identity(args),
                     condition_keys=conditions,
+                    condition_stats=condition_stats,
                     metadata={"stage": "vqgan"},
                     primary_files=["vqgan.pth"],
                 )
@@ -1266,6 +1272,7 @@ if __name__ == "__main__":
             run_config=vars(args),
             **checkpoint_identity(args),
             condition_keys=conditions,
+            condition_stats=condition_stats,
             metadata={"stage": "transformer"},
             primary_files=["transformer.pth"],
         )

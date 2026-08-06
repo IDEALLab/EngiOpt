@@ -30,6 +30,14 @@ algorithm. Without it a 50-config sweep would collapse onto one row per seed,
 silently keeping only whichever ran last.
 """
 
+RANK_PARTITION = ["problem_id", "spec_version"]
+"""Within which group a rank of 1 means "best".
+
+Two models are only comparable if they were scored on the same problem under the
+same protocol, so ranks restart per partition rather than running across the
+whole table.
+"""
+
 ENTRY_KEY = ["problem_id", "algo_id", "config_fingerprint", "spec_version"]
 """What a *ranked entry* is: one configuration of one algorithm under one spec.
 
@@ -82,7 +90,10 @@ def rank(
 
     Returns:
         One row per `ENTRY_KEY` sorted best-first, with a `rank` column and the
-        seed count that produced each value.
+        seed count that produced each value. Ranks restart at 1 within each
+        `(problem_id, spec_version)`: a beams2d score and a photonics2d score
+        measure different things, so placing them in one ordering would invent a
+        comparison that does not exist.
     """
     from engiopt.evaluation.registry import METRICS
 
@@ -96,7 +107,8 @@ def rank(
         .sort_values("value", ascending=not spec.higher_is_better)
         .reset_index(drop=True)
     )
-    grouped["rank"] = grouped.index + 1
+    partition = [col for col in RANK_PARTITION if col in grouped.columns]
+    grouped["rank"] = grouped.groupby(partition).cumcount() + 1 if partition else grouped.index + 1
     return grouped.rename(columns={"value": f"{metric}_{aggregate}"})
 
 
@@ -164,22 +176,47 @@ def load_from_hub(repo_id: str, *, token: str | None = None) -> pd.DataFrame:
 
 
 def _load_from_hub(repo_id: str, *, token: str | None = None) -> tuple[pd.DataFrame, str | None]:
-    """Download the board together with the repo commit it was read at."""
+    """Download the board together with the repo commit it was read at.
+
+    The two "not found" cases are different and must stay different:
+
+    - **No repo yet.** Nothing exists, so there is no revision either, and the
+      first publish creates it.
+    - **Repo exists, no `leaderboard.csv` yet.** The repo already has a head
+      commit, and returning it matters: it becomes the `parent_commit` of the
+      first publish, so two jobs racing to publish first cannot overwrite each
+      other.
+
+    A missing repo is also what the Hub reports for a private repo the caller
+    cannot see, so that case is separated by status code rather than by
+    exception type -- treating a 401 as an empty board would let the next
+    publish delete everything.
+    """
     from huggingface_hub import hf_hub_download
     from huggingface_hub import HfApi
     from huggingface_hub.errors import EntryNotFoundError
     from huggingface_hub.errors import RepositoryNotFoundError
-    from huggingface_hub.errors import RevisionNotFoundError
 
     try:
         revision = HfApi(token=token).repo_info(repo_id=repo_id, repo_type="dataset").sha
+    except RepositoryNotFoundError as exc:
+        if _status_code(exc) in {401, 403}:
+            raise
+        return pd.DataFrame(), None
+
+    try:
         path = hf_hub_download(
             repo_id=repo_id, filename=LEADERBOARD_FILE, repo_type="dataset", revision=revision, token=token
         )
-    # Only "there is nothing published yet" is a normal, empty-board outcome.
-    except (EntryNotFoundError, RepositoryNotFoundError, RevisionNotFoundError):
-        return pd.DataFrame(), None
+    # The repo is there but empty; keep its revision for the first publish.
+    except EntryNotFoundError:
+        return pd.DataFrame(), revision
     return pd.read_csv(path), revision
+
+
+def _status_code(exc: Exception) -> int | None:
+    """HTTP status behind a `huggingface_hub` error, when it carries one."""
+    return getattr(getattr(exc, "response", None), "status_code", None)
 
 
 def push_to_hub(
@@ -252,14 +289,25 @@ def _is_stale_commit(exc: Exception) -> bool:
 
 
 def already_evaluated(board: pd.DataFrame, **key: Any) -> bool:
-    """Whether the board already holds a row for the given `ROW_KEY` values.
+    """Whether the board already holds a row for exactly this model.
 
     Lets a sweep skip work it has already done instead of recomputing it.
+
+    Pass `checkpoint_hash` and the skip becomes about the *weights*, not just
+    the name: re-training the same configuration and seed produces different
+    weights under the same identity, and those deserve a fresh score rather
+    than inheriting the old row's. A row predating the hash column has no value
+    to compare, so it is treated as a match and still skipped.
     """
     if board.empty:
         return False
     mask = pd.Series(data=True, index=board.index)
     for column, value in key.items():
-        if column in board.columns:
+        if column not in board.columns:
+            continue
+        if column == "checkpoint_hash":
+            # Older rows carry no hash; do not force them to be re-evaluated.
+            mask &= board[column].isna() | (board[column] == value)
+        else:
             mask &= board[column] == value
     return bool(mask.any())

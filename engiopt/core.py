@@ -168,6 +168,15 @@ def config_path_parts(config_fingerprint_value: str | None) -> list[str] | None:
 CONDITION_KEYS_METADATA_FIELD = "condition_keys"
 """Checkpoint-metadata field recording which conditions a model was trained on."""
 
+CONDITION_STATS_METADATA_FIELD = "condition_stats"
+"""Checkpoint-metadata field recording how a model rescaled its conditions.
+
+`{"mean": [...], "std": [...]}`, aligned to `condition_keys`. A model that
+normalized its conditions during training must see the same scale at evaluation,
+and only the training split's statistics give that -- recomputing them from the
+evaluation sample silently feeds the network numbers it was never trained on.
+"""
+
 
 def condition_keys_for(problem: Problem, resolved: ResolvedCheckpoint | None = None) -> tuple[str, ...]:
     """Which conditions a generator consumes, in the order its input tensor holds them.
@@ -189,6 +198,20 @@ def condition_keys_for(problem: Problem, resolved: ResolvedCheckpoint | None = N
         if recorded:
             return tuple(str(key) for key in recorded)
     return tuple(scalar_condition_keys(problem))
+
+
+def condition_stats_for(resolved: ResolvedCheckpoint | None) -> tuple[list[float], list[float]] | None:
+    """The `(mean, std)` a checkpoint rescaled its conditions by, if it recorded any.
+
+    Returns None for the great majority of models, which feed conditions to the
+    network unscaled and need no replay.
+    """
+    if resolved is None:
+        return None
+    stats = resolved.metadata.get(CONDITION_STATS_METADATA_FIELD)
+    if not stats or "mean" not in stats or "std" not in stats:
+        return None
+    return [float(v) for v in stats["mean"]], [float(v) for v in stats["std"]]
 
 
 def design_shape_of(problem: Problem) -> tuple[int, ...]:
@@ -249,6 +272,7 @@ class Generator(abc.ABC):
         device: th.device,
         run_config: dict[str, Any] | None = None,
         condition_keys: tuple[str, ...] | None = None,
+        condition_stats: tuple[list[float], list[float]] | None = None,
         checkpoint_revision: str | None = None,
         checkpoint_hash: str | None = None,
     ) -> None:
@@ -258,6 +282,7 @@ class Generator(abc.ABC):
         self.device = device
         self.run_config: dict[str, Any] = run_config or {}
         self._condition_keys = condition_keys
+        self._condition_stats = condition_stats
         self.checkpoint_revision = checkpoint_revision
         """Commit the checkpoint was downloaded at, when it came from the Hub."""
         self.checkpoint_hash = checkpoint_hash
@@ -350,6 +375,7 @@ class Generator(abc.ABC):
             seed=seed,
             run_config=resolved.run_config,
             condition_keys=condition_keys_for(problem, resolved),
+            condition_stats=condition_stats_for(resolved),
             checkpoint_revision=resolved.revision,
             checkpoint_hash=resolved.content_hash,
             **kwargs,
@@ -426,32 +452,67 @@ class Generator(abc.ABC):
             th.mps.synchronize()
 
     def _as_batch(self, conditions: ConditionBatch | th.Tensor | npt.NDArray[Any] | None) -> ConditionBatch:
-        """Normalize whatever the caller passed into a `ConditionBatch` on this device."""
+        """Present the conditions to the model exactly as its training data looked.
+
+        The evaluator hands every model the same batch: all of the problem's
+        scalar conditions, unscaled. A model that trained on some other view of
+        them -- a subset, a different order, a rescaling -- gets that view
+        reconstructed here from what its checkpoint recorded, rather than
+        re-deriving it from the evaluation sample. Fifty evaluation rows do not
+        have the training split's mean, and "columns that never vary" is a
+        different set in fifty rows than in forty thousand.
+        """
         if isinstance(conditions, ConditionBatch):
-            self._check_condition_keys(conditions.keys)
-            tensor = conditions.tensor
-            moved = None if tensor is None else tensor.to(device=self.device, dtype=th.float)
-            return ConditionBatch(tensor=moved, dataset=conditions.dataset, keys=conditions.keys)
+            projected = self._select_trained_columns(conditions)
+            return ConditionBatch(
+                tensor=self._rescale(self._to_device(projected.tensor)),
+                dataset=conditions.dataset,
+                keys=projected.keys,
+            )
         if conditions is None:
             return ConditionBatch(tensor=None, keys=self.condition_keys)
+        # A bare tensor carries no column names, so it is taken as already in
+        # this model's own layout.
         tensor = conditions if isinstance(conditions, th.Tensor) else th.as_tensor(np.asarray(conditions))
-        return ConditionBatch(tensor=tensor.to(device=self.device, dtype=th.float), keys=self.condition_keys)
+        return ConditionBatch(tensor=self._to_device(tensor), keys=self.condition_keys)
 
-    def _check_condition_keys(self, keys: tuple[str, ...]) -> None:
-        """Refuse conditions whose columns are not the ones this model was trained on.
+    def _to_device(self, tensor: th.Tensor | None) -> th.Tensor | None:
+        """Move a condition tensor onto this generator's device, passing None through."""
+        return None if tensor is None else tensor.to(device=self.device, dtype=th.float)
 
-        Silently accepting them produces either a shape error deep inside the
-        network or, worse, a design conditioned on the wrong numbers.
+    def _select_trained_columns(self, batch: ConditionBatch) -> ConditionBatch:
+        """Pick out the columns this checkpoint was trained on, in its own order.
+
+        The checkpoint's schema is authoritative, so a caller supplying *more*
+        conditions than the model uses is fine -- they are projected away. Only
+        a column the model needs and did not get is an error, because that one
+        cannot be reconstructed.
 
         Raises:
-            ValueError: If the caller's condition columns differ from the
-                checkpoint's.
+            ValueError: If a condition the checkpoint was trained on is absent.
         """
-        if keys and self.condition_keys and tuple(keys) != self.condition_keys:
+        if not batch.keys or not self.condition_keys or tuple(batch.keys) == self.condition_keys:
+            return batch
+        missing = [key for key in self.condition_keys if key not in batch.keys]
+        if missing:
             raise ValueError(
-                f"{self.algo_id} was trained on conditions {self.condition_keys} but was given {tuple(keys)}. "
-                "Re-train against the current problem, or evaluate the checkpoint that matches it."
+                f"{self.algo_id} was trained on conditions {self.condition_keys}, but {missing} "
+                f"are missing from the {list(batch.keys)} it was given. Re-train against the current "
+                "problem, or evaluate the checkpoint that matches it."
             )
+        if batch.tensor is None:
+            return ConditionBatch(tensor=None, dataset=batch.dataset, keys=self.condition_keys)
+        columns = [batch.keys.index(key) for key in self.condition_keys]
+        return ConditionBatch(tensor=batch.tensor[:, columns], dataset=batch.dataset, keys=self.condition_keys)
+
+    def _rescale(self, tensor: th.Tensor | None) -> th.Tensor | None:
+        """Apply the checkpoint's recorded condition normalization, if it recorded any."""
+        if tensor is None or self._condition_stats is None:
+            return tensor
+        mean, std = self._condition_stats
+        mean_t = th.tensor(mean, device=tensor.device, dtype=tensor.dtype)
+        std_t = th.tensor(std, device=tensor.device, dtype=tensor.dtype).clamp(min=1e-8)
+        return (tensor - mean_t) / std_t
 
     @cached_property
     def design_shape(self) -> tuple[int, ...]:

@@ -85,6 +85,7 @@ def save_checkpoint_package(
     config_fingerprint: str | None = None,
     is_default_config: bool = True,
     condition_keys: list[str] | tuple[str, ...] | None = None,
+    condition_stats: dict[str, list[float]] | None = None,
 ) -> dict[str, Any]:
     """Save a checkpoint package to HuggingFace.
 
@@ -106,7 +107,10 @@ def save_checkpoint_package(
 
     Pass `condition_keys` (from `engiopt.transforms.condition_keys`) so the
     checkpoint records the condition schema it was trained under; loading then
-    rebuilds the network for exactly those columns.
+    rebuilds the network for exactly those columns. A model that also *rescales*
+    its conditions passes `condition_stats={"mean": [...], "std": [...]}` so the
+    evaluator can reproduce the same scale, instead of refitting it on the far
+    smaller evaluation sample.
 
     W&B is no longer a checkpoint storage backend; the active W&B run still
     receives a summary pointing at the HF package for traceability.
@@ -128,6 +132,7 @@ def save_checkpoint_package(
         primary_files=primary_files,
         metadata=metadata,
         condition_keys=condition_keys,
+        condition_stats=condition_stats,
     )
     base_metadata.update(_build_wandb_run_metadata())
 
@@ -301,19 +306,34 @@ def _resolve_local_package(local_model_dir: str, required_files: list[str]) -> R
     return _load_package_from_directory(root_dir=local_model_dir, required_files=required_files, source="local")
 
 
-def hash_checkpoint_files(files: dict[str, str]) -> str:
-    """Content hash of a package's weight files, identifying these exact weights.
+def hash_package_contents(root_dir: str) -> str:
+    """Content hash of every weight file in a package, identifying these exact weights.
+
+    Hashes what the package *contains* rather than what the model declared it
+    needs. A model may load a file it did not list -- VQGAN's conditional
+    variant reads `cvqgan.pth`, which is not in its `checkpoint_files` because
+    the unconditional variant has none -- and two packages differing only in
+    that file generate differently. Hashing the declared list would give them
+    the same identity.
+
+    `run_config.json` and `metadata.json` are excluded: they describe the
+    package rather than being weights, and `metadata.json` records paths and
+    revisions that differ between the two locations one run writes.
 
     Args:
-        files: Package file name to local path, as on `ResolvedCheckpoint`.
+        root_dir: Local directory holding the package.
 
     Returns:
         A 16-character hash over the file names and their bytes.
     """
+    described = {"run_config.json", "metadata.json"}
+    weight_files = sorted(
+        entry for entry in os.listdir(root_dir) if entry not in described and os.path.isfile(os.path.join(root_dir, entry))
+    )
     hasher = hashlib.sha256()
-    for file_name in sorted(files):
+    for file_name in weight_files:
         hasher.update(file_name.encode())
-        with open(files[file_name], "rb") as handle:
+        with open(os.path.join(root_dir, file_name), "rb") as handle:
             for chunk in iter(lambda: handle.read(1 << 20), b""):
                 hasher.update(chunk)
     return hasher.hexdigest()[:16]
@@ -340,7 +360,7 @@ def _load_package_from_directory(
         run_config=run_config,
         metadata=metadata,
         revision=revision,
-        content_hash=hash_checkpoint_files(files),
+        content_hash=hash_package_contents(root_dir),
     )
 
 
@@ -381,6 +401,7 @@ def _build_metadata(
     primary_files: list[str] | None,
     metadata: dict[str, Any] | None,
     condition_keys: list[str] | tuple[str, ...] | None = None,
+    condition_stats: dict[str, list[float]] | None = None,
 ) -> dict[str, Any]:
     payload = dict(metadata or {})
     payload.update(
@@ -395,6 +416,8 @@ def _build_metadata(
     )
     if condition_keys is not None:
         payload["condition_keys"] = list(condition_keys)
+    if condition_stats is not None:
+        payload["condition_stats"] = {key: [float(v) for v in values] for key, values in condition_stats.items()}
     return payload
 
 

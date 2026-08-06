@@ -68,8 +68,6 @@ class OptimizationResults:
     """Sum of the optimality gaps over each design's re-optimization history."""
     fog: list[float] = field(default_factory=list)
     """Final optimality gap at the end of re-optimization."""
-    viol: list[bool] = field(default_factory=list)
-    """Whether each design is infeasible; see `EvaluationContext.is_infeasible`."""
 
 
 @dataclass
@@ -254,8 +252,19 @@ class EvaluationContext:
             results.iog.append(self.scalarize_gap(np.asarray(generated_objective) - np.asarray(reference_optimum), i))
             results.cog.append(sum(self.scalarize_gap(step_gap, i) for step_gap in gaps))
             results.fog.append(self.scalarize_gap(gaps[-1], i))
-            results.viol.append(self.is_infeasible(design, conditions))
         return results
+
+    @cached_property
+    def feasibility(self) -> list[bool]:
+        """Whether each generated design is infeasible, judged before any solver runs.
+
+        Deliberately independent of `optimization`. Feasibility is a property of
+        the design as generated, so it must survive the optimizer refusing to
+        start from an invalid one -- exactly the case where the answer matters
+        most. Keeping it separate also means asking for `viol` alone costs a
+        constraint check rather than a full optimization pass.
+        """
+        return [self.is_infeasible(self.design_for_solver(i), self.condition_at(i)) for i in range(self.n_samples)]
 
     def is_infeasible(self, design: Any, conditions: dict[str, Any] | None) -> bool:
         """Whether one generated design fails the problem's declared feasibility.

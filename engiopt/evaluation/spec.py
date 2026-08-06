@@ -17,6 +17,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 from typing import Any, TYPE_CHECKING
 
 import numpy as np
@@ -254,8 +255,6 @@ class EvalSpec:
 
     def freeze(self, problem: Problem) -> EvalSpec:
         """Return a copy with the digest, dataset revision, and versions filled in."""
-        import engibench
-
         dataset_id = self.dataset_id or getattr(problem, "dataset_id", None)
         revision = self.dataset_revision or _dataset_revision(dataset_id)
         frozen = EvalSpec(**{**asdict(self), "dataset_id": dataset_id, "dataset_revision": revision})
@@ -268,7 +267,7 @@ class EvalSpec:
                 **asdict(frozen),
                 "condition_digest": _digest(indices, conditions, ref_designs),
                 "problem_conditions": tuple(problem.conditions_keys),
-                "engibench_version": getattr(engibench, "__version__", None),
+                "engibench_version": _engibench_version(),
             }
         )
 
@@ -325,6 +324,32 @@ def _condition_bytes(values: Any) -> bytes:
     if array.dtype.kind in "fiub":
         return np.ascontiguousarray(array, dtype=np.float64).round(8).tobytes()
     return json.dumps(values, sort_keys=True, default=str).encode()
+
+
+def _engibench_version() -> str:
+    """The EngiBench that produced a spec: its version, plus a git sha from a source checkout.
+
+    The release version alone does not identify a problem definition -- 0.2.0 on
+    PyPI and 0.2.0 from `main` point `thermoelastic2d` at different datasets. A
+    change to `simulate` or `optimize` moves the optimality gaps without
+    touching any condition name, and only the revision records that.
+    """
+    import engibench
+
+    version = getattr(engibench, "__version__", "unknown")
+    source_root = Path(engibench.__file__).resolve().parent.parent
+    try:
+        sha = subprocess.run(
+            ["git", "-C", str(source_root), "rev-parse", "--short=12", "HEAD"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        ).stdout.strip()
+    # Installed as a wheel rather than a checkout: the version is all there is.
+    except (OSError, subprocess.SubprocessError):
+        return version
+    return f"{version}+{sha}" if sha else version
 
 
 def _dataset_revision(dataset_id: str | None) -> str | None:

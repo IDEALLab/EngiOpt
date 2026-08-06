@@ -261,3 +261,64 @@ def test_sample_timing_waits_for_the_device(fake_problem: Any) -> None:
 
     assert synchronized == [True]
     assert generator.last_sample_seconds is not None
+
+
+def test_the_hash_covers_files_the_model_did_not_declare(tmp_path: Path) -> None:
+    """VQGAN's conditional variant loads `cvqgan.pth`, which is not in `checkpoint_files`.
+
+    Hashing only the declared list would give two packages with different
+    condition encoders the same identity, even though they generate differently.
+    """
+    package = _write_package(tmp_path / "pkg")
+    (package / "cvqgan.pth").write_bytes(b"encoder one")
+    before = checkpoint_store._load_package_from_directory(
+        root_dir=str(package), required_files=["generator.pth"], source="local"
+    )
+
+    (package / "cvqgan.pth").write_bytes(b"encoder two")
+    after = checkpoint_store._load_package_from_directory(
+        root_dir=str(package), required_files=["generator.pth"], source="local"
+    )
+
+    assert before.content_hash != after.content_hash
+
+
+def test_the_hash_ignores_the_files_describing_the_package(tmp_path: Path) -> None:
+    """`metadata.json` records the path and revision, which differ between the two
+    locations one run writes -- so the same weights must not hash differently."""
+    package = _write_package(tmp_path / "pkg", metadata={"hf_package_path": "beams2d/seed_1"})
+    canonical = checkpoint_store._load_package_from_directory(
+        root_dir=str(package), required_files=["generator.pth"], source="local"
+    )
+
+    (package / "metadata.json").write_text(json.dumps({"hf_package_path": "beams2d/cfg_abc/seed_1"}))
+    config_scoped = checkpoint_store._load_package_from_directory(
+        root_dir=str(package), required_files=["generator.pth"], source="local"
+    )
+
+    assert canonical.content_hash == config_scoped.content_hash
+
+
+def test_condition_statistics_travel_with_the_checkpoint(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A model that rescales its conditions must record the scale it used."""
+    uploads: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        checkpoint_store, "_upload_package_to_hf", lambda **kwargs: uploads.append(kwargs["metadata"]) or "sha"
+    )
+    monkeypatch.setattr(checkpoint_store.wandb, "run", None)
+
+    checkpoint_store.save_checkpoint_package(
+        checkpoint_backend="hf",
+        hf_entity="org",
+        hf_repo_prefix="engiopt",
+        hf_private=False,
+        problem_id="beams2d",
+        algo="demo",
+        seed=1,
+        checkpoint_files={},
+        run_config={},
+        condition_keys=["volfrac"],
+        condition_stats={"mean": [0.4], "std": [0.2]},
+    )
+
+    assert uploads[0]["condition_stats"] == {"mean": [0.4], "std": [0.2]}

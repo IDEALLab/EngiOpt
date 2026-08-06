@@ -176,6 +176,7 @@ def _drop_already_published(args: Args, evaluator: Evaluator, generators: list[G
             config_fingerprint=generator.config_fingerprint,
             seed=generator.seed,
             spec_version=evaluator.spec.version,
+            checkpoint_hash=generator.checkpoint_hash,
         )
     ]
     print(f"{len(remaining)} generator(s) left after skipping already-published rows.")

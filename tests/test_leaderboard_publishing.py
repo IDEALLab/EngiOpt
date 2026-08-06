@@ -188,3 +188,127 @@ def test_push_gives_up_rather_than_forcing_a_write(monkeypatch: pytest.MonkeyPat
     monkeypatch.setattr("huggingface_hub.HfApi", _AlwaysStale())
     with pytest.raises(HfHubHTTPError):
         lb.push_to_hub(pd.DataFrame([_row("newcomer", 0.1)]), "org/board", max_attempts=2)
+
+
+# ----------------------------------------------------------------------
+# Distinguishing "no repo" from "no access" and "no file"
+# ----------------------------------------------------------------------
+
+
+def test_a_private_repo_is_not_an_empty_board(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Hub reports a repo you cannot see as not-found; that must not read as empty."""
+    api = _FakeApi()
+
+    def raise_private(**_kwargs: Any) -> Any:
+        raise hub_error(RepositoryNotFoundError, "401 Client Error: Unauthorized", status=401)
+
+    api.repo_info = raise_private  # type: ignore[method-assign]
+    monkeypatch.setattr("huggingface_hub.HfApi", api)
+    with pytest.raises(RepositoryNotFoundError):
+        lb.load_from_hub("org/board")
+
+
+def test_first_publish_into_an_existing_repo_keeps_its_revision(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A repo with no leaderboard.csv still has a head commit, and it guards the first write.
+
+    Discarding it means two jobs both publishing for the first time can each
+    overwrite the other.
+    """
+    api = _FakeApi(revision="sha1")
+    monkeypatch.setattr("huggingface_hub.HfApi", api)
+
+    def missing_file(**_kwargs: Any) -> str:
+        raise hub_error(EntryNotFoundError, "no leaderboard.csv", status=404)
+
+    monkeypatch.setattr("huggingface_hub.hf_hub_download", missing_file)
+
+    lb.push_to_hub(pd.DataFrame([_row("first", 0.1)]), "org/board")
+
+    assert api.uploads[0]["parent_commit"] == "sha1"
+
+
+# ----------------------------------------------------------------------
+# Ranking stays inside a problem
+# ----------------------------------------------------------------------
+
+
+def test_ranks_restart_within_each_problem() -> None:
+    """A beams2d score and a photonics2d score are not competitors."""
+    frame = pd.DataFrame(
+        [
+            {"problem_id": "beams2d", "algo_id": "a", "config_fingerprint": "c", "seed": 1,
+             "spec_version": "v1", "mmd": 0.1},
+            {"problem_id": "beams2d", "algo_id": "b", "config_fingerprint": "c", "seed": 1,
+             "spec_version": "v1", "mmd": 0.2},
+            {"problem_id": "photonics2d", "algo_id": "a", "config_fingerprint": "c", "seed": 1,
+             "spec_version": "v1", "mmd": 0.3},
+            {"problem_id": "photonics2d", "algo_id": "b", "config_fingerprint": "c", "seed": 1,
+             "spec_version": "v1", "mmd": 0.4},
+        ]
+    )  # fmt: skip
+    ranked = lb.rank(frame, "mmd")
+    for problem in ("beams2d", "photonics2d"):
+        assert sorted(ranked[ranked["problem_id"] == problem]["rank"]) == [1, 2]
+
+
+def test_ranks_restart_within_each_spec_version() -> None:
+    """Two protocols are two boards, even for the same problem."""
+    frame = pd.DataFrame(
+        [
+            {"problem_id": "p", "algo_id": "a", "config_fingerprint": "c", "seed": 1, "spec_version": "v1",
+             "mmd": 0.1},
+            {"problem_id": "p", "algo_id": "b", "config_fingerprint": "c", "seed": 1, "spec_version": "v2",
+             "mmd": 0.2},
+        ]
+    )  # fmt: skip
+    assert list(lb.rank(frame, "mmd")["rank"]) == [1, 1]
+
+
+# ----------------------------------------------------------------------
+# Skipping work already done
+# ----------------------------------------------------------------------
+
+
+def _published_row(**overrides: Any) -> pd.DataFrame:
+    row = {**_row("a", 0.1), "checkpoint_hash": "hash_old"}
+    row.update(overrides)
+    return pd.DataFrame([row])
+
+
+def test_retrained_weights_are_not_skipped() -> None:
+    """Same config and seed, different weights: the old row does not describe them."""
+    assert not lb.already_evaluated(
+        _published_row(),
+        problem_id="p",
+        algo_id="a",
+        config_fingerprint="default",
+        seed=1,
+        spec_version="v1",
+        checkpoint_hash="hash_new",
+    )
+
+
+def test_the_same_weights_are_skipped() -> None:
+    """Re-running an unchanged checkpoint is the work `--skip-existing` exists to avoid."""
+    assert lb.already_evaluated(
+        _published_row(),
+        problem_id="p",
+        algo_id="a",
+        config_fingerprint="default",
+        seed=1,
+        spec_version="v1",
+        checkpoint_hash="hash_old",
+    )
+
+
+def test_rows_predating_the_hash_column_are_still_skipped() -> None:
+    """An older board has no hash to compare, so it should not force a re-run."""
+    assert lb.already_evaluated(
+        _published_row(checkpoint_hash=None),
+        problem_id="p",
+        algo_id="a",
+        config_fingerprint="default",
+        seed=1,
+        spec_version="v1",
+        checkpoint_hash="hash_new",
+    )

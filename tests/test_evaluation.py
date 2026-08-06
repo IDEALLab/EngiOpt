@@ -83,9 +83,13 @@ def test_dpp_prefers_varied_designs_over_duplicates(fake_problem: Any) -> None:
 
 
 def test_builtin_metrics_declare_their_cost() -> None:
-    """Simulator-backed metrics must be marked expensive, and the rest cheap."""
-    assert {spec.name for spec in METRICS.select(cost="cheap")} == {"mmd", "dpp"}
-    assert {spec.name for spec in METRICS.select(cost="expensive")} == {"viol", "iog", "cog", "fog"}
+    """Simulator-backed metrics must be marked expensive, and the rest cheap.
+
+    `viol` is cheap: feasibility describes the design as generated, so it is
+    judged by a constraint check rather than by running the optimizer.
+    """
+    assert {spec.name for spec in METRICS.select(cost="cheap")} == {"mmd", "dpp", "viol"}
+    assert {spec.name for spec in METRICS.select(cost="expensive")} == {"iog", "cog", "fog"}
 
 
 def test_cheap_metrics_never_touch_the_solver(fake_problem: Any) -> None:

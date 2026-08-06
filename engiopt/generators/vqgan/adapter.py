@@ -11,8 +11,6 @@ from engiopt.core import ConditionBatch
 from engiopt.core import Generator
 from engiopt.generators.vqgan.vqgan import VQGAN
 from engiopt.generators.vqgan.vqgan import VQGANTransformer
-from engiopt.transforms import drop_constant
-from engiopt.transforms import normalize
 from engiopt.transforms import resize_to
 
 if TYPE_CHECKING:
@@ -25,15 +23,18 @@ class VQGANGenerator(Generator):
     """Discrete latent VQGAN whose codes are sampled autoregressively by a transformer.
 
     Conditions are themselves quantized (by a second, condition-side VQGAN) into
-    the transformer's start-of-sequence tokens, so this model needs the original
-    condition columns rather than a ready-made tensor: it may drop constant
-    columns and re-normalize exactly as it did during training.
+    the transformer's start-of-sequence tokens. Training may drop constant
+    condition columns and rescale the rest; both are recorded in the checkpoint,
+    so `Generator.sample` hands `_sample` the conditions already in that form and
+    this adapter does no preprocessing of its own.
     """
 
     algo_id = "vqgan"
     conditional = True
     design_kinds = ("2d",)
     checkpoint_files = ("vqgan.pth", "transformer.pth")
+    """`cvqgan.pth` is loaded by `build` too, but only conditional runs write one,
+    so it cannot be required here. The package content hash covers it regardless."""
     primary_state_key = "transformer"
     output_clip = (1e-3, 1.0)
 
@@ -113,7 +114,7 @@ class VQGANGenerator(Generator):
     def _sample(self, conditions: ConditionBatch, n: int) -> th.Tensor:
         """Sample a full grid of latent codes autoregressively, then decode it."""
         if self.run_config["conditional"]:
-            start_tokens = self.net.encode_to_z(x=self._condition_tensor(conditions), is_c=True)[1]
+            start_tokens = self.net.encode_to_z(x=conditions.require_tensor(self.algo_id), is_c=True)[1]
         else:
             start_tokens = th.ones(n, 1, dtype=th.int64, device=self.device) * self.net.sos_token
         codes = self.net.sample(
@@ -122,15 +123,3 @@ class VQGANGenerator(Generator):
             steps=self.latent_size**2,
         )
         return resize_to(data=self.net.z_to_image(codes), h=self.design_shape[0], w=self.design_shape[1])
-
-    def _condition_tensor(self, conditions: ConditionBatch) -> th.Tensor:
-        """Rebuild the condition tensor exactly as training preprocessed it."""
-        dataset = conditions.dataset
-        if dataset is None:
-            return conditions.require_tensor(self.algo_id)
-        columns = dataset.column_names
-        if self.run_config["drop_constant_conditions"]:
-            dataset, columns = drop_constant(dataset, columns)
-        if self.run_config["normalize_conditions"]:
-            dataset, _mean, _std = normalize(dataset, columns)
-        return th.stack([th.as_tensor(dataset[column][:]).float() for column in columns], dim=1).to(self.device)
