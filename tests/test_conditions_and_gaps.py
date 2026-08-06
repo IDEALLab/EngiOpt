@@ -13,8 +13,8 @@ import numpy as np
 import pytest
 
 from engiopt.evaluation.context import EvaluationContext
-from engiopt.evaluation.registry import METRICS
 from engiopt.evaluation.context import MultiObjectiveScalarizationError
+from engiopt.evaluation.registry import METRICS
 from engiopt.transforms import get_image_condition_keys
 from engiopt.transforms import get_scalar_condition_keys
 from tests.conftest import FakeViolations

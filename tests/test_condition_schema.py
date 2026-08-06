@@ -177,3 +177,27 @@ def test_a_model_without_recorded_statistics_is_left_alone(fake_problem: Any) ->
 
     assert _RecordingGenerator.received is not None
     assert _RecordingGenerator.received.flatten().tolist() == pytest.approx([0.6])
+
+
+def test_dropping_a_constant_condition_is_silent(fake_problem: Any, capsys: Any) -> None:
+    """A condition that never varies carries no information, so losing it costs nothing.
+
+    beams2d's `overhang_constraint` is 0 across every test case, which is why
+    VQGAN's training dropped it in the first place.
+    """
+    generator = _recorder(fake_problem, condition_keys=("volfrac",))
+    batch = ConditionBatch(tensor=th.tensor([[0.3, 2.0], [0.5, 2.0]]), keys=("volfrac", "constant"))
+
+    generator.sample(batch, n=2)
+
+    assert "constant" not in capsys.readouterr().out
+
+
+def test_dropping_a_varying_condition_says_so(fake_problem: Any, capsys: Any) -> None:
+    """Here the model cannot see a requirement its competitors can; that must be visible."""
+    generator = _recorder(fake_problem, condition_keys=("volfrac",))
+    batch = ConditionBatch(tensor=th.tensor([[0.3, 1.0], [0.5, 9.0]]), keys=("volfrac", "rmin"))
+
+    generator.sample(batch, n=2)
+
+    assert "rmin" in capsys.readouterr().out

@@ -502,8 +502,29 @@ class Generator(abc.ABC):
             )
         if batch.tensor is None:
             return ConditionBatch(tensor=None, dataset=batch.dataset, keys=self.condition_keys)
+        self._warn_about_ignored_variation(batch)
         columns = [batch.keys.index(key) for key in self.condition_keys]
         return ConditionBatch(tensor=batch.tensor[:, columns], dataset=batch.dataset, keys=self.condition_keys)
+
+    def _warn_about_ignored_variation(self, batch: ConditionBatch) -> None:
+        """Say so when a projected-away condition actually varies across the test set.
+
+        Dropping a condition that is constant everywhere costs nothing -- it
+        carries no information, which is why training dropped it. Dropping one
+        that *varies in the evaluation set* is different: this model cannot see a
+        requirement its competitors can, and its scores should be read knowing
+        that. Not an error, because a model is allowed to ignore conditions and
+        the conditional-adherence metrics exist to expose it -- but never silent.
+        """
+        if batch.tensor is None:
+            return
+        ignored = [key for key in batch.keys if key not in self.condition_keys]
+        varying = [key for key in ignored if float(batch.tensor[:, batch.keys.index(key)].float().std().nan_to_num()) > 0]
+        if varying:
+            print(
+                f"[{self.algo_id}] was not trained on {varying}, which vary across this evaluation's "
+                "conditions. It cannot respond to them; its conditional-adherence scores reflect that."
+            )
 
     def _rescale(self, tensor: th.Tensor | None) -> th.Tensor | None:
         """Apply the checkpoint's recorded condition normalization, if it recorded any."""
