@@ -87,6 +87,7 @@ def load_lvae_encoder(
     hf_repo_prefix: str = "engiopt",
     local_model_dir: str | None = None,
     config_fingerprint: str | None = None,
+    revision: str | None = None,
 ) -> tuple[nn.Module, LVAEConfig, ResolvedCheckpoint]:
     """Load a trained LVAE encoder from its checkpoint package.
 
@@ -107,6 +108,10 @@ def load_lvae_encoder(
             must pin this: different reconstruction and performance thresholds
             yield different active-subspace widths, so an unpinned instrument
             produces columns that are not comparable across rows.
+        revision: Repo commit to read at. `config_fingerprint` pins *which*
+            package; this pins *which version* of it. Without it, re-training
+            and re-uploading to the same path silently changes every latent
+            number already on the leaderboard.
 
     Returns:
         The encoder, its configuration, and the resolved checkpoint (whose
@@ -123,6 +128,7 @@ def load_lvae_encoder(
         required_files=[filename],
         local_model_dir=local_model_dir,
         extra_path_parts=[f"cfg_{config_fingerprint}"] if config_fingerprint else None,
+        revision=revision,
     )
 
     device = th.device(device) if isinstance(device, str) else device

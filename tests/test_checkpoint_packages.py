@@ -322,3 +322,65 @@ def test_condition_statistics_travel_with_the_checkpoint(monkeypatch: pytest.Mon
     )
 
     assert uploads[0]["condition_stats"] == {"mean": [0.4], "std": [0.2]}
+
+
+def test_a_pinned_revision_is_actually_requested(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """A pinned revision must reach `snapshot_download`, not merely be recorded.
+
+    Recording a revision without requesting it is worse than not pinning at all:
+    the spec claims reproducibility it does not have, and re-uploading to the
+    same path silently changes every number already computed against it.
+    """
+    package = tmp_path / "beams2d" / "seed_1"
+    package.mkdir(parents=True)
+    (package / "weights.pth").write_bytes(b"weights")
+    (package / "run_config.json").write_text("{}")
+    (package / "metadata.json").write_text("{}")
+
+    requested: dict[str, object] = {}
+
+    def fake_snapshot(**kwargs: object) -> str:
+        requested.update(kwargs)
+        return str(tmp_path)
+
+    monkeypatch.setattr(checkpoint_store, "snapshot_download", fake_snapshot)
+
+    checkpoint_store.resolve_named_checkpoint(
+        model_source="hf",
+        problem_id="beams2d",
+        algo="constrained_plvae_2d",
+        seed=1,
+        hf_entity="IDEALLab",
+        hf_repo_prefix="engiopt",
+        required_files=["weights.pth"],
+        revision="abc123",
+    )
+    assert requested["revision"] == "abc123"
+
+
+def test_an_unpinned_revision_follows_the_repo_default(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Omitting the pin must stay the existing behaviour, not become an error."""
+    package = tmp_path / "beams2d" / "seed_1"
+    package.mkdir(parents=True)
+    (package / "weights.pth").write_bytes(b"weights")
+    (package / "run_config.json").write_text("{}")
+    (package / "metadata.json").write_text("{}")
+
+    requested: dict[str, object] = {}
+
+    def fake_snapshot(**kwargs: object) -> str:
+        requested.update(kwargs)
+        return str(tmp_path)
+
+    monkeypatch.setattr(checkpoint_store, "snapshot_download", fake_snapshot)
+
+    checkpoint_store.resolve_named_checkpoint(
+        model_source="hf",
+        problem_id="beams2d",
+        algo="cgan_cnn_2d",
+        seed=1,
+        hf_entity="IDEALLab",
+        hf_repo_prefix="engiopt",
+        required_files=["weights.pth"],
+    )
+    assert requested["revision"] is None

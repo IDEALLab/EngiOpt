@@ -181,6 +181,7 @@ class Evaluator:
             algo=instrument.algo,
             seed=instrument.seed,
             config_fingerprint=instrument.config_fingerprint,
+            revision=instrument.revision,
             hf_entity=instrument.hf_entity,
             hf_repo_prefix=instrument.hf_repo_prefix,
         )

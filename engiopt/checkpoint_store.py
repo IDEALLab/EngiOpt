@@ -190,6 +190,7 @@ def resolve_named_checkpoint(
     required_files: list[str],
     local_model_dir: str | None = None,
     extra_path_parts: list[str] | None = None,
+    revision: str | None = None,
 ) -> ResolvedCheckpoint:
     """Resolve a checkpoint package by the standard EngiOpt problem/algo/seed naming.
 
@@ -205,6 +206,11 @@ def resolve_named_checkpoint(
         local_model_dir: Directory to load from instead of the Hub.
         extra_path_parts: Path components identifying one configuration; see
             `engiopt.core.config_path_parts`.
+        revision: Repo commit to read at. Without it the package resolves to
+            whatever is on the repo's main branch, so re-uploading to the same
+            path changes what an otherwise identical reference means. Pass it
+            wherever a result has to stay reproducible -- notably the latent
+            metric instrument, whose value defines the column it measures.
 
     Raises:
         FileNotFoundError: If no backend could supply the package.
@@ -216,6 +222,7 @@ def resolve_named_checkpoint(
                 repo_id=build_hf_repo_id(hf_entity, hf_repo_prefix, algo),
                 package_path=build_hf_package_path(problem_id, seed, extra_path_parts),
                 required_files=required_files,
+                revision=revision,
             )
         except Exception as exc:
             if model_source == "hf":
@@ -284,11 +291,14 @@ def _upload_package_to_hf(
     return getattr(commit_info, "oid", None)
 
 
-def _resolve_hf_package(*, repo_id: str, package_path: str, required_files: list[str]) -> ResolvedCheckpoint:
+def _resolve_hf_package(
+    *, repo_id: str, package_path: str, required_files: list[str], revision: str | None = None
+) -> ResolvedCheckpoint:
     repo_snapshot = snapshot_download(
         repo_id=repo_id,
         repo_type="model",
         allow_patterns=[f"{package_path}/*"],
+        revision=revision,
     )
     root_dir = os.path.join(repo_snapshot, package_path)
     if not os.path.isdir(root_dir):
