@@ -103,9 +103,9 @@ def test_cheap_metrics_never_touch_the_solver(fake_problem: Any) -> None:
     """Running every cheap metric must not call `problem.reset`, which only the solver path does.
 
     Every dependency a cheap metric may have is supplied here -- instrument,
-    companion, probe data, conditions -- so each one actually runs. A metric
-    that raised for a missing input would pass this test without ever proving
-    it stays off the solver.
+    companion, conditions -- so each one actually runs. A metric that raised for
+    a missing input would pass this test without ever proving it stays off the
+    solver.
     """
     rng = np.random.default_rng(4)
     shape = fake_problem.design_space.shape
@@ -117,8 +117,6 @@ def test_cheap_metrics_never_touch_the_solver(fake_problem: Any) -> None:
     )
     ctx.latent_lvae = stub_lvae(shape)
     ctx.latent_recon_lvae = stub_lvae(shape)
-    ctx.probe_designs = rng.random((12, *shape))
-    ctx.probe_conditions = rng.random((12, 2))
 
     ran = 0
     for spec in METRICS.select(cost="cheap"):

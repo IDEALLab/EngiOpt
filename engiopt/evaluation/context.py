@@ -139,10 +139,6 @@ class EvaluationContext:
     latent_recon_lvae: Any = None
     """Companion trained at the same reconstruction threshold without the
     performance constraint. Only the dual gap needs it."""
-    probe_designs: npt.NDArray[Any] | None = None
-    """Training designs used to fit the condition-recovery probe."""
-    probe_conditions: npt.NDArray[Any] | None = None
-    """Condition values for `probe_designs`, shape `(n_train, n_conditions)`."""
     sigma_designs: npt.NDArray[Any] | None = None
     """Validation-split designs used to calibrate the latent kernel bandwidth.
 
@@ -235,59 +231,6 @@ class EvaluationContext:
     def gen_projected(self) -> npt.NDArray[Any]:
         """Generated designs pushed through encode-then-decode onto the manifold."""
         return self.require_latent_lvae().project(np.asarray(self.gen_designs))
-
-    @cached_property
-    def requested_conditions(self) -> npt.NDArray[Any]:
-        """The conditions each generated design was asked to satisfy, as a dense array.
-
-        Raises:
-            ValueError: If the context carries no conditions.
-        """
-        if self.conditions is None:
-            raise ValueError("this evaluation context carries no conditions")
-        keys = [key for key in self.conditions.column_names if np.asarray(self.conditions[0][key]).ndim == 0]
-        return np.stack([np.asarray(self.conditions[key], dtype=np.float64) for key in keys], axis=-1)
-
-    @cached_property
-    def condition_probe(self) -> tuple[npt.NDArray[Any], npt.NDArray[Any]]:
-        """Least-squares map from latent codes back to conditions, fitted on train.
-
-        Deliberately a matrix rather than a trained network: the question is
-        whether the condition is *linearly readable* from a frozen encoder's
-        codes, and a network with its own capacity would answer a different
-        question -- it could learn the condition even from codes that do not
-        encode it.
-
-        Returns:
-            `(weights, r_squared)` where weights map an augmented code (a bias
-            column appended) to conditions, and `r_squared` is per-condition on
-            the training fit.
-
-        Raises:
-            LatentInstrumentUnavailableError: If no instrument is pinned.
-            ValueError: If no training designs or conditions were supplied.
-        """
-        from engiopt.lvae.encode import encode_active
-
-        if self.probe_designs is None or self.probe_conditions is None:
-            raise ValueError(
-                "condition recovery needs training designs and conditions to fit its probe; "
-                "none were supplied to the evaluation context."
-            )
-
-        lvae = self.require_latent_lvae()
-        device = next(lvae.encoder.parameters()).device
-        codes = encode_active(lvae.encoder, np.asarray(self.probe_designs), device)
-        targets = np.asarray(self.probe_conditions, dtype=np.float64)
-
-        augmented = np.hstack([codes, np.ones((len(codes), 1))])
-        weights, *_ = np.linalg.lstsq(augmented, targets, rcond=None)
-
-        predicted = augmented @ weights
-        residual = ((targets - predicted) ** 2).sum(axis=0)
-        total = ((targets - targets.mean(axis=0)) ** 2).sum(axis=0)
-        r_squared = np.where(total > 0, 1.0 - residual / np.maximum(total, 1e-12), np.nan)
-        return weights, r_squared
 
     def condition_at(self, index: int) -> dict[str, Any] | None:
         """Conditions for sample `index`, or None when the problem is unconditional."""

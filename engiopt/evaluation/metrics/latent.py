@@ -6,15 +6,15 @@ Three axes, each answering a different question about a generated design:
   dual-LVAE gap. Both are measured in *pixel* space on purpose: latent-space
   per-sample distances are uninformative here, because even a bad design gets
   mapped to a normal-looking latent code.
-- **Does it match its stated condition?** -- paired latent distance `l_perf`
-  and condition-recovery error `e`.
+- **Does it match its stated condition?** -- paired latent distance `l_perf`,
+  and `cond_err` where the condition can be read off the design exactly.
 - **Is the set as a whole right?** -- LV-MMD, coverage, and LV-Vendi diversity.
 
 Two deliberate exclusions, both from the same document:
 
 - **Conditional MMD** is degenerate here. `p(design | c)` is close to a point
   mass -- one optimum per condition -- so estimating a per-condition
-  distribution is ill-posed. `l_perf` and condition-recovery replace it.
+  distribution is ill-posed. `l_perf` and `cond_err` replace it.
 - **DPP diversity** is inflated by noise, which is the failure mode the suite
   exists to catch. LV-Vendi is the diversity measure instead.
 
@@ -148,12 +148,18 @@ def lv_paired_distance(ctx: EvaluationContext) -> float:
     description="Exact error between a design's realized volume fraction and the one requested.",
 )
 def cond_err(ctx: EvaluationContext) -> float:
-    """Did the design hit the volume fraction it was asked for?
+    """Did the design hit the volume fraction it was asked for, and by how much?
 
     Read analytically -- the volume fraction of a density field *is* its mean,
     so there is nothing to fit and nothing to approximate. `metric_suite.md`
     calls for the analytic readout wherever one exists, and this is the case
     where one does.
+
+    This is the continuous form of what `viol` reports as a rate. `viol` asks
+    how many designs missed the budget by more than `volfrac_tol`, which scores
+    a model 1% over on every design the same as one 500% over; this says by how
+    much. Report both, and do not add a third magnitude metric -- they would be
+    measuring the same thing.
 
     Returns NaN on problems with no volume budget (photonics2d), which is
     reported rather than papered over.
@@ -164,44 +170,6 @@ def cond_err(ctx: EvaluationContext) -> float:
     requested = np.asarray(ctx.conditions[ctx.volume_condition], dtype=np.float64)
     realized = ctx.gen_flat.mean(axis=1)
     return float(np.abs(realized - requested).mean())
-
-
-@register_metric(
-    "cond_recovery",
-    family="conditions",
-    cost="cheap",
-    outputs=("cond_recovery_err", "cond_probe_r2"),
-    higher_is_better=False,
-    description="Probe-based condition readout, for conditions with no closed form. See cond_err first.",
-)
-def cond_recovery(ctx: EvaluationContext) -> dict[str, float]:
-    """The fallback for conditions that cannot be read off a design directly.
-
-    Where a closed form exists, use it: `cond_err` computes the volume-fraction
-    error exactly, and no fitted probe can improve on an identity. This metric
-    exists for the rest -- `rmin`, `forcedist`, `overhang_constraint` -- where
-    the only way to ask "does this design still reflect its condition" is to
-    learn the readout.
-
-    A least-squares matrix is fitted on training codes, deliberately not a
-    network: the question is whether the condition is *linearly readable* from a
-    frozen encoder, and a model with its own capacity could recover a condition
-    the codes barely encode, answering something else.
-
-    Costs a pass over the full training split, so it is worth selecting only
-    when those non-analytic conditions matter. `cond_probe_r2` decides whether
-    the error column means anything at all -- a low training R-squared says the
-    conditions are not linearly readable here, and the error then describes the
-    probe rather than the generator.
-    """
-    weights, r_squared = ctx.condition_probe
-    generated, _ = ctx.latent_codes
-
-    requested = ctx.requested_conditions
-    predicted = np.hstack([generated, np.ones((len(generated), 1))]) @ weights
-
-    error = float(np.linalg.norm(predicted - requested, axis=1).mean())
-    return {"cond_recovery_err": error, "cond_probe_r2": float(np.nanmean(r_squared))}
 
 
 # ----------------------------------------------------------------------

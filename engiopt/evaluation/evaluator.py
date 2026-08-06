@@ -157,8 +157,6 @@ class Evaluator:
             latent_lvae=self.latent_lvae,
             latent_recon_lvae=self.latent_recon_lvae,
             sigma_designs=self.sigma_designs,
-            probe_designs=self.probe_data[0],
-            probe_conditions=self.probe_data[1],
         )
 
     def _load_instrument(self, *, config_fingerprint: str | None, seed: int) -> Any:
@@ -222,26 +220,6 @@ class Evaluator:
             config_fingerprint=instrument.recon_only_config_fingerprint,
             seed=instrument.recon_only_seed if instrument.recon_only_seed is not None else instrument.seed,
         )
-
-    @functools.cached_property
-    def probe_data(self) -> tuple[Any, Any]:
-        """Training designs and conditions used to fit the condition-recovery probe.
-
-        Train is the only split this touches, and only to fit the probe -- no
-        reported number is computed on it.
-
-        Returns `(None, None)` when the problem has no training split.
-        """
-        dataset = getattr(self.problem, "dataset", None)
-        if dataset is None or "train" not in dataset:
-            return None, None
-        split = dataset["train"]
-        keys = list(self.resolved.condition_keys)
-        if not keys:
-            return None, None
-        designs = np.asarray(split["optimal_design"])
-        conditions = np.stack([np.asarray(split[key], dtype=np.float64) for key in keys], axis=-1)
-        return designs, conditions
 
     @functools.cached_property
     def sigma_designs(self) -> Any:
