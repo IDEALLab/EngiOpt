@@ -153,7 +153,46 @@ class Evaluator:
             sample_seconds=generator.last_sample_seconds,
             objective_weights=self.spec.objective_weights,
             objective_weight_condition=self.spec.objective_weight_condition,
+            latent_encoder=self.latent_encoder,
         )
+
+    @functools.cached_property
+    def latent_encoder(self) -> Any:
+        """The instrument pinned by the spec, loaded once and shared.
+
+        Returns `None` when the spec pins no instrument; latent metrics then
+        raise rather than silently substituting a different autoencoder.
+
+        Raises:
+            ValueError: If the loaded instrument's active subspace does not
+                match the width the spec recorded, which means a different
+                model is being used to measure than the one that was pinned.
+        """
+        instrument = self.spec.latent_instrument
+        if instrument is None:
+            return None
+
+        from engiopt.lvae.checkpoints import load_lvae_encoder
+        from engiopt.lvae.encode import get_active_mask
+
+        encoder, _config, _resolved = load_lvae_encoder(
+            problem_id=self.problem_id,
+            design_shape=tuple(self.problem.design_space.shape),  # type: ignore[arg-type]
+            algo=instrument.algo,
+            seed=instrument.seed,
+            config_fingerprint=instrument.config_fingerprint,
+            hf_entity=instrument.hf_entity,
+            hf_repo_prefix=instrument.hf_repo_prefix,
+        )
+
+        n_active = int(get_active_mask(encoder).sum())
+        if instrument.expected_n_active is not None and n_active != instrument.expected_n_active:
+            raise ValueError(
+                f"latent instrument for {self.problem_id!r} reports {n_active} active dimensions but the spec "
+                f"pinned {instrument.expected_n_active}. Latent metrics are only comparable across rows when "
+                "the instrument is identical; refusing to score against a different one."
+            )
+        return encoder
 
     def score(
         self,

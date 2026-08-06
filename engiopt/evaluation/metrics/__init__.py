@@ -6,5 +6,6 @@ the same way: decorate a function with `@register_metric` and import the module.
 """
 
 from engiopt.evaluation.metrics import builtin
+from engiopt.evaluation.metrics import latent
 
-__all__ = ["builtin"]
+__all__ = ["builtin", "latent"]

@@ -25,6 +25,7 @@ from engiopt.evaluation.registry import METRICS
 from engiopt.evaluation.registry import MetricSpec
 from engiopt.evaluation.registry import register_metric
 from engiopt.evaluation.spec import EvalSpec
+from engiopt.lvae.components import Encoder2D
 
 # Importing the metrics package registers the built-ins.
 import engiopt.evaluation.metrics  # noqa: F401  # isort: skip
@@ -83,23 +84,34 @@ def test_dpp_prefers_varied_designs_over_duplicates(fake_problem: Any) -> None:
 
 
 def test_builtin_metrics_declare_their_cost() -> None:
-    """Simulator-backed metrics must be marked expensive, and the rest cheap.
+    """Only simulator-backed metrics may be marked expensive.
 
     `viol` is cheap: feasibility describes the design as generated, so it is
-    judged by a constraint check rather than by running the optimizer.
+    judged by a constraint check rather than by running the optimizer. Latent
+    metrics are cheap too -- encoding is a forward pass, not a simulation.
+
+    Asserted as "exactly these are expensive" rather than "exactly these are
+    cheap", so adding a cheap metric does not require editing this test while
+    still catching anything that quietly gains access to the solver.
     """
-    assert {spec.name for spec in METRICS.select(cost="cheap")} == {"mmd", "dpp", "viol"}
     assert {spec.name for spec in METRICS.select(cost="expensive")} == {"iog", "cog", "fog"}
+    assert {"mmd", "dpp", "viol"} <= {spec.name for spec in METRICS.select(cost="cheap")}
 
 
 def test_cheap_metrics_never_touch_the_solver(fake_problem: Any) -> None:
-    """Running every cheap metric must not call `problem.reset`, which only the solver path does."""
+    """Running every cheap metric must not call `problem.reset`, which only the solver path does.
+
+    Latent metrics need an instrument, so they get a stub encoder here; without
+    one they would raise before proving anything about solver access.
+    """
     rng = np.random.default_rng(4)
     ctx = _context(
         fake_problem,
         rng.random((6, *fake_problem.design_space.shape)),
         rng.random((6, *fake_problem.design_space.shape)),
     )
+    ctx.latent_encoder = Encoder2D(latent_dim=4, design_shape=fake_problem.design_space.shape)
+
     for spec in METRICS.select(cost="cheap"):
         spec.fn(ctx)
     assert fake_problem.reset_calls == 0

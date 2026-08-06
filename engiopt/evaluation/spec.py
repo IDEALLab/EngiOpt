@@ -73,6 +73,42 @@ class ProblemDefinitionMismatchError(ValueError):
 
 
 @dataclass(frozen=True)
+class LatentInstrument:
+    """The trained autoencoder a spec measures latent-space metrics with.
+
+    Latent metrics differ from every other family in the registry: they depend
+    on a fitted model as well as on the designs. The same generator scored
+    against two autoencoders -- different seed, different reconstruction
+    threshold -- yields two different numbers, because the active subspace those
+    autoencoders find is not the same subspace. `n_active` has been observed to
+    range from 3 to 100 across threshold settings on one problem.
+
+    So a latent column is only comparable across leaderboard rows if the
+    instrument is pinned exactly. That is what this records, and
+    `expected_n_active` is checked at evaluation time so a substituted
+    instrument fails loudly rather than quietly producing incomparable numbers.
+
+    Args:
+        algo: Generator family holding the instrument, e.g. `constrained_plvae_2d`.
+        seed: Training seed of the instrument checkpoint.
+        config_fingerprint: Configuration fingerprint pinning one sweep member.
+            Without it, `seed_N` resolves to whatever the default config was.
+        revision: HuggingFace commit the package is read at.
+        expected_n_active: Active latent dimensions the instrument should report.
+        hf_entity: HF org/user holding the checkpoint repo.
+        hf_repo_prefix: Prefix of the per-model-family repo.
+    """
+
+    algo: str
+    seed: int = 1
+    config_fingerprint: str | None = None
+    revision: str | None = None
+    expected_n_active: int | None = None
+    hf_entity: str = "IDEALLab"
+    hf_repo_prefix: str = "engiopt"
+
+
+@dataclass(frozen=True)
 class EvalSpec:
     """The frozen contract for evaluating models on one problem.
 
@@ -122,6 +158,7 @@ class EvalSpec:
     version: str = "v1"
     n_samples: int = 50
     condition_seed: int = 1
+    latent_instrument: LatentInstrument | None = None
     metrics: tuple[str, ...] = ("mmd", "dpp", "viol", "iog", "cog", "fog")
     sigma: float = 10.0
     volfrac_tol: float = 0.01
@@ -136,16 +173,19 @@ class EvalSpec:
     notes: str = ""
 
     def __post_init__(self) -> None:
-        """Normalize sequence fields to tuples.
+        """Normalize fields that JSON cannot represent directly.
 
         JSON has no tuple type, so a spec read back from disk would otherwise
-        carry lists and compare unequal to the spec that produced it.
+        carry lists and compare unequal to the spec that produced it. Nested
+        dataclasses come back as plain dicts for the same reason.
         """
         object.__setattr__(self, "metrics", tuple(self.metrics))
         if self.objective_weights is not None:
             object.__setattr__(self, "objective_weights", tuple(self.objective_weights))
         if self.problem_conditions is not None:
             object.__setattr__(self, "problem_conditions", tuple(self.problem_conditions))
+        if isinstance(self.latent_instrument, dict):
+            object.__setattr__(self, "latent_instrument", LatentInstrument(**self.latent_instrument))
 
     # ------------------------------------------------------------------
     # Persistence

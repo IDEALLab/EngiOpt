@@ -27,8 +27,14 @@ if TYPE_CHECKING:
 MetricCost = Literal["cheap", "expensive"]
 """`cheap` metrics never invoke a simulator or optimizer; `expensive` ones may."""
 
-MetricFamily = Literal["feasibility", "conditions", "performance", "distribution", "diversity", "cost"]
-"""The question a metric answers. Also the grouping used by leaderboard views."""
+MetricFamily = Literal["feasibility", "conditions", "performance", "distribution", "diversity", "cost", "latent"]
+"""The question a metric answers. Also the grouping used by leaderboard views.
+
+`latent` metrics measure in a learned space rather than in design space, so
+unlike the other families they depend on a fitted *instrument* as well as on the
+designs. A spec must pin that instrument for the column to be comparable across
+rows; see `engiopt.evaluation.spec.LatentInstrument`.
+"""
 
 MetricFn = Callable[["EvaluationContext"], "float | dict[str, float]"]
 

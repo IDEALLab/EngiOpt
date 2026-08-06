@@ -36,6 +36,23 @@ def _as_arrays(conditions: dict[str, Any] | None) -> dict[str, Any]:
     return {key: np.asarray(value) if isinstance(value, list) else value for key, value in (conditions or {}).items()}
 
 
+class LatentInstrumentUnavailableError(ValueError):
+    """Raised when a latent metric is requested but the spec pins no instrument.
+
+    A latent metric measures in a learned space, so it needs a fitted
+    autoencoder as well as the designs. Falling back to an arbitrary one would
+    produce numbers that are not comparable to any other row, which is the
+    failure this whole family has to avoid.
+    """
+
+    def __init__(self, problem_id: str) -> None:
+        super().__init__(
+            f"a latent-space metric was requested for {problem_id!r} but the eval spec pins no "
+            "`latent_instrument`. Latent metrics depend on the autoencoder that measures them, so the spec "
+            "must name one (algo, seed, config_fingerprint) for the column to mean the same thing across rows."
+        )
+
+
 class MultiObjectiveScalarizationError(ValueError):
     """Raised when a multi-objective problem has no declared scalarization.
 
@@ -106,6 +123,8 @@ class EvaluationContext:
     sample_seconds: float | None = None
     objective_weights: tuple[float, ...] | None = None
     objective_weight_condition: str | None = None
+    latent_encoder: Any = None
+    """Fitted instrument for `latent`-family metrics; `None` when the spec pins none."""
 
     @property
     def n_samples(self) -> int:
@@ -129,6 +148,35 @@ class EvaluationContext:
             return np.asarray(self.ref_designs).reshape(len(self.ref_designs), -1)
         flattened = [np.asarray(spaces.flatten(self.problem.design_space, design)) for design in self.ref_designs]
         return np.asarray(flattened)
+
+    def require_latent_encoder(self) -> Any:
+        """Return the latent instrument, or explain why there isn't one.
+
+        Raises:
+            LatentInstrumentUnavailableError: If the spec pinned no instrument.
+        """
+        if self.latent_encoder is None:
+            raise LatentInstrumentUnavailableError(self.problem_id)
+        return self.latent_encoder
+
+    @cached_property
+    def latent_codes(self) -> tuple[npt.NDArray[Any], npt.NDArray[Any]]:
+        """Generated and reference designs encoded into the active latent subspace.
+
+        Both sets are encoded once and shared, since every latent metric needs
+        the same codes and encoding is the expensive part.
+
+        Returns:
+            `(generated, reference)`, each `(n, n_active)`.
+        """
+        from engiopt.lvae.encode import encode_active
+
+        encoder = self.require_latent_encoder()
+        device = next(encoder.parameters()).device
+        return (
+            encode_active(encoder, np.asarray(self.gen_designs), device),
+            encode_active(encoder, np.asarray(self.ref_designs), device),
+        )
 
     def condition_at(self, index: int) -> dict[str, Any] | None:
         """Conditions for sample `index`, or None when the problem is unconditional."""

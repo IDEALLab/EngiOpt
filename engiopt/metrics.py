@@ -15,6 +15,9 @@ from scipy.spatial.distance import cdist
 if TYPE_CHECKING:
     from engibench import OptiStep
 
+MIN_PRDC_SAMPLES = 2
+"""Below two samples per set there is no neighbourhood to measure."""
+
 
 def mmd(x: np.ndarray, y: np.ndarray, sigma: float = 1.0) -> float:
     """Compute the Maximum Mean Discrepancy (MMD) between two sets of samples.
@@ -60,6 +63,127 @@ def dpp_diversity(x: np.ndarray, sigma: float = 1.0) -> float:
         return 0.0  # fallback in case of numerical issues
 
 
+def log_dpp_diversity(x: np.ndarray, sigma: float = 1.0) -> float:
+    """Log-determinant form of `dpp_diversity`, for spaces where the raw determinant underflows.
+
+    The determinant of an `n x n` kernel matrix is a product of `n` numbers below
+    one, so at `n = 50` it routinely lands near 1e-11 and can reach the limit of
+    double precision -- at which point the metric stops distinguishing models and
+    starts reporting rounding error. `slogdet` measures the same quantity on a
+    scale that survives.
+
+    Args:
+        x: Samples of shape `(n, ...)`; flattened internally.
+        sigma: Bandwidth of the Gaussian kernel.
+
+    Returns:
+        The log-determinant. Larger means more diverse. Returns `-inf` for a
+        singular matrix, which is the honest limit of a degenerate sample set.
+    """
+    x_flat = x.reshape(x.shape[0], -1)
+    similarity = np.exp(-cdist(x_flat, x_flat, "sqeuclidean") / (2 * sigma**2))
+    reg_matrix = similarity + 1e-6 * np.eye(x.shape[0])
+
+    # On a near-singular kernel matrix NumPy's slogdet warns about intermediate
+    # overflow while still returning a correct result -- which is precisely the
+    # case this function exists to handle, so the warnings are noise here.
+    with np.errstate(divide="ignore", over="ignore", invalid="ignore"):
+        sign, logabsdet = np.linalg.slogdet(reg_matrix)
+
+    if sign <= 0 or not np.isfinite(logabsdet):
+        return float("-inf")
+    return float(logabsdet)
+
+
+def compute_median_sigma(x: np.ndarray, y: np.ndarray | None = None) -> float:
+    """Choose a kernel bandwidth by the median heuristic.
+
+    A fixed bandwidth cannot serve two spaces at once: pixel space and a pruned
+    latent space differ in scale by orders of magnitude, and a kernel sized for
+    one saturates in the other. The median pairwise distance adapts to whichever
+    space it is handed.
+
+    Sampling is capped and seeded so the bandwidth is reproducible.
+
+    Args:
+        x: Samples of shape `(n, d)`.
+        y: Optional second sample set; distances are then cross-set.
+
+    Returns:
+        The bandwidth, floored at 1e-6 so a degenerate set cannot divide by zero.
+    """
+    x = x.reshape(x.shape[0], -1)
+    n_sample = min(500, len(x))
+    rng = np.random.default_rng(42)
+    idx_x = rng.choice(len(x), n_sample, replace=len(x) < n_sample)
+
+    if y is not None:
+        y = y.reshape(y.shape[0], -1)
+        idx_y = rng.choice(len(y), n_sample, replace=len(y) < n_sample)
+        dists = cdist(x[idx_x], y[idx_y], "sqeuclidean")
+    else:
+        dists = cdist(x[idx_x], x[idx_x], "sqeuclidean")
+        dists = dists[np.triu_indices_from(dists, k=1)]
+
+    sigma = np.sqrt(np.median(dists) / 2) if len(dists) > 0 else 1.0
+    return max(float(sigma), 1e-6)
+
+
+def compute_prdc(real_features: np.ndarray, fake_features: np.ndarray, nearest_k: int = 5) -> dict[str, float]:
+    """Compute precision, recall, density, and coverage between two sample sets.
+
+    The four metrics of Naeem et al. 2020, "Reliable Fidelity and Diversity
+    Metrics for Generative Models" (ICML). They exist because a single
+    distribution distance conflates two different failures: generating
+    implausible designs, and generating too few distinct ones. MMD reports one
+    number for both; these separate them.
+
+    All four lie in `[0, 1]`, higher is better.
+
+    - **precision**: fraction of generated samples inside some real sample's
+      k-NN ball -- are the generations plausible?
+    - **recall**: fraction of real samples inside some generated sample's ball
+      -- is the data manifold covered?
+    - **density**: smoothed precision, robust to real outliers that would
+      otherwise inflate it.
+    - **coverage**: fraction of real samples whose own ball contains a generated
+      sample; more robust than recall when generations are noisy outliers.
+
+    Args:
+        real_features: Reference samples, shape `(n_real, d)`.
+        fake_features: Generated samples, shape `(n_fake, d)`.
+        nearest_k: Neighbours defining the ball radius, clamped to fit the sets.
+
+    Returns:
+        Mapping with keys `precision`, `recall`, `density`, `coverage`. All NaN
+        when either set has fewer than two samples.
+    """
+    real = real_features.reshape(real_features.shape[0], -1)
+    fake = fake_features.reshape(fake_features.shape[0], -1)
+    n_real, n_fake = len(real), len(fake)
+
+    if n_real < MIN_PRDC_SAMPLES or n_fake < MIN_PRDC_SAMPLES:
+        return dict.fromkeys(("precision", "recall", "density", "coverage"), float("nan"))
+
+    k = max(1, min(nearest_k, n_real - 1, n_fake - 1))
+
+    # Self-distance sits at index 0 of the partition, so index k is the k-th
+    # non-self neighbour.
+    real_radii = np.partition(cdist(real, real, "euclidean"), k, axis=1)[:, k]
+    fake_radii = np.partition(cdist(fake, fake, "euclidean"), k, axis=1)[:, k]
+    d_rf = cdist(real, fake, "euclidean")
+
+    inside_real = d_rf <= real_radii[:, None]
+    inside_fake = d_rf <= fake_radii[None, :]
+
+    return {
+        "precision": float(inside_real.any(axis=0).mean()),
+        "recall": float(inside_fake.any(axis=1).mean()),
+        "density": float(inside_real.sum(axis=0).mean()) / k,
+        "coverage": float((d_rf.min(axis=1) <= real_radii).mean()),
+    }
+
+
 def optimality_gap(opt_history: list[OptiStep], baseline: float) -> list[float]:
     """Compute the optimality gap of an optimization history.
 
@@ -71,6 +195,3 @@ def optimality_gap(opt_history: list[OptiStep], baseline: float) -> list[float]:
         list[float]: The optimality gap at each step in opt_history.
     """
     return [opt.obj_values - baseline for opt in opt_history]
-
-
-# Return the failure ratio
