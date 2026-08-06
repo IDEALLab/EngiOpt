@@ -9,6 +9,7 @@ import torch as th
 
 from engiopt.core import ConditionBatch
 from engiopt.core import Generator
+from engiopt.generators.vqgan.vqgan import latent_size_for
 from engiopt.generators.vqgan.vqgan import VQGAN
 from engiopt.generators.vqgan.vqgan import VQGANTransformer
 from engiopt.transforms import resize_to
@@ -47,6 +48,8 @@ class VQGANGenerator(Generator):
     def build(cls, resolved: ResolvedCheckpoint, problem: Problem, device: th.device, **base: Any) -> VQGANGenerator:
         """Rebuild the design VQGAN, the condition VQGAN, and the transformer."""
         config = resolved.run_config
+        # Not a field of Args, so it is absent from run_config.json; derive it.
+        latent_size = latent_size_for(config["image_size"], config["encoder_channels"])
         vqgan = VQGAN(
             device=device,
             is_c=False,
@@ -55,7 +58,7 @@ class VQGANGenerator(Generator):
             encoder_attn_resolutions=config["encoder_attn_resolutions"],
             encoder_num_res_blocks=config["encoder_num_res_blocks"],
             decoder_channels=config["decoder_channels"],
-            decoder_start_resolution=config["latent_size"],
+            decoder_start_resolution=latent_size,
             decoder_attn_resolutions=config["decoder_attn_resolutions"],
             decoder_num_res_blocks=config["decoder_num_res_blocks"],
             image_channels=config["image_channels"],
@@ -94,7 +97,7 @@ class VQGANGenerator(Generator):
             th.load(resolved.files["transformer.pth"], map_location=device, weights_only=False)[cls.primary_state_key]
         )
         net.eval().to(device)
-        return cls(net=net, latent_size=config["latent_size"], problem=problem, device=device, **base)
+        return cls(net=net, latent_size=latent_size, problem=problem, device=device, **base)
 
     @classmethod
     def _load_cvqgan(cls, package_root: str, *, config: dict[str, Any], device: th.device) -> dict[str, Any] | None:

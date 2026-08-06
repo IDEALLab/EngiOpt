@@ -55,6 +55,27 @@ from engiopt.transforms import resize_to
 import wandb
 
 
+def latent_size_for(image_size: int, encoder_channels: tuple[int, ...] | list[int]) -> int:
+    """Spatial size of the VQGAN's latent grid.
+
+    Derived rather than configured: each encoder stage after the first two
+    halves the resolution, so the latent grid follows from `image_size` and the
+    channel schedule.
+
+    It is defined here, and reused by the adapter, because it is *not* a field
+    of `Args` and so never reaches `run_config.json`. Recomputing it on load is
+    what lets a checkpoint be rebuilt from its saved config alone.
+
+    Args:
+        image_size: Resolution the encoder is fed.
+        encoder_channels: Channel width per encoder stage.
+
+    Returns:
+        Side length of the square latent grid.
+    """
+    return image_size // (2 ** (len(encoder_channels) - 2))
+
+
 @dataclass
 class Args:
     """Command-line arguments for VQGAN."""
@@ -690,7 +711,7 @@ if __name__ == "__main__":
 
     # Now we assume the dataset is of shape (N, C, H, W) and work from there
     image_channels = training_ds["optimal_upsampled"][:].shape[1]
-    latent_size = args.image_size // (2 ** (len(args.encoder_channels) - 2))
+    latent_size = latent_size_for(args.image_size, args.encoder_channels)
 
     # Only the scalar conditions can be stacked into the condition tensor;
     # array-valued and solver-only keys are excluded.
