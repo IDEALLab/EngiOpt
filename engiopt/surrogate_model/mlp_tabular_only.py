@@ -20,6 +20,7 @@ from sklearn.preprocessing import RobustScaler
 import torch
 from torch.utils.data import DataLoader
 import tyro
+import wandb
 
 from engiopt.args_utils import parse_list_from_single_item_list
 from engiopt.args_utils import parse_list_from_string
@@ -32,7 +33,6 @@ from engiopt.surrogate_model.model_pipeline import ModelPipeline
 from engiopt.surrogate_model.training_utils import get_device
 from engiopt.surrogate_model.training_utils import PlainTabularDataset
 from engiopt.surrogate_model.training_utils import train_one_model
-import wandb
 
 
 @dataclass

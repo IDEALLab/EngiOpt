@@ -11,8 +11,8 @@ and logs every generation to Weights & Biases so you can explore:
 Example usage
 -------------
 python run_pe_optimization.py \
-    --model_gain_path "my_entity/engiopt/your_run_name_model:latest" \
-    --model_ripple_path "my_entity/engiopt/your_other_run_name_model:latest" \
+    --model_gain_path "hf://IDEALLab/engiopt-mlp-tabular-only/power_electronics/DcGain/seed_1" \
+    --model_ripple_path "hf://IDEALLab/engiopt-mlp-tabular-only/power_electronics/VoltageRipple/seed_1" \
     --device mps \
     --pop_size 500 \
     --n_gen 100 \
@@ -34,12 +34,12 @@ from pymoo.algorithms.moo.nsga2 import NSGA2
 from pymoo.optimize import minimize
 from pymoo.termination import get_termination
 import tyro
+import wandb
 
 from engiopt.checkpoint_store import resolve_checkpoint_reference
 from engiopt.surrogate_model.model_pipeline import ModelPipeline
 from engiopt.surrogate_model.pymoo_pe_problem import PymooPowerElecProblem
 from engiopt.surrogate_model.training_utils import get_device
-import wandb
 
 if TYPE_CHECKING:
     from pymoo.core.algorithm import Algorithm
@@ -53,9 +53,9 @@ if TYPE_CHECKING:
 class Args:
     # Surrogate pipelines
     model_gain_path: str
-    """Model ref for the gain surrogate (W&B artifact, HF package ref, or local package directory)."""
+    """Model ref for the gain surrogate (HF package ref, or local package directory)."""
     model_ripple_path: str
-    """Model ref for the ripple surrogate (W&B artifact, HF package ref, or local package directory)."""
+    """Model ref for the ripple surrogate (HF package ref, or local package directory)."""
 
     # Optimisation hyperparameters
     seed: int

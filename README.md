@@ -112,6 +112,28 @@ python -m engiopt.evaluate --problem-id "beams2d" --generators cgan_cnn_2d --see
 ```
 Evaluation pulls the checkpoint from HF automatically. Pass `--hf-entity` / `--hf-repo-prefix` to point at a different HF repo, and `--config-fingerprints` to score specific hyperparameter configurations instead of the default one.
 
+A bare `--seeds 1` resolves the **canonical** package, `{problem_id}/seed_1`, which only a run using the training script's default hyperparameters writes. A hyperparameter sweep never writes it — every arm varies something — so after a sweep the canonical path can be empty while hundreds of `cfg_*` packages exist. When that happens the error lists what the repo does hold. To make one of those arms the default without retraining it:
+
+```
+python -m engiopt.promote_checkpoint --algo cgan_cnn_2d --problem-id beams2d --list
+python -m engiopt.promote_checkpoint --algo cgan_cnn_2d --problem-id beams2d --seed 1 --config-fingerprint 023dd1fb
+```
+
+### Leaderboard
+
+Results are rows in a CSV, keyed by problem, algorithm, config fingerprint, seed, and spec version. Locally that CSV is `--output-csv`; published, it is the same table in a HuggingFace dataset repo:
+
+```
+python -m engiopt.evaluate --problem-id beams2d --generators cgan_cnn_2d --seeds 1 \
+    --push-to IDEALLab/engiopt-leaderboard
+```
+
+Publishing downloads the existing board, merges on the row key, and uploads the result conditional on the revision it read, so adding one model never recomputes or overwrites anyone else's rows. Ranks restart at 1 within each `(problem_id, spec_version)` — a beams2d score and a photonics2d score measure different things and are never placed in one ordering. `--skip-existing` skips rows the board already holds for the exact weights, compared by `checkpoint_hash`.
+
+Every row records what produced it: the checkpoint revision and content hash, the EngiOpt version, and the EngiBench version that ran the evaluation. The spec records what it was frozen against, including the pinned dataset revision, so a change to either side is visible rather than silently shifting every number.
+
+**Contributing a model.** Train against a committed spec, publish the checkpoint package to your own HF repo, then open an issue with the repo path and the seed. Evaluation runs on our side and writes the row, so the leaderboard is only ever written by the code that produced the scores. Point `--hf-entity` / `--hf-repo-prefix` at your own repos to reproduce any row locally first.
+
 ### Surrogate model
 
 The current surrogate model comprises several steps:
@@ -123,11 +145,10 @@ The current surrogate model comprises several steps:
 See this [notebook](https://github.com/IDEALLab/EngiOpt/blob/main/engiopt/surrogate_model/case_study_pe_notebook.ipynb) for an example.
 
 Surrogate-model optimization paths now use the same checkpoint abstraction. For example, the power-electronics optimizer can consume:
-* legacy WandB artifact refs
 * HF package refs such as `hf://IDEALLab/engiopt-mlp-tabular-only/power_electronics/DcGain/seed_42`
 * local checkpoint package directories
 
-For migration guidance on moving historical checkpoint subsets from WandB to the IDEALLab HF organization later, see [docs/checkpoint_migration_playbook.md](docs/checkpoint_migration_playbook.md).
+HuggingFace is the only checkpoint backend. W&B artifacts are no longer a model source anywhere in the codebase; see [docs/checkpoint_layout.md](docs/checkpoint_layout.md) for the package layout.
 
 
 

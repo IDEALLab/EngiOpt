@@ -20,6 +20,7 @@ from torch import nn
 from torch.nn import functional
 import tqdm
 import tyro
+import wandb
 
 from engiopt.checkpoint_store import save_checkpoint_package
 from engiopt.core import checkpoint_identity
@@ -29,7 +30,6 @@ from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
 from engiopt.transforms import condition_keys
-import wandb
 
 
 @dataclass

@@ -10,7 +10,6 @@ from torch import optim
 import torch.nn.functional as F  # noqa: N812
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
-
 import wandb
 
 if TYPE_CHECKING:

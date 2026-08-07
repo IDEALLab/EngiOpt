@@ -16,7 +16,9 @@ jobs:
         with:
           args: "--version"
       - run: ruff format --check
-      - run: ruff check --fix --output-format=github .
+      # No --fix: repairing violations inside the runner makes the job pass on
+      # code that does not, so import-order drift never reaches a review.
+      - run: ruff check --output-format=github .
 
   mypy:
     runs-on: ubuntu-latest
