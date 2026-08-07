@@ -52,7 +52,14 @@ class Args:
     """Specific hyperparameter configurations to evaluate, by fingerprint.
 
     Empty means the canonical default-hyperparameter checkpoint -- what a bare
-    model name refers to. Pass several to score a sweep."""
+    model name refers to. Pass several to score a sweep.
+
+    Scope an entry to one model with `algo:fingerprint`. A fingerprint hashes
+    one algorithm's hyperparameters, so evaluating several models against a flat
+    list tries every fingerprint against every model and reports the mismatches
+    as load failures. `--generators cgan_cnn_2d gan_cnn_2d --config-fingerprints
+    cgan_cnn_2d:023dd1fb gan_cnn_2d:06d9a9a1` asks for exactly the two that
+    exist."""
     spec: str | None = None
     """Eval spec reference, e.g. `beams2d/v1`. Defaults to `<problem_id>/v1`."""
     metrics: tuple[str, ...] = ()
@@ -123,14 +130,40 @@ def _resolve_generator_names(requested: tuple[str, ...], problem_id: str) -> lis
     return sorted(generators_for(BUILTIN_PROBLEMS[problem_id]()))
 
 
+def _fingerprints_for(requested: tuple[str, ...], algo: str) -> tuple[str | None, ...]:
+    """Which configurations to try for one algorithm.
+
+    A fingerprint hashes one algorithm's hyperparameters, so it is meaningless
+    against a different algorithm: evaluating two models against the union of
+    both their fingerprints asks for packages that were never going to exist and
+    buries the run in load failures that are not failures. `algo:fingerprint`
+    scopes an entry to its owner; a bare fingerprint still applies to every
+    algorithm, which is what a single-model run wants.
+
+    Args:
+        requested: Raw `--config-fingerprints` values.
+        algo: The algorithm being loaded.
+
+    Returns:
+        Fingerprints to try, or `(None,)` meaning the canonical checkpoint.
+    """
+    if not requested:
+        return (None,)
+    selected = [
+        entry.split(":", 1)[1] if ":" in entry else entry
+        for entry in requested
+        if ":" not in entry or entry.split(":", 1)[0] == algo
+    ]
+    return tuple(selected)
+
+
 def _load_generators(args: Args, evaluator: Evaluator) -> list[Generator]:
     """Load every requested generator/seed pair, reporting those that fail."""
     generators: list[Generator] = []
-    fingerprints: tuple[str | None, ...] = args.config_fingerprints or (None,)
     for name in _resolve_generator_names(args.generators, args.problem_id):
         generator_cls = BUILTIN_GENERATORS[name]
         for seed in args.seeds:
-            for fingerprint in fingerprints:
+            for fingerprint in _fingerprints_for(args.config_fingerprints, name):
                 try:
                     generators.append(
                         generator_cls.from_pretrained(

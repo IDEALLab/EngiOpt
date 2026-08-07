@@ -52,6 +52,7 @@ PROVENANCE_COLUMNS = (
     "checkpoint_revision",
     "checkpoint_hash",
     "code_version",
+    "engibench_version",
     "evaluated_at",
 )
 """Columns identifying *what was measured*, as opposed to metric values.
@@ -60,6 +61,15 @@ PROVENANCE_COLUMNS = (
 `checkpoint_hash` says which *weights* did. Re-training the same configuration
 and seed, or changing the training code, yields different weights under the same
 name, so without it a row cannot be traced back to the model that earned it.
+
+`engibench_version` is the EngiBench that *ran* the evaluation, as opposed to the
+one the spec was frozen against. A change to `simulate` or `optimize` moves the
+optimality gaps without touching any condition name or dataset, so the spec's
+digest cannot catch it. It is recorded rather than enforced: refusing to evaluate
+unless the sha matches would lock out every contributor whose EngiBench differs
+by any commit, and partitioning ranks by it would mean two models could never be
+compared unless they were scored on identical builds. Recording it keeps the
+difference visible without either cost.
 """
 
 
@@ -210,6 +220,7 @@ class Evaluator:
             "checkpoint_revision": getattr(generator, "checkpoint_revision", None),
             "checkpoint_hash": getattr(generator, "checkpoint_hash", None),
             "code_version": code_version(),
+            "engibench_version": engibench_version(),
             "evaluated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
         }
 
@@ -248,6 +259,19 @@ class Evaluator:
                     raise
                 print(f"[leaderboard] skipping {generator.algo_id}: {exc}")
         return order_columns(pd.DataFrame(rows))
+
+
+@functools.cache
+def engibench_version() -> str:
+    """Which EngiBench *ran* this evaluation, however it was installed.
+
+    Shares its implementation with the value `EvalSpec.freeze` records, so the
+    spec's "frozen against" and the row's "evaluated on" are the same kind of
+    string and can be compared directly.
+    """
+    from engiopt.evaluation.spec import engibench_version as _spec_engibench_version
+
+    return _spec_engibench_version()
 
 
 @functools.cache

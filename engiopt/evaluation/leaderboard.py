@@ -296,8 +296,14 @@ def already_evaluated(board: pd.DataFrame, **key: Any) -> bool:
     Pass `checkpoint_hash` and the skip becomes about the *weights*, not just
     the name: re-training the same configuration and seed produces different
     weights under the same identity, and those deserve a fresh score rather
-    than inheriting the old row's. A row predating the hash column has no value
-    to compare, so it is treated as a match and still skipped.
+    than inheriting the old row's.
+
+    A row with no hash does not match. An absent hash means the identity of the
+    weights behind that row is unknown, and unknown is not the same as equal --
+    treating it as a match would let one hashless row suppress every future
+    re-evaluation of that configuration and seed, including genuinely new
+    weights. This schema has never shipped, so there is no historical board
+    whose re-evaluation cost that leniency would be protecting.
     """
     if board.empty:
         return False
@@ -305,9 +311,5 @@ def already_evaluated(board: pd.DataFrame, **key: Any) -> bool:
     for column, value in key.items():
         if column not in board.columns:
             continue
-        if column == "checkpoint_hash":
-            # Older rows carry no hash; do not force them to be re-evaluated.
-            mask &= board[column].isna() | (board[column] == value)
-        else:
-            mask &= board[column] == value
+        mask &= board[column] == value
     return bool(mask.any())

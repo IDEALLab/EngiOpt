@@ -267,7 +267,7 @@ class EvalSpec:
                 **asdict(frozen),
                 "condition_digest": _digest(indices, conditions, ref_designs),
                 "problem_conditions": tuple(problem.conditions_keys),
-                "engibench_version": _engibench_version(),
+                "engibench_version": engibench_version(),
             }
         )
 
@@ -326,7 +326,7 @@ def _condition_bytes(values: Any) -> bytes:
     return json.dumps(values, sort_keys=True, default=str).encode()
 
 
-def _engibench_version() -> str:
+def engibench_version() -> str:
     """The EngiBench that produced a spec: its version, plus a git sha from a source checkout.
 
     The release version alone does not identify a problem definition -- 0.2.0 on
@@ -337,8 +337,54 @@ def _engibench_version() -> str:
     import engibench
 
     version = getattr(engibench, "__version__", "unknown")
-    source_root = Path(engibench.__file__).resolve().parent.parent
+    sha = _installed_vcs_commit() or _source_checkout_commit(Path(engibench.__file__).resolve().parent.parent)
+    return f"{version}+{sha}" if sha else version
+
+
+def _installed_vcs_commit() -> str | None:
+    """The commit recorded by `pip install "engibench @ git+..."`, if it was installed that way.
+
+    A non-editable VCS install leaves no `.git` directory, but pip records the
+    exact commit in the distribution's `direct_url.json` (PEP 610). That is the
+    authoritative answer whenever it exists, and it is the case CI hits.
+    """
+    from importlib import metadata
+
     try:
+        raw = metadata.distribution("engibench").read_text("direct_url.json")
+    except (metadata.PackageNotFoundError, OSError):
+        return None
+    if not raw:
+        return None
+    try:
+        commit = json.loads(raw).get("vcs_info", {}).get("commit_id")
+    except json.JSONDecodeError:
+        return None
+    return str(commit)[:12] if commit else None
+
+
+def _source_checkout_commit(source_root: Path) -> str | None:
+    """The commit of an EngiBench *source checkout*, or None if it is not one.
+
+    `git -C` searches parent directories, so asking it about a wheel unpacked
+    into a virtualenv inside another repository answers with *that* repository's
+    commit. A wheel in `EngiOpt/.venv/.../site-packages/engibench` would report
+    EngiOpt's sha as EngiBench's, which is worse than reporting nothing. Two
+    guards prevent it: an installed-package path is never a checkout, and the
+    repository root must be the package's own parent rather than some ancestor.
+    """
+    if "site-packages" in source_root.parts or "dist-packages" in source_root.parts:
+        return None
+    try:
+        toplevel = subprocess.run(
+            ["git", "-C", str(source_root), "rev-parse", "--show-toplevel"],
+            capture_output=True,
+            text=True,
+            check=True,
+            timeout=5,
+        ).stdout.strip()
+        if not toplevel or Path(toplevel).resolve() != source_root:
+            return None
         sha = subprocess.run(
             ["git", "-C", str(source_root), "rev-parse", "--short=12", "HEAD"],
             capture_output=True,
@@ -346,10 +392,10 @@ def _engibench_version() -> str:
             check=True,
             timeout=5,
         ).stdout.strip()
-    # Installed as a wheel rather than a checkout: the version is all there is.
+    # Installed as a plain wheel rather than a checkout: the version is all there is.
     except (OSError, subprocess.SubprocessError):
-        return version
-    return f"{version}+{sha}" if sha else version
+        return None
+    return sha or None
 
 
 def _dataset_revision(dataset_id: str | None) -> str | None:

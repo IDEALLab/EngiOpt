@@ -301,9 +301,16 @@ def test_the_same_weights_are_skipped() -> None:
     )
 
 
-def test_rows_predating_the_hash_column_are_still_skipped() -> None:
-    """An older board has no hash to compare, so it should not force a re-run."""
-    assert lb.already_evaluated(
+def test_a_row_without_a_hash_is_not_treated_as_a_match() -> None:
+    """A missing hash means the weights behind that row are unknown, not identical.
+
+    Skipping on it lets one hashless row suppress every future evaluation of that
+    configuration and seed -- including genuinely retrained weights -- until
+    somebody deletes the row by hand. This schema has never shipped on `main`, so
+    there is no historical board whose re-evaluation cost the old leniency was
+    protecting.
+    """
+    assert not lb.already_evaluated(
         _published_row(checkpoint_hash=None),
         problem_id="p",
         algo_id="a",
