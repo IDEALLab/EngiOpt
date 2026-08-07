@@ -20,6 +20,7 @@ from torch import nn
 from torchvision import transforms
 import tqdm
 import tyro
+import wandb
 
 from engiopt.checkpoint_store import save_checkpoint_package
 from engiopt.core import checkpoint_identity
@@ -28,7 +29,7 @@ from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
 from engiopt.transforms import condition_keys
 from engiopt.transforms import flatten_dict_factory
-import wandb
+from engiopt.transforms import normalizer_state
 
 if TYPE_CHECKING:
     from engibench.utils.problem import Problem
@@ -421,6 +422,8 @@ if __name__ == "__main__":
                     **checkpoint_identity(args),
                     condition_keys=cond_keys,
                     primary_files=["generator.pth"],
+                    condition_normalizer=normalizer_state(conds_normalizer),
+                    design_normalizer=normalizer_state(design_normalizer),
                 )
 
     wandb.finish()

@@ -18,13 +18,14 @@ import torch as th
 from torch import nn
 import torch.nn.functional as f
 import tyro
+import wandb
 
 from engiopt.checkpoint_store import save_checkpoint_package
 from engiopt.core import checkpoint_identity
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
-import wandb
+from engiopt.transforms import normalizer_state
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -640,6 +641,7 @@ if __name__ == "__main__":
                     run_config=vars(args),
                     **checkpoint_identity(args),
                     primary_files=["bezier_generator.pth"],
+                    design_normalizer=normalizer_state(design_scalars_normalizer),
                 )
 
     if args.track:

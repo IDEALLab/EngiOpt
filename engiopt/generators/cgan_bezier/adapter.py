@@ -9,10 +9,13 @@ import torch as th
 from engiopt.core import condition_keys_for
 from engiopt.core import ConditionBatch
 from engiopt.core import Generator
+from engiopt.core import recorded_condition_normalizer
+from engiopt.core import recorded_design_normalizer
 from engiopt.generators.cgan_bezier.cgan_bezier import _EPS
 from engiopt.generators.cgan_bezier.cgan_bezier import Generator as CBezierGANNet
 from engiopt.generators.cgan_bezier.cgan_bezier import prepare_data
 from engiopt.transforms import flatten_dict_factory
+from engiopt.transforms import load_normalizer_state
 
 if TYPE_CHECKING:
     from engibench.core import Problem
@@ -47,6 +50,10 @@ class CGANBezier(Generator):
         """Load a trained conditional BezierGAN, rebuilding its normalizers."""
         config = resolved.run_config
         _, conds_normalizer, design_scalars_normalizer, _keys = prepare_data(problem, device)
+        conds_normalizer = load_normalizer_state(conds_normalizer, recorded_condition_normalizer(resolved), device)
+        design_scalars_normalizer = load_normalizer_state(
+            design_scalars_normalizer, recorded_design_normalizer(resolved), device
+        )
         net = CBezierGANNet(
             latent_dim=config["latent_dim"],
             noise_dim=config["noise_dim"],

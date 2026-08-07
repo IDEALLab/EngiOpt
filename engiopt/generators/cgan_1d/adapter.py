@@ -10,8 +10,11 @@ from engiopt.core import condition_keys_for
 from engiopt.core import ConditionBatch
 from engiopt.core import design_shape_of
 from engiopt.core import Generator
+from engiopt.core import recorded_condition_normalizer
+from engiopt.core import recorded_design_normalizer
 from engiopt.generators.cgan_1d.cgan_1d import Generator as CGAN1DNet
 from engiopt.generators.cgan_1d.cgan_1d import prepare_data
+from engiopt.transforms import load_normalizer_state
 
 if TYPE_CHECKING:
     from engibench.core import Problem
@@ -22,8 +25,10 @@ if TYPE_CHECKING:
 class CGAN1D(Generator):
     """Conditional GAN over 1D / dict-valued designs such as airfoils.
 
-    The normalizers are part of the model: they are rebuilt from the training
-    dataset rather than stored in the checkpoint, so loading touches the dataset.
+    The normalizers are part of the model, so the checkpoint records the bounds
+    fitted during training and loading replays them. They are still fitted from
+    the dataset first, which is what supplies their shape and what checkpoints
+    written before the bounds were recorded fall back to.
     """
 
     algo_id = "cgan_1d"
@@ -42,6 +47,8 @@ class CGAN1D(Generator):
         """Load a trained cGAN-1D generator, rebuilding its normalizers."""
         config = resolved.run_config
         _, conds_normalizer, design_normalizer = prepare_data(problem, device)
+        conds_normalizer = load_normalizer_state(conds_normalizer, recorded_condition_normalizer(resolved), device)
+        design_normalizer = load_normalizer_state(design_normalizer, recorded_design_normalizer(resolved), device)
         net = CGAN1DNet(
             latent_dim=config["latent_dim"],
             n_conds=len(condition_keys_for(problem, resolved)),

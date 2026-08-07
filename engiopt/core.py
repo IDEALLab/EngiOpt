@@ -26,6 +26,8 @@ from gymnasium import spaces
 import numpy as np
 import torch as th
 
+from engiopt.checkpoint_store import CONDITION_NORMALIZER_METADATA_FIELD
+from engiopt.checkpoint_store import DESIGN_NORMALIZER_METADATA_FIELD
 from engiopt.checkpoint_store import resolve_named_checkpoint
 from engiopt.transforms import condition_keys as scalar_condition_keys
 
@@ -212,6 +214,30 @@ def condition_stats_for(resolved: ResolvedCheckpoint | None) -> tuple[list[float
     if not stats or "mean" not in stats or "std" not in stats:
         return None
     return [float(v) for v in stats["mean"]], [float(v) for v in stats["std"]]
+
+
+def recorded_condition_normalizer(resolved: ResolvedCheckpoint | None) -> dict[str, Any] | None:
+    """The min/max bounds a checkpoint scaled its conditions by, if it recorded any."""
+    return _recorded_normalizer(resolved, CONDITION_NORMALIZER_METADATA_FIELD)
+
+
+def recorded_design_normalizer(resolved: ResolvedCheckpoint | None) -> dict[str, Any] | None:
+    """The min/max bounds a checkpoint scaled its designs by, if it recorded any."""
+    return _recorded_normalizer(resolved, DESIGN_NORMALIZER_METADATA_FIELD)
+
+
+def _recorded_normalizer(resolved: ResolvedCheckpoint | None, field: str) -> dict[str, Any] | None:
+    """Read one recorded normalizer, returning None for checkpoints predating it.
+
+    None means "fall back to fitting from the dataset", which reproduces exactly
+    what those older runs did.
+    """
+    if resolved is None:
+        return None
+    state = resolved.metadata.get(field)
+    if not isinstance(state, dict) or "min" not in state or "max" not in state:
+        return None
+    return state
 
 
 def design_shape_of(problem: Problem) -> tuple[int, ...]:
@@ -582,7 +608,7 @@ class Generator(abc.ABC):
         Args:
             problem_id: EngiBench problem the checkpoint was trained on.
             seed: Training seed to load.
-            model_source: Backend preference: `auto`, `hf`, `wandb`, or `local`.
+            model_source: Backend preference: `auto`, `hf`, or `local`.
             hf_entity: HF org/user holding the checkpoint repos.
             hf_repo_prefix: Prefix of the per-model-family HF repo.
             local_model_dir: Directory to load from, for `local` sources.

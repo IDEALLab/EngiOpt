@@ -8,9 +8,11 @@ import torch as th
 
 from engiopt.core import ConditionBatch
 from engiopt.core import Generator
+from engiopt.core import recorded_design_normalizer
 from engiopt.generators.gan_bezier.gan_bezier import Generator as BezierGANNet
 from engiopt.generators.gan_bezier.gan_bezier import prepare_data
 from engiopt.transforms import flatten_dict_factory
+from engiopt.transforms import load_normalizer_state
 
 if TYPE_CHECKING:
     from engibench.core import Problem
@@ -52,6 +54,9 @@ class GANBezier(Generator):
         """Load a trained BezierGAN generator, rebuilding its scalar normalizer."""
         config = resolved.run_config
         _, design_scalars_normalizer, _ = prepare_data(problem, n_prepare_samples, device)
+        design_scalars_normalizer = load_normalizer_state(
+            design_scalars_normalizer, recorded_design_normalizer(resolved), device
+        )
         net = BezierGANNet(
             latent_dim=config["latent_dim"],
             noise_dim=config["noise_dim"],

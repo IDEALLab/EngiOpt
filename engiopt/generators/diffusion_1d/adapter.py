@@ -12,7 +12,9 @@ import torch as th
 from engiopt.core import ConditionBatch
 from engiopt.core import design_shape_of
 from engiopt.core import Generator
+from engiopt.core import recorded_design_normalizer
 from engiopt.generators.diffusion_1d.diffusion_1d import prepare_data
+from engiopt.transforms import load_normalizer_state
 
 if TYPE_CHECKING:
     from engibench.core import Problem
@@ -51,6 +53,7 @@ class Diffusion1D(Generator):
         padding_size = _padding_for(design_shape_of(problem)[0])
         padded_shape = (design_shape_of(problem)[0] + padding_size,)
         _, design_normalizer = prepare_data(problem, padding_size, device)
+        design_normalizer = load_normalizer_state(design_normalizer, recorded_design_normalizer(resolved), device)
         unet = Unet1D(dim=config["unet_dim"], channels=config["n_channels"]).to(device)
         diffusion = GaussianDiffusion1D(
             unet,

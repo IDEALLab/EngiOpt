@@ -1,13 +1,19 @@
 """Transformations for the data."""
 
-from collections.abc import Callable
+from __future__ import annotations
 
-from datasets import Dataset
-from engibench.core import Problem
+from typing import Any, TYPE_CHECKING
+
 from gymnasium import spaces
 import numpy as np
 import torch as th
 import torch.nn.functional as f
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
+    from datasets import Dataset
+    from engibench.core import Problem
 
 
 def get_scalar_condition_keys(problem: Problem, dataset: Dataset, *, drop_constants: bool = False) -> list[str]:
@@ -129,3 +135,56 @@ def drop_constant(ds: Dataset, condition_names: list[str]) -> tuple[Dataset, lis
     ds = ds.remove_columns(dropped)
 
     return ds, kept
+
+
+def normalizer_state(normalizer: Any) -> dict[str, Any]:
+    """Serialize a min/max `Normalizer`'s fitted bounds for a checkpoint.
+
+    Several 1D and Bezier models scale designs or conditions into `[0, 1]` using
+    bounds fitted on the training split. Those bounds are as much a part of the
+    model as its weights -- decode against different bounds and you get a
+    different design -- but `Normalizer` is a plain class rather than an
+    `nn.Module`, so nothing put them in the state dict. Recording them alongside
+    the weights is what stops a later dataset revision from silently changing
+    what a fixed checkpoint produces.
+
+    Duck-typed on `min_val`/`max_val`/`eps` because the five training scripts
+    each define their own identical `Normalizer`, and unifying them is a change
+    to training code that this does not need.
+
+    Args:
+        normalizer: Any object exposing `min_val`, `max_val`, and optionally `eps`.
+
+    Returns:
+        A JSON-serializable dict of the fitted bounds.
+    """
+    return {
+        "min": th.as_tensor(normalizer.min_val).detach().cpu().flatten().tolist(),
+        "max": th.as_tensor(normalizer.max_val).detach().cpu().flatten().tolist(),
+        "eps": float(getattr(normalizer, "eps", 1e-7)),
+    }
+
+
+def load_normalizer_state(normalizer: Any, state: dict[str, Any] | None, device: th.device) -> Any:
+    """Restore a normalizer's bounds from what the checkpoint recorded.
+
+    Returns `normalizer` unchanged when the checkpoint predates this being
+    recorded, which leaves those packages loading exactly as they did before --
+    fitted from the current dataset, which is what those runs actually used.
+
+    Args:
+        normalizer: A freshly fitted normalizer to overwrite in place.
+        state: The recorded bounds, or None for a checkpoint without them.
+        device: Device the restored tensors should live on.
+
+    Returns:
+        The same object, carrying the recorded bounds when there were any.
+    """
+    if not state or "min" not in state or "max" not in state:
+        return normalizer
+    reference = th.as_tensor(normalizer.min_val)
+    normalizer.min_val = th.tensor(state["min"], device=device, dtype=reference.dtype).reshape(reference.shape)
+    normalizer.max_val = th.tensor(state["max"], device=device, dtype=reference.dtype).reshape(reference.shape)
+    if "eps" in state:
+        normalizer.eps = float(state["eps"])
+    return normalizer
