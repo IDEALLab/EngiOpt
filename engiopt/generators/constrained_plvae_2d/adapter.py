@@ -52,7 +52,7 @@ class ConstrainedPerfLVAE2D(LVAESamplingMixin, Generator):
                 f"{cls.algo_id} checkpoints trained with --conditional-decoder are not yet loadable for "
                 "evaluation: sampling would need the condition encoder and rasterized image conditions."
             )
-        return cls(**cls.prepare(resolved, problem, device), **base)
+        return cls(**cls.prepare(resolved, problem, device), problem=problem, device=device, **base)
 
     def _sample(self, conditions: ConditionBatch, n: int) -> th.Tensor:
         """Generate `n` designs; the decoder is unconditional."""

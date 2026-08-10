@@ -37,7 +37,7 @@ class PerfLVAE2D(LVAESamplingMixin, Generator):
     @classmethod
     def build(cls, resolved: ResolvedCheckpoint, problem: Problem, device: th.device, **base: Any) -> PerfLVAE2D:
         """Rebuild the decoder and fit the latent distribution to sample from."""
-        return cls(**cls.prepare(resolved, problem, device), **base)
+        return cls(**cls.prepare(resolved, problem, device), problem=problem, device=device, **base)
 
     def _sample(self, conditions: ConditionBatch, n: int) -> th.Tensor:
         """Generate `n` designs; the decoder is unconditional."""
