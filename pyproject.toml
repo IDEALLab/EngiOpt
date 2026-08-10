@@ -190,6 +190,10 @@ order-by-type = false
 "engiopt/generators/_template/*.py" = [
     "ERA001",  # The commented-out example code is the point of the template.
 ]
+"workshops/**/*.py" = [
+    "INP001",  # Standalone build scripts, run directly rather than imported.
+    "RUF001",  # Workshop prose is written for humans and uses real typography.
+]
 "docs/**" = [
     "D",       # Pydocstyle
 ]

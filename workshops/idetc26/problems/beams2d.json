@@ -1,0 +1,105 @@
+{
+  "problem_id": "beams2d",
+  "spec": "beams2d/v1",
+  "display_name": "Beams2D -- cantilever topology optimization",
+  "opening_metrics": [
+    "mmd",
+    "dpp",
+    "viol"
+  ],
+  "withheld_metrics": [
+    "novelty",
+    "cond_err",
+    "pixel_vendi",
+    "pca_mmd",
+    "gen_seconds"
+  ],
+  "expensive_metrics": [
+    "iog",
+    "cog",
+    "fog"
+  ],
+  "reveal_seeds": [
+    1,
+    2,
+    3
+  ],
+  "bank": [
+    {
+      "kind": "baseline",
+      "algo": "knn_retrieval",
+      "seed": 1,
+      "summary": "k-nearest-neighbour retrieval. Habibi et al. found this hard to beat at limited data."
+    },
+    {
+      "kind": "baseline",
+      "algo": "linear_regression",
+      "seed": 1,
+      "summary": "Ridge regression from conditions to pixels."
+    },
+    {
+      "kind": "pretrained",
+      "algo": "vqgan",
+      "seed": 1,
+      "optional": true,
+      "summary": "VQGAN: discrete latent codes plus an autoregressive transformer."
+    },
+    {
+      "kind": "pretrained",
+      "algo": "vqgan",
+      "seed": 2,
+      "optional": true,
+      "summary": "VQGAN, a different training seed."
+    },
+    {
+      "kind": "pretrained",
+      "algo": "diffusion_2d_cond",
+      "seed": 1,
+      "optional": true,
+      "summary": "Conditional denoising diffusion over the design grid."
+    },
+    {
+      "kind": "pretrained",
+      "algo": "cgan_cnn_2d",
+      "seed": 42,
+      "config_fingerprint": "6293adb3",
+      "optional": true,
+      "summary": "Conditional GAN, CNN backbone, centre of the hyperparameter sweep."
+    },
+    {
+      "kind": "pretrained",
+      "algo": "gan_cnn_2d",
+      "seed": 42,
+      "config_fingerprint": "6293adb3",
+      "optional": true,
+      "summary": "Unconditional GAN, CNN backbone."
+    },
+    {
+      "kind": "pretrained",
+      "algo": "constrained_plvae_2d",
+      "seed": 1,
+      "config_fingerprint": "36c3f928",
+      "optional": true,
+      "summary": "Performance-constrained least-volume autoencoder."
+    }
+  ],
+  "narrative": {
+    "opening": "Three metrics, eight models, no simulator. Pick one and defend it.",
+    "why_these_three": "mmd, dpp and viol are the columns almost every generative-design paper reports, because they are the columns you can afford.",
+    "habibi": "Habibi et al., When Is it Actually Worth Learning Inverse Design? (J. Mech. Des. 148(6):061704, 2026) found kNN beats deconvolutional networks for topology-optimization warm-starting at limited data, once data-generation cost is counted. Two entries in your bank are exactly that comparison."
+  },
+  "reference_instruments": [
+    {
+      "kind": "reference",
+      "algo": "collapsed"
+    },
+    {
+      "kind": "reference",
+      "algo": "noise_doped"
+    },
+    {
+      "kind": "reference",
+      "algo": "volume_only"
+    }
+  ]
+}
