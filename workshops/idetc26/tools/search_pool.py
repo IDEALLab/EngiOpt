@@ -134,8 +134,19 @@ def discover(problem_id: str, *, max_per_algo: dict[str, int] | None = None) -> 
     return [e for e in itertools.chain.from_iterable(itertools.zip_longest(*by_algo.values())) if e is not None]
 
 
-def score(problem_id: str, spec: str, entries: list[PoolEntry], *, output: Path) -> None:
-    """Score each entry on the cheap metrics, appending to a restartable CSV."""
+def score(problem_id: str, spec: str, entries: list[PoolEntry], *, output: Path, baselines: bool = True) -> None:
+    """Score each entry on the cheap metrics, appending to a restartable CSV.
+
+    Args:
+        problem_id: Problem to score against.
+        spec: Frozen evaluation spec.
+        entries: Published checkpoint packages to score.
+        output: Restartable CSV to append to.
+        baselines: Also score the dataset-fitted baselines. They are bank
+            candidates like any other model -- Habibi et al. found kNN
+            competitive on exactly this task -- so leaving them out of the
+            search would decide the interesting question by omission.
+    """
     from engiopt.utils.all_generators import BUILTIN_GENERATORS
 
     evaluator = Evaluator.for_problem(problem_id, spec=spec)
@@ -176,6 +187,28 @@ def score(problem_id: str, spec: str, entries: list[PoolEntry], *, output: Path)
         frame = pd.DataFrame([record]).reindex(columns=CSV_COLUMNS)
         frame.to_csv(output, mode="a", header=not output.exists(), index=False)
         print(f"  [{index}/{len(entries)}] {entry.key}: {time.perf_counter() - started:5.1f}s  mmd={row.get('mmd'):.4f}")
+
+    if baselines:
+        _score_baselines(evaluator, problem_id, output=output)
+
+
+def _score_baselines(evaluator: Evaluator, problem_id: str, *, output: Path) -> None:
+    """Add the dataset-fitted baselines to the board, under the same schema."""
+    from engiopt.baselines import BANK_ELIGIBLE
+
+    done = set(pd.read_csv(output)["key"]) if output.exists() else set()
+    for algo, cls in BANK_ELIGIBLE.items():
+        key = f"{algo}/fitted/seed_1"
+        if key in done:
+            continue
+        started = time.perf_counter()
+        generator = cls.from_problem(evaluator.problem, problem_id=problem_id, seed=1)
+        row = evaluator.score(generator, only=CHEAP_METRICS)
+        record = {"key": key, "algo": algo, "config_fingerprint": "", "seed": 1, **{m: row.get(m) for m in CHEAP_METRICS}}
+        pd.DataFrame([record]).reindex(columns=CSV_COLUMNS).to_csv(
+            output, mode="a", header=not output.exists(), index=False
+        )
+        print(f"  [baseline] {key}: {time.perf_counter() - started:5.1f}s  mmd={row.get('mmd'):.4f}")
 
 
 # ----------------------------------------------------------------------
