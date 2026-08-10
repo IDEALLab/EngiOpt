@@ -30,6 +30,7 @@ from torch import nn
 from torch.nn import functional as f
 import tqdm
 import tyro
+import wandb
 
 from engiopt.checkpoint_store import save_checkpoint_package
 from engiopt.core import checkpoint_identity
@@ -52,7 +53,6 @@ from engiopt.transforms import condition_keys
 from engiopt.transforms import drop_constant
 from engiopt.transforms import normalize
 from engiopt.transforms import resize_to
-import wandb
 
 
 @dataclass
@@ -1005,6 +1005,9 @@ if __name__ == "__main__":
                         condition_keys=conditions,
                         condition_stats=condition_stats,
                         metadata={"stage": "cvqgan"},
+                        # Two stages still to run; a package this partial cannot be
+                        # loaded and must not look like one that can.
+                        package_complete=False,
                         primary_files=["cvqgan.pth"],
                     )
 
@@ -1127,6 +1130,8 @@ if __name__ == "__main__":
                     condition_keys=conditions,
                     condition_stats=condition_stats,
                     metadata={"stage": "vqgan"},
+                    # The transformer stage has not run yet.
+                    package_complete=False,
                     primary_files=["vqgan.pth"],
                 )
 

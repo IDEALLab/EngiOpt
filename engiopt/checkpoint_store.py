@@ -23,11 +23,56 @@ from typing import Any, Literal
 
 from huggingface_hub import HfApi
 from huggingface_hub import snapshot_download
-
 import wandb
 
 METRICS_FILE = "metrics.json"
 """Evaluation scores stored alongside the weights they describe."""
+
+RUN_CONFIG_FILE = "run_config.json"
+"""Hyperparameters the run was launched with, enough to rebuild the network."""
+
+METADATA_FILE = "metadata.json"
+"""What this package is: paths, revisions, condition schema, completeness."""
+
+PACKAGE_COMPLETE_FIELD = "package_complete"
+"""Metadata flag: whether the run that wrote this package finished.
+
+Multi-stage models (VQGAN trains a condition autoencoder, then a VQGAN, then a
+transformer) upload after each stage so a crash does not lose the earlier work.
+That means an interrupted run leaves a package carrying a `run_config.json` and
+a `metadata.json` -- indistinguishable, from the Hub, from a finished one. This
+field is the distinction; single-stage models write `True` and never think about
+it.
+"""
+
+CONDITION_NORMALIZER_METADATA_FIELD = "condition_normalizer"
+"""Metadata field recording the min/max a model scaled its *conditions* by."""
+
+DESIGN_NORMALIZER_METADATA_FIELD = "design_normalizer"
+"""Metadata field recording the min/max a model scaled its *designs* by.
+
+Several 1D models normalize designs into `[0, 1]` for training and denormalize
+on the way out, with bounds fitted on the training split. Those bounds are part
+of the model -- a design decoded against different bounds is a different design
+-- but a plain `Normalizer` is not an `nn.Module`, so they never reached the
+state dict. Recording them here is what makes such a checkpoint reproducible.
+"""
+
+_MAX_LISTED_PACKAGES = 8
+"""How many sibling packages an error message names before summarizing.
+
+A sweep publishes hundreds; a wall of them is not more helpful than a handful
+plus a count.
+"""
+
+DESCRIPTIVE_FILES = frozenset({RUN_CONFIG_FILE, METADATA_FILE, METRICS_FILE})
+"""Package files that describe the checkpoint rather than being part of it.
+
+Neither hashed as weights nor served as loadable checkpoint files. `metrics.json`
+belongs here for a reason worth stating: it is written *after* evaluation, into
+the package it describes, so counting it would let scoring a checkpoint change
+that checkpoint's identity.
+"""
 
 CheckpointBackend = Literal["hf", "none"]
 ModelSource = Literal["auto", "hf", "local"]
@@ -86,6 +131,9 @@ def save_checkpoint_package(
     is_default_config: bool = True,
     condition_keys: list[str] | tuple[str, ...] | None = None,
     condition_stats: dict[str, list[float]] | None = None,
+    condition_normalizer: dict[str, Any] | None = None,
+    design_normalizer: dict[str, Any] | None = None,
+    package_complete: bool = True,
 ) -> dict[str, Any]:
     """Save a checkpoint package to HuggingFace.
 
@@ -112,6 +160,16 @@ def save_checkpoint_package(
     evaluator can reproduce the same scale, instead of refitting it on the far
     smaller evaluation sample.
 
+    A model whose preprocessing is a min/max `Normalizer` rather than a mean/std
+    rescaling records it through `condition_normalizer` / `design_normalizer`
+    (see `engiopt.transforms.normalizer_state`). The principle is the same one:
+    whatever a model fitted on the training split travels with the weights, so
+    loading never has to re-derive it from whatever dataset happens to be current.
+
+    Multi-stage models pass `package_complete=False` on every upload but the
+    last, so an interrupted run leaves a package that says it is unfinished
+    rather than one that merely fails to load.
+
     W&B is no longer a checkpoint storage backend; the active W&B run still
     receives a summary pointing at the HF package for traceability.
     """
@@ -133,6 +191,9 @@ def save_checkpoint_package(
         metadata=metadata,
         condition_keys=condition_keys,
         condition_stats=condition_stats,
+        condition_normalizer=condition_normalizer,
+        design_normalizer=design_normalizer,
+        package_complete=package_complete,
     )
     base_metadata.update(_build_wandb_run_metadata())
 
@@ -160,8 +221,11 @@ def save_checkpoint_package(
             )
 
         # The canonical path defines what the bare model name resolves to, so
-        # only a default-hyperparameter run may claim it.
-        if is_default_config:
+        # only a finished default-hyperparameter run may claim it. Otherwise a
+        # multi-stage model publishes the bare model name at stage 0 and leaves
+        # it unloadable for as long as the remaining stages take -- hours, for
+        # VQGAN -- or permanently if the run dies, which 4 of 102 did.
+        if is_default_config and package_complete:
             info["hf_package_path"] = canonical_path
             info["hf_revision"] = _upload_package_to_hf(
                 repo_id=repo_id,
@@ -210,13 +274,19 @@ def resolve_named_checkpoint(
         FileNotFoundError: If no backend could supply the package.
     """
     errors: list[str] = []
+    repo_id = build_hf_repo_id(hf_entity, hf_repo_prefix, algo)
     if model_source in {"auto", "hf"}:
         try:
             return _resolve_hf_package(
-                repo_id=build_hf_repo_id(hf_entity, hf_repo_prefix, algo),
+                repo_id=repo_id,
                 package_path=build_hf_package_path(problem_id, seed, extra_path_parts),
                 required_files=required_files,
             )
+        except FileNotFoundError as exc:
+            hint = _sibling_packages_hint(repo_id, problem_id, seed, extra_path_parts)
+            if model_source == "hf":
+                raise FileNotFoundError(f"{exc}{hint}") from exc
+            errors.append(f"hf: {exc}{hint}")
         except Exception as exc:
             if model_source == "hf":
                 raise
@@ -227,6 +297,133 @@ def resolve_named_checkpoint(
 
     attempted = ", ".join(errors) if errors else "no backends attempted"
     raise FileNotFoundError(f"Unable to resolve checkpoint for {algo}/{problem_id}/seed_{seed}: {attempted}")
+
+
+def list_packages(repo_id: str, problem_id: str | None = None) -> list[str]:
+    """Every checkpoint package path in a model repo, optionally for one problem.
+
+    A package is a directory holding a `run_config.json`, which is what every
+    upload writes and what loading requires.
+
+    Args:
+        repo_id: HF model repo, e.g. `IDEALLab/engiopt-cgan-cnn-2d`.
+        problem_id: Restrict to one problem's packages.
+
+    Returns:
+        Sorted package paths, e.g. `["beams2d/cfg_023dd1fb/seed_42", ...]`.
+    """
+    api = HfApi()
+    prefix = f"{_sanitize_path_component(problem_id)}/" if problem_id else ""
+    return sorted(
+        entry[: -len(f"/{RUN_CONFIG_FILE}")]
+        for entry in api.list_repo_files(repo_id=repo_id, repo_type="model")
+        if entry.endswith(f"/{RUN_CONFIG_FILE}") and entry.startswith(prefix)
+    )
+
+
+def _sibling_packages_hint(repo_id: str, problem_id: str, seed: int, extra_path_parts: list[str] | None) -> str:
+    """Name the packages that *do* exist when the requested one does not.
+
+    The common failure is asking for the canonical `{problem}/seed_N` when only
+    sweep configurations were ever published -- every arm of a sweep varies some
+    hyperparameter, so none of them is the default run that claims the canonical
+    path. "Not found" alone sends the reader looking for a broken path; listing
+    the neighbours shows them what to pass to `--config-fingerprints`, or that
+    the canonical run is simply missing and needs training or promoting.
+    """
+    try:
+        available = list_packages(repo_id, problem_id)
+    except Exception:  # noqa: BLE001 - a hint must never replace the original error
+        return ""
+    if not available:
+        return f" No packages for {problem_id!r} exist in {repo_id}."
+    shown = ", ".join(available[:_MAX_LISTED_PACKAGES]) + (
+        f", ... ({len(available)} total)" if len(available) > _MAX_LISTED_PACKAGES else ""
+    )
+    hint = f" That repo does hold: {shown}."
+    if not extra_path_parts:
+        hint += (
+            f" Nothing claims the canonical {problem_id}/seed_{seed}, which only a run using the training "
+            "script's default hyperparameters writes. Pass --config-fingerprints to score one of the above, "
+            "or run `python -m engiopt.promote_checkpoint` to make one of them canonical."
+        )
+    return hint
+
+
+def promote_to_canonical(
+    *,
+    hf_entity: str,
+    hf_repo_prefix: str,
+    problem_id: str,
+    algo: str,
+    seed: int,
+    config_fingerprint: str,
+    token: str | None = None,
+) -> str:
+    """Copy a configuration's package to the canonical `{problem_id}/seed_{seed}` path.
+
+    The canonical path is what a bare model name resolves to, and normally only
+    a default-hyperparameter run writes it. A sweep has no such run -- every arm
+    varies something -- so a sweep alone leaves the canonical path empty and the
+    documented `--seeds 1` command resolving nothing. This promotes one already
+    trained arm into that role without retraining it.
+
+    The promoted package keeps its own `config_fingerprint` in metadata, so a
+    leaderboard row still records which configuration actually earned the score;
+    only the *address* changes.
+
+    Args:
+        hf_entity: HF org/user holding the checkpoint repos.
+        hf_repo_prefix: Prefix of the per-model-family repo.
+        problem_id: Problem the checkpoint was trained on.
+        algo: Model family, selecting the repo.
+        seed: Training seed; the promoted package keeps it.
+        config_fingerprint: Which configuration to promote.
+        token: HF token; falls back to the ambient login.
+
+    Returns:
+        The canonical path written.
+
+    Raises:
+        FileNotFoundError: If the source package is absent or incomplete.
+    """
+    repo_id = build_hf_repo_id(hf_entity, hf_repo_prefix, algo)
+    source_path = build_hf_package_path(problem_id, seed, [f"cfg_{config_fingerprint}"])
+    canonical_path = build_hf_package_path(problem_id, seed)
+
+    snapshot = snapshot_download(repo_id=repo_id, repo_type="model", allow_patterns=[f"{source_path}/*"], token=token)
+    source_dir = Path(snapshot) / source_path
+    if not source_dir.is_dir():
+        raise FileNotFoundError(f"Cannot promote {repo_id}/{source_path}: it does not exist.")
+
+    metadata_path = source_dir / METADATA_FILE
+    metadata = _read_json(str(metadata_path)) if metadata_path.exists() else {}
+    if metadata.get(PACKAGE_COMPLETE_FIELD) is False:
+        raise FileNotFoundError(
+            f"Refusing to promote {repo_id}/{source_path}: it is marked incomplete, so the canonical "
+            "path would resolve to a package that cannot be loaded."
+        )
+
+    api = HfApi(token=token)
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stage_dir = Path(tmpdir)
+        for entry in source_dir.iterdir():
+            # Metrics describe the score of the package at its old address; the
+            # promoted copy has not been evaluated under its new name yet.
+            if entry.is_file() and entry.name != METRICS_FILE:
+                shutil.copy2(entry, stage_dir / entry.name)
+        _write_json(
+            stage_dir / METADATA_FILE,
+            {**metadata, "hf_package_path": canonical_path, "promoted_from": source_path},
+        )
+        api.upload_folder(
+            repo_id=repo_id,
+            repo_type="model",
+            folder_path=str(stage_dir),
+            path_in_repo=canonical_path,
+            commit_message=f"Promote cfg_{config_fingerprint} to canonical {canonical_path}",
+        )
+    return canonical_path
 
 
 def resolve_checkpoint_reference(
@@ -316,9 +513,16 @@ def hash_package_contents(root_dir: str) -> str:
     that file generate differently. Hashing the declared list would give them
     the same identity.
 
-    `run_config.json` and `metadata.json` are excluded: they describe the
-    package rather than being weights, and `metadata.json` records paths and
-    revisions that differ between the two locations one run writes.
+    Files that *describe* the package rather than constitute it are excluded:
+
+    - `run_config.json`, `metadata.json` -- metadata records the package path and
+      revision, which differ between the two locations one run writes, so
+      including it would give identical weights two different hashes.
+    - `metrics.json` -- written by `publish_checkpoint_metrics` *after* the
+      weights, into this same directory. Including it would make attaching a
+      score change the identity of the thing scored: the next `--skip-existing`
+      run would see a new hash, re-evaluate, rewrite the metrics, and change the
+      hash again. The hash must be a property of the weights alone.
 
     Args:
         root_dir: Local directory holding the package.
@@ -326,9 +530,10 @@ def hash_package_contents(root_dir: str) -> str:
     Returns:
         A 16-character hash over the file names and their bytes.
     """
-    described = {"run_config.json", "metadata.json"}
     weight_files = sorted(
-        entry for entry in os.listdir(root_dir) if entry not in described and os.path.isfile(os.path.join(root_dir, entry))
+        entry
+        for entry in os.listdir(root_dir)
+        if entry not in DESCRIPTIVE_FILES and os.path.isfile(os.path.join(root_dir, entry))
     )
     hasher = hashlib.sha256()
     for file_name in weight_files:
@@ -342,17 +547,17 @@ def hash_package_contents(root_dir: str) -> str:
 def _load_package_from_directory(
     *, root_dir: str, required_files: list[str], source: Literal["hf", "local"], revision: str | None = None
 ) -> ResolvedCheckpoint:
-    run_config_path = os.path.join(root_dir, "run_config.json")
-    metadata_path = os.path.join(root_dir, "metadata.json")
+    run_config_path = os.path.join(root_dir, RUN_CONFIG_FILE)
+    metadata_path = os.path.join(root_dir, METADATA_FILE)
     if not os.path.exists(run_config_path):
-        raise FileNotFoundError(f"Missing run_config.json in {root_dir}")
+        raise FileNotFoundError(f"Missing {RUN_CONFIG_FILE} in {root_dir}")
     run_config = _read_json(run_config_path)
     metadata = _read_json(metadata_path) if os.path.exists(metadata_path) else {}
     package_files = required_files or _discover_package_files(root_dir, metadata)
     files = {file_name: os.path.join(root_dir, file_name) for file_name in package_files}
-    for file_name, file_path in files.items():
-        if not os.path.exists(file_path):
-            raise FileNotFoundError(f"Missing checkpoint file {file_name} in {root_dir}")
+    missing = [file_name for file_name, file_path in files.items() if not os.path.exists(file_path)]
+    if missing:
+        raise FileNotFoundError(_missing_files_message(root_dir, missing, metadata))
     return ResolvedCheckpoint(
         source=source,
         root_dir=root_dir,
@@ -364,16 +569,36 @@ def _load_package_from_directory(
     )
 
 
+def _missing_files_message(root_dir: str, missing: list[str], metadata: dict[str, Any]) -> str:
+    """Explain a package that is missing weights, saying so when the run never finished.
+
+    A multi-stage model uploads after each stage, so a run killed partway leaves
+    a package that has a `run_config.json` and a `metadata.json` and therefore
+    looks like a checkpoint from the outside. `package_complete` is what tells
+    the two apart, and saying which stage it stopped at turns "file not found"
+    into something the reader can act on.
+    """
+    present = sorted(entry for entry in os.listdir(root_dir) if entry not in DESCRIPTIVE_FILES)
+    lines = [f"Missing checkpoint file(s) {missing} in {root_dir}; the package holds {present or 'no weight files'}."]
+    if metadata.get(PACKAGE_COMPLETE_FIELD) is False:
+        stage = metadata.get("stage")
+        reached = f" It reached the {stage!r} stage." if stage else ""
+        lines.append(
+            f"This package is marked incomplete: the training run that wrote it did not finish.{reached} "
+            "Re-run training to completion; a partial package cannot be loaded."
+        )
+    return " ".join(lines)
+
+
 def _discover_package_files(root_dir: str, metadata: dict[str, Any]) -> list[str]:
     primary_files = metadata.get("primary_files")
     if isinstance(primary_files, list) and primary_files:
         return [str(file_name) for file_name in primary_files]
 
-    excluded_names = {"metadata.json", "run_config.json"}
     discovered = [
         entry
         for entry in os.listdir(root_dir)
-        if os.path.isfile(os.path.join(root_dir, entry)) and entry not in excluded_names
+        if os.path.isfile(os.path.join(root_dir, entry)) and entry not in DESCRIPTIVE_FILES
     ]
     if not discovered:
         raise FileNotFoundError(f"No checkpoint files found in {root_dir}")
@@ -402,6 +627,9 @@ def _build_metadata(
     metadata: dict[str, Any] | None,
     condition_keys: list[str] | tuple[str, ...] | None = None,
     condition_stats: dict[str, list[float]] | None = None,
+    condition_normalizer: dict[str, Any] | None = None,
+    design_normalizer: dict[str, Any] | None = None,
+    package_complete: bool = True,
 ) -> dict[str, Any]:
     payload = dict(metadata or {})
     payload.update(
@@ -412,12 +640,17 @@ def _build_metadata(
             "checkpoint_backend": checkpoint_backend,
             "checkpoint_files": sorted(checkpoint_files),
             "primary_files": primary_files or sorted(checkpoint_files),
+            PACKAGE_COMPLETE_FIELD: package_complete,
         }
     )
     if condition_keys is not None:
         payload["condition_keys"] = list(condition_keys)
     if condition_stats is not None:
         payload["condition_stats"] = {key: [float(v) for v in values] for key, values in condition_stats.items()}
+    if condition_normalizer is not None:
+        payload[CONDITION_NORMALIZER_METADATA_FIELD] = condition_normalizer
+    if design_normalizer is not None:
+        payload[DESIGN_NORMALIZER_METADATA_FIELD] = design_normalizer
     return payload
 
 
