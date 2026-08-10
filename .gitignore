@@ -171,3 +171,8 @@ logs/*
 
 .ruff_cache/
 engibench_studies/*
+
+# Measurement artefacts that are evidence, not scratch: the scored pool board and
+# the cheap-vs-physics board are what the metric claims rest on, and a claim whose
+# numbers cannot be re-read is the thing this workshop argues against.
+!workshops/idetc26/tools/*.csv
