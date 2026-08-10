@@ -51,6 +51,21 @@ REPOS = {
 SLOW_ALGOS = {"vqgan", "diffusion_2d_cond"}
 """Families whose sampling cost makes an exhaustive sweep unaffordable."""
 
+DIVERGENCE_LOSS = 0.5
+"""Final training loss above which a checkpoint is treated as not having trained.
+
+A DDPM regresses unit-variance noise, so an MSE near 1.0 means its prediction is
+uncorrelated with the target -- the run produced a network that learned nothing.
+One beams2d diffusion checkpoint in the pool records 1.013 while its siblings
+record 0.0015-0.0073, and *no cheap metric catches it*: it posts the best MMD of
+the family, a novelty of 39.5, and a pixel_vendi of 49.9996 out of 50, because
+noise is maximally diverse in pixel space. Ranking it against real models is
+not a hard call to make well -- it is a call the metrics actively get wrong.
+
+The threshold is deliberately loose. It separates "trained" from "did not train
+at all"; it is not a quality bar.
+"""
+
 HYPERPARAMETER_COLUMNS = ("n_epochs", "latent_dim", "lr_gen", "lr", "batch_size")
 """Run-config keys recorded alongside the scores, for reading the board by hand.
 
@@ -58,7 +73,7 @@ The union across families, not the intersection: `diffusion_2d_cond` has `lr`
 where the GANs have `lr_gen`, and a row missing a column must write an empty
 cell rather than shift the ones after it."""
 
-CSV_COLUMNS = ("key", "algo", "config_fingerprint", "seed", *HYPERPARAMETER_COLUMNS, *CHEAP_METRICS)
+CSV_COLUMNS = ("key", "algo", "config_fingerprint", "seed", "train_loss", *HYPERPARAMETER_COLUMNS, *CHEAP_METRICS)
 """The fixed output schema. Every appended row is reindexed onto it."""
 
 HF_ENTITY = "IDEALLab"
@@ -126,6 +141,12 @@ def discover(problem_id: str, *, max_per_algo: dict[str, int] | None = None) -> 
                 continue
             entries.append(PoolEntry(algo, fingerprint, int(seed_part.removeprefix("seed_")), config))
 
+        # Canonical packages first, so a cap can never drop the default
+        # configuration. Capping by sorted path put `cfg_*` ahead of `seed_*`
+        # and silently excluded the very config every other report is written
+        # against -- which is the only config a published number can be
+        # compared to.
+        entries.sort(key=lambda e: (e.config_fingerprint is not None, e.config_fingerprint or "", e.seed))
         cap = caps.get(algo)
         by_algo[algo] = entries[:cap] if cap else entries
         print(f"  {algo:24s} {len(by_algo[algo]):3d} packages" + (f" (capped from {len(entries)})" if cap else ""))
@@ -175,6 +196,7 @@ def score(problem_id: str, spec: str, entries: list[PoolEntry], *, output: Path,
             "algo": entry.algo,
             "config_fingerprint": entry.config_fingerprint or "",
             "seed": entry.seed,
+            "train_loss": _final_training_loss(entry, problem_id),
             **{k: entry.run_config.get(k) for k in HYPERPARAMETER_COLUMNS},
             **{m: row.get(m) for m in CHEAP_METRICS},
         }
@@ -190,6 +212,40 @@ def score(problem_id: str, spec: str, entries: list[PoolEntry], *, output: Path,
 
     if baselines:
         _score_baselines(evaluator, problem_id, output=output)
+
+
+def _final_training_loss(entry: PoolEntry, problem_id: str) -> float | None:
+    """The loss the run finished on, read from the checkpoint it published.
+
+    The single cheapest signal that a run trained at all, and the only one in
+    this whole board that is not a property of the generated designs. It is read
+    from the already-downloaded package, so it costs nothing here -- but it
+    ought to live in `metadata.json` instead, where a curator could check it
+    without pulling 210 MB of weights first.
+    """
+    import torch as th
+
+    from engiopt.checkpoint_store import resolve_named_checkpoint
+    from engiopt.core import config_path_parts
+    from engiopt.utils.all_generators import BUILTIN_GENERATORS
+
+    cls = BUILTIN_GENERATORS[entry.algo]
+    try:
+        resolved = resolve_named_checkpoint(
+            model_source="hf",
+            problem_id=problem_id,
+            algo=entry.algo,
+            seed=entry.seed,
+            hf_entity=HF_ENTITY,
+            hf_repo_prefix="engiopt",
+            required_files=list(cls.checkpoint_files),
+            extra_path_parts=config_path_parts(entry.config_fingerprint),
+        )
+        primary = resolved.files[cls.checkpoint_files[0]]
+        loss = th.load(primary, map_location="cpu", weights_only=False).get("loss")
+    except Exception:  # noqa: BLE001 - a package that records no loss is reported as unknown, not fatal
+        return None
+    return None if loss is None else float(loss)
 
 
 def _score_baselines(evaluator: Evaluator, problem_id: str, *, output: Path) -> None:
@@ -279,6 +335,14 @@ def select(pool: pd.DataFrame, *, size: int, metrics: list[str], trials: int, st
     import numpy as np
 
     usable = pool.dropna(subset=metrics)
+    if "train_loss" in usable.columns:
+        diverged = usable[usable["train_loss"] > DIVERGENCE_LOSS]
+        if len(diverged):
+            # Loudly, because these are the rows the cheap metrics like most.
+            print(f"Excluding {len(diverged)} checkpoint(s) that never trained (final loss > {DIVERGENCE_LOSS}):")
+            for key, row in diverged.iterrows():
+                print(f"  {key}  loss={row['train_loss']:.4f}  mmd={row.get('mmd', float('nan')):.4f}")
+            usable = usable.drop(index=diverged.index)
     if len(usable) < size:
         raise ValueError(f"Pool has {len(usable)} scorable packages, fewer than the requested bank size {size}.")
 
