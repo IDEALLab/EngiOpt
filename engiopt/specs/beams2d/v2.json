@@ -1,0 +1,53 @@
+{
+  "condition_digest": "f65e2c02551e7e08",
+  "condition_seed": 1,
+  "dataset_id": "IDEALLab/beams_2d_50_100_v0",
+  "dataset_revision": "ccb64d4f09cf66a5ed9ba2081438d695b9e2438d",
+  "engibench_version": "0.2.0+0a028c03d02b",
+  "latent_instrument": {
+    "algo": "constrained_plvae_2d",
+    "config_fingerprint": "bbec6c0a",
+    "expected_n_active": 6,
+    "hf_entity": "IDEALLab",
+    "hf_repo_prefix": "engiopt",
+    "recon_only_config_fingerprint": "36c3f928",
+    "recon_only_seed": 1,
+    "revision": "89c8f536b95d347b84a7913079d95fff238114e0",
+    "seed": 1
+  },
+  "metrics": [
+    "mmd",
+    "pca_mmd",
+    "dpp",
+    "pixel_vendi",
+    "viol",
+    "cond_err",
+    "novelty",
+    "lv_mmd",
+    "lv_coverage",
+    "lv_vendi",
+    "lv_residual",
+    "lv_paired_distance",
+    "lv_dual_gap",
+    "gen_seconds",
+    "params",
+    "iog",
+    "cog",
+    "fog"
+  ],
+  "n_samples": 50,
+  "notes": "Feasibility = EngiBench constraints plus the volfrac budget. Latent instrument is pinned on measured reconstruction parity, not on nominal threshold satisfaction: bbec6c0a (performance constraint ON) reaches NMSE 0.00214 and its companion 36c3f928 (constraint OFF) reaches 0.00218 -- matched to within 2% at 6 active dimensions each, which is what makes lv_dual_gap isolate the constraint's effect. bbec6c0a nominally misses its own 0.001 threshold, but that threshold is below this architecture's achievable floor of ~0.00146, so no configuration in the sweep met it.",
+  "objective_weight_condition": null,
+  "objective_weights": null,
+  "problem_conditions": [
+    "volfrac",
+    "rmin",
+    "forcedist",
+    "overhang_constraint"
+  ],
+  "problem_id": "beams2d",
+  "sigma": 10.0,
+  "version": "v2",
+  "volfrac_tol": 0.01,
+  "volume_condition": "volfrac"
+}
