@@ -370,16 +370,23 @@ def main() -> None:
     rows: list[dict] = []
     t0 = time.time()
 
+    out = args.out or f"distortion_{args.problem_id}.csv"
     for spec in args.instruments:
         fingerprint, label, _dims = spec.split(":")
-        lvae = load_lvae(
-            problem_id=args.problem_id,
-            design_shape=(h, w),
-            algo="constrained_plvae_2d",
-            seed=args.seed,
-            device=device,
-            config_fingerprint=fingerprint,
-        )
+        try:
+            lvae = load_lvae(
+                problem_id=args.problem_id,
+                design_shape=(h, w),
+                algo="constrained_plvae_2d",
+                seed=args.seed,
+                device=device,
+                config_fingerprint=fingerprint,
+            )
+        except Exception as exc:  # noqa: BLE001
+            # A transient Hub failure on one instrument must not discard the
+            # instruments already scored -- this cost a 36-minute run once.
+            print(f"[skip] instrument {label} ({fingerprint}): {type(exc).__name__}: {str(exc)[:120]}")
+            continue
         print(f"\n=== instrument {label} ({fingerprint}) ===")
         for family in args.families:
             for sev in severities:
@@ -389,7 +396,13 @@ def main() -> None:
                         family, float(sev), rng, base=base, ref=ref, labels=labels, k_modes=args.k_modes, n=n
                     )
                     row = score_set(
-                        cand, problem=problem, problem_id=args.problem_id, ref=ref, train=ref, sigma_designs=val, lvae=lvae
+                        cand,
+                        problem=problem,
+                        problem_id=args.problem_id,
+                        ref=ref,
+                        train=ref,
+                        sigma_designs=val,
+                        lvae=lvae,
                     )
                     row.update(
                         {
@@ -402,12 +415,17 @@ def main() -> None:
                         }
                     )
                     rows.append(row)
-            print(f"[{time.time() - t0:6.1f}s] {family:16s} done")
+            print(f"[{time.time() - t0:6.1f}s] {family:16s} done", flush=True)
+        # Flush after every instrument, so a later failure cannot cost the work
+        # already done. Rewritten whole rather than appended: families do not
+        # share a column set once a metric errors on one of them.
+        pd.DataFrame(rows).to_csv(out, index=False)
+        print(f"  checkpointed {len(rows)} rows -> {out}")
 
-    df = pd.DataFrame(rows)
-    out = args.out or f"distortion_{args.problem_id}.csv"
-    df.to_csv(out, index=False)
-    print(f"\nwrote {len(df)} rows -> {out}")
+    if not rows:
+        raise SystemExit("no instrument could be loaded; nothing written")
+    pd.DataFrame(rows).to_csv(out, index=False)
+    print(f"\nwrote {len(rows)} rows -> {out}")
 
 
 if __name__ == "__main__":
