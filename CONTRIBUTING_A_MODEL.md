@@ -189,6 +189,11 @@ Watch two columns while you develop:
   training designs rather than generating, and the board will publish it without
   ranking it.
 
+`cond_sens` draws the batch a second time, under shuffled conditions, so it
+doubles sampling cost. That is nothing for a GAN and noticeable for a diffusion
+model — pass `--metrics mmd dpp viol` while iterating if it slows you down, then
+run the full list before publishing.
+
 ## 5. Publish it
 
 See [LEADERBOARD.md](LEADERBOARD.md) for the full submission path. The short

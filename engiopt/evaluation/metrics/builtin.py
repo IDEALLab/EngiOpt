@@ -130,6 +130,12 @@ def cond_sens(ctx: EvaluationContext) -> float:
     Its job is to stop an unconditional model quietly collecting a conditional
     model's `mmd` score, not to be maximized.
 
+    `cheap` here means what it means everywhere in this registry: it cannot
+    reach a simulator or optimizer. It is not free, though -- it draws the batch
+    a second time, so selecting it doubles generation cost. Immaterial for a
+    GAN's tenth of a second; noticeable for a diffusion model, and worth knowing
+    before pointing it at one that samples a pixel at a time.
+
     Returns NaN when there is nothing to compare: an unconditional problem, or
     fewer than two samples.
     """
