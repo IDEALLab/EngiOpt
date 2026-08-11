@@ -59,6 +59,7 @@ def main() -> None:
     args = ap.parse_args()
 
     board = pd.read_csv(args.board)
+    from engiopt.baselines.base import DatasetGenerator
     from engiopt.utils.all_generators import BUILTIN_GENERATORS
 
     evaluator = Evaluator.for_problem(args.problem_id, spec=args.spec)
@@ -69,14 +70,22 @@ def main() -> None:
         # the package published at the training script's own defaults.
         algo, fingerprint, seed_part = key.split("/")
         started = time.perf_counter()
+        cls = BUILTIN_GENERATORS[algo]
         try:
-            generator = BUILTIN_GENERATORS[algo].from_pretrained(
-                evaluator.problem,
-                problem_id=args.problem_id,
-                seed=int(seed_part.lstrip("s")),
-                model_source="hf",
-                config_fingerprint=None if fingerprint == "default" else fingerprint,
-            )
+            # Dataset-fitted baselines (kNN, ridge) have no checkpoint: they are
+            # built with `from_problem`, and `build` raises by design. Dispatching
+            # them through `from_pretrained` is what made them 404 -- they were
+            # never meant to be on the Hub, so no publish is needed.
+            if isinstance(cls, type) and issubclass(cls, DatasetGenerator):
+                generator = cls.from_problem(evaluator.problem, problem_id=args.problem_id, seed=int(seed_part.lstrip("s")))
+            else:
+                generator = cls.from_pretrained(
+                    evaluator.problem,
+                    problem_id=args.problem_id,
+                    seed=int(seed_part.lstrip("s")),
+                    model_source="hf",
+                    config_fingerprint=None if fingerprint == "default" else fingerprint,
+                )
             generator.seed = args.seed
             scores = evaluator.score(generator, only=CHEAP)
         except Exception as exc:  # noqa: BLE001 - one bad package must not end the board
