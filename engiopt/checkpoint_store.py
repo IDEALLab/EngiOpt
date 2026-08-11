@@ -154,13 +154,6 @@ class ResolvedCheckpoint:
     package_path: str | None = None
     """Path of the package inside `repo_id`, e.g. `beams2d/cfg_023dd1fb/seed_1`."""
 
-    @property
-    def reference(self) -> str | None:
-        """A `hf://entity/repo/path` reference that round-trips through `resolve_checkpoint_reference`."""
-        if self.repo_id is None or self.package_path is None:
-            return None
-        return f"hf://{self.repo_id}/{self.package_path}"
-
 
 def build_hf_repo_id(hf_entity: str, hf_repo_prefix: str, algo: str) -> str:
     """Return the canonical HF repo id for an EngiOpt model family."""
