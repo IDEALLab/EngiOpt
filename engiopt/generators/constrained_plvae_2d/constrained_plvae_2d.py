@@ -755,6 +755,15 @@ if __name__ == "__main__":
             val_nmse_perf /= n
             plvae.train()
 
+        # Echo validation to stdout as well as W&B. A cluster log that carries only
+        # training NMSE invites reading a memorized fit as a converged one.
+        if epoch % args.sample_interval == 0 or epoch == args.n_epochs - 1:
+            print(
+                f"[Epoch {epoch}/{args.n_epochs}] [VAL nmse_rec: {val_nmse_rec:.4f}] "
+                f"[VAL nmse_perf: {val_nmse_perf:.4f}] [train nmse_rec: {plvae.nmse_rec:.4f}] "
+                f"[dims: {plvae.vol_active}]"
+            )
+
         if args.track:
             val_log_dict = {
                 "epoch": epoch,
@@ -800,6 +809,21 @@ if __name__ == "__main__":
                 checkpoint_files={"constrained_plvae.pth": "constrained_plvae.pth"},
                 run_config=vars(args),
                 **checkpoint_identity(args),
+                # Curating a sweep means asking "is this instrument trustworthy?",
+                # which needs the val reconstruction. Recording it here keeps that
+                # answerable from the package metadata alone, with no weight
+                # download and no W&B lookup. Both NMSEs are carried because the
+                # satisfaction gate reads the training one while the val one is
+                # the generalization diagnostic -- reporting either alone is what
+                # made the earlier threshold analysis wrong.
+                metadata={
+                    "train_nmse_rec": float(plvae.nmse_rec),
+                    "train_nmse_perf": float(plvae.nmse_perf),
+                    "val_nmse_rec": float(val_nmse_rec),
+                    "val_nmse_perf": float(val_nmse_perf),
+                    "n_active_dims": int(plvae.vol_active),
+                    "w_vol": float(plvae.w_vol),
+                },
                 condition_keys=scalar_cond_keys,
                 primary_files=["constrained_plvae.pth"],
             )
