@@ -69,7 +69,13 @@ class Args:
     metrics: tuple[str, ...] = ()
     """Metric names; defaults to the spec's list."""
     include_expensive: bool = False
-    """Run simulator-backed metrics (COG/IOG/FOG, feasibility). Slow."""
+    """Also run the optimality gaps (IOG/COG/FOG), which invoke the optimizer. Slow.
+
+    Feasibility is *not* here. `viol` describes the design as generated, so it
+    is a constraint check rather than a solver run, and it still reports when
+    the optimizer refuses to start from an invalid design -- the case where the
+    answer matters most. The cheap pass is `mmd`, `dpp`, `viol`, `novelty` and
+    `cond_sens`."""
     output_csv: str = "leaderboard_{problem_id}.csv"
     """Where to append results locally; may include `{problem_id}`."""
     push_to: str | None = None

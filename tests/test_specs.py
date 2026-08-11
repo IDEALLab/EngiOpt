@@ -192,3 +192,75 @@ def test_a_matching_problem_definition_passes() -> None:
         dataset_id="IDEALLab/beams_2d_50_100_v0",
     )
     spec.check_problem_definition(_Problem())
+
+
+# ----------------------------------------------------------------------
+# freeze_spec must not silently reset fields it forgot to expose
+# ----------------------------------------------------------------------
+
+
+class _FreezeProbe:
+    """A problem stand-in; freeze_spec only resets it and reads its conditions."""
+
+    conditions_keys: ClassVar[tuple[str, ...]] = ("volfrac",)
+
+    def reset(self, seed: int | None = None) -> None:
+        """Match `Problem.reset`, which freeze_spec calls before sampling."""
+
+
+def test_freeze_spec_carries_every_contract_field(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """A parameter this entry point omits is a field it resets to the dataclass default.
+
+    `volume_condition` and `volfrac_tol` decide `viol`, and three of the four
+    committed specs set a non-null volume condition. Freezing a v2 through the
+    documented CLI without them would hand the new version a different
+    feasibility contract than the one it succeeds -- silently, since the spec
+    would still write and still load.
+    """
+    from engibench.utils import all_problems
+
+    from engiopt.evaluation import spec as spec_mod
+
+    captured: dict[str, Any] = {}
+
+    def _capture(self: EvalSpec, problem: Any) -> EvalSpec:
+        captured.update(dataclasses.asdict(self))
+        return self
+
+    monkeypatch.setattr(EvalSpec, "freeze", _capture)
+    monkeypatch.setattr(EvalSpec, "save", lambda self: tmp_path / "v2.json")
+    monkeypatch.setitem(all_problems.BUILTIN_PROBLEMS, "freeze_probe", _FreezeProbe)
+
+    spec_mod.freeze_spec(
+        "freeze_probe",
+        version="v2",
+        volume_condition="volfrac",
+        volfrac_tol=0.05,
+        required_seeds=(1, 2, 3, 4),
+        copy_tol=0.02,
+        max_copy_rate=0.25,
+        copy_corpus_size=64,
+    )
+
+    assert captured["volume_condition"] == "volfrac"
+    assert captured["volfrac_tol"] == 0.05
+    assert captured["required_seeds"] == (1, 2, 3, 4)
+    assert captured["copy_tol"] == 0.02
+    assert captured["max_copy_rate"] == 0.25
+    assert captured["copy_corpus_size"] == 64
+
+
+def test_freeze_spec_defaults_track_the_dataclass() -> None:
+    """The CLI's defaults must not become a second, drifting copy of the contract's.
+
+    Two hand-maintained copies diverge invisibly: both sides still typecheck and
+    the spec still writes, but a freshly frozen version quietly disagrees with
+    the one it succeeds.
+    """
+    import inspect
+
+    from engiopt.evaluation import spec as spec_mod
+
+    parameters = inspect.signature(spec_mod.freeze_spec).parameters
+    for field_name in ("metrics", "volfrac_tol", "required_seeds", "copy_tol", "max_copy_rate", "copy_corpus_size"):
+        assert parameters[field_name].default == getattr(EvalSpec, field_name), field_name
