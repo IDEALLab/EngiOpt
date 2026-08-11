@@ -1,12 +1,17 @@
 {
   "condition_digest": "f65e2c02551e7e08",
   "condition_seed": 1,
+  "copy_corpus_size": 512,
+  "copy_tol": 0.01,
   "dataset_id": "IDEALLab/beams_2d_50_100_v0",
   "dataset_revision": "ccb64d4f09cf66a5ed9ba2081438d695b9e2438d",
   "engibench_version": "0.2.0+0a028c03d02b",
+  "max_copy_rate": 0.5,
   "metrics": [
     "mmd",
     "dpp",
+    "novelty",
+    "cond_sens",
     "viol",
     "iog",
     "cog",
@@ -23,6 +28,11 @@
     "overhang_constraint"
   ],
   "problem_id": "beams2d",
+  "required_seeds": [
+    1,
+    2,
+    3
+  ],
   "sigma": 10.0,
   "version": "v1",
   "volfrac_tol": 0.01,

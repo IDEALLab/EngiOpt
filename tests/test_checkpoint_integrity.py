@@ -214,3 +214,128 @@ def test_metadata_records_completeness_for_ordinary_models(monkeypatch: pytest.M
     )
 
     assert all(entry[checkpoint_store.PACKAGE_COMPLETE_FIELD] is True for entry in written)
+
+
+# ----------------------------------------------------------------------
+# The hash must cover everything that changes what the model generates
+# ----------------------------------------------------------------------
+
+
+def test_changing_fitted_preprocessing_changes_the_hash(tmp_path: Path) -> None:
+    """Normalizer bounds are part of the model even though they never reach a state dict.
+
+    Several 1D models fit min/max bounds on the training split and denormalize
+    through them on the way out, so a package with identical weights and
+    different bounds *decodes differently*. If the hash missed that, a
+    behaviourally different checkpoint would inherit the previous one's
+    leaderboard row via `--skip-existing`.
+    """
+    package = _write_package(
+        tmp_path / "pkg",
+        metadata={"algo": "demo", "design_normalizer": {"min": [0.0], "max": [1.0]}},
+    )
+    before = checkpoint_store.hash_package_contents(str(package))
+
+    (package / "metadata.json").write_text(json.dumps({"algo": "demo", "design_normalizer": {"min": [0.0], "max": [2.0]}}))
+
+    assert checkpoint_store.hash_package_contents(str(package)) != before
+
+
+def test_changing_condition_statistics_changes_the_hash(tmp_path: Path) -> None:
+    """The same argument for the models that rescale their conditions instead."""
+    package = _write_package(tmp_path / "pkg", metadata={"condition_stats": {"mean": [0.5], "std": [0.1]}})
+    before = checkpoint_store.hash_package_contents(str(package))
+
+    (package / "metadata.json").write_text(json.dumps({"condition_stats": {"mean": [0.9], "std": [0.1]}}))
+
+    assert checkpoint_store.hash_package_contents(str(package)) != before
+
+
+def test_the_same_weights_at_two_addresses_hash_alike(tmp_path: Path) -> None:
+    """One run writes its package to both a config path and the canonical path.
+
+    Those differ in the metadata recording where they sit, and they must not
+    therefore look like two different models -- the hash answers "which
+    weights", not "which location".
+    """
+    shared = {"algo": "demo", "seed": 1, "condition_keys": ["volfrac"]}
+    config_package = _write_package(
+        tmp_path / "cfg", metadata={**shared, "hf_package_path": "beams2d/cfg_abc12345/seed_1", "hf_revision": "aaa"}
+    )
+    canonical_package = _write_package(
+        tmp_path / "canonical", metadata={**shared, "hf_package_path": "beams2d/seed_1", "hf_revision": "bbb"}
+    )
+
+    assert checkpoint_store.hash_package_contents(str(config_package)) == checkpoint_store.hash_package_contents(
+        str(canonical_package)
+    )
+
+
+def test_a_promotion_does_not_change_what_the_weights_hash_to(tmp_path: Path) -> None:
+    """Promotion records where a package came from; it does not alter the model."""
+    package = _write_package(tmp_path / "pkg", metadata={"algo": "demo"})
+    before = checkpoint_store.hash_package_contents(str(package))
+
+    (package / "metadata.json").write_text(json.dumps({"algo": "demo", "promoted_from": "beams2d/cfg_abc12345/seed_1"}))
+
+    assert checkpoint_store.hash_package_contents(str(package)) == before
+
+
+# ----------------------------------------------------------------------
+# An incomplete package must never load, however complete it looks
+# ----------------------------------------------------------------------
+
+
+def test_an_incomplete_package_is_refused_even_with_every_file_present(tmp_path: Path) -> None:
+    """Completeness is checked before file discovery, not while explaining a missing file.
+
+    A stage that happens to have written everything the *next* stage's loader
+    asks for would otherwise load successfully, and a model from a run that
+    never finished would reach a leaderboard row with nothing to indicate it.
+    """
+    package = _write_package(tmp_path / "pkg", metadata={"stage": "vqgan", checkpoint_store.PACKAGE_COMPLETE_FIELD: False})
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        checkpoint_store._load_package_from_directory(
+            root_dir=str(package), required_files=["generator.pth"], source="local"
+        )
+
+    assert "incomplete" in str(excinfo.value)
+    assert "did not finish" in str(excinfo.value)
+
+
+def test_a_complete_package_still_loads(tmp_path: Path) -> None:
+    """The guard must not cost ordinary packages their ability to load."""
+    package = _write_package(tmp_path / "pkg", metadata={checkpoint_store.PACKAGE_COMPLETE_FIELD: True})
+
+    resolved = checkpoint_store._load_package_from_directory(
+        root_dir=str(package), required_files=["generator.pth"], source="local"
+    )
+
+    assert "generator.pth" in resolved.files
+
+
+# ----------------------------------------------------------------------
+# An upload must not blend two runs at one path
+# ----------------------------------------------------------------------
+
+
+def test_a_complete_upload_clears_whatever_was_at_that_path() -> None:
+    """`upload_folder` overwrites but does not delete, so a re-train leaves strays.
+
+    Re-training a configuration whose previous run wrote *more* files leaves the
+    extras in place, and discovery then serves a package mixing two runs'
+    weights -- which loads, because every filename a loader looks for is there.
+    """
+    assert checkpoint_store._stale_file_patterns({checkpoint_store.PACKAGE_COMPLETE_FIELD: True}) == ["*"]
+    # Absent marker means an ordinary single-stage model, which is complete.
+    assert checkpoint_store._stale_file_patterns({}) == ["*"]
+
+
+def test_a_staged_upload_leaves_the_earlier_stages_alone() -> None:
+    """VQGAN's second stage uploads `vqgan.pth` without re-uploading `cvqgan.pth`.
+
+    Deleting there would destroy the first stage's work -- the very thing staged
+    uploads exist to protect.
+    """
+    assert checkpoint_store._stale_file_patterns({checkpoint_store.PACKAGE_COMPLETE_FIELD: False}) is None

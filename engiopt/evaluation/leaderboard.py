@@ -21,13 +21,22 @@ from engiopt.evaluation.evaluator import order_columns
 
 if TYPE_CHECKING:
     from engiopt.evaluation.registry import MetricRegistry
+    from engiopt.evaluation.spec import EvalSpec
 
-ROW_KEY = ["problem_id", "algo_id", "config_fingerprint", "seed", "spec_version"]
+ROW_KEY = ["problem_id", "algo_id", "config_fingerprint", "checkpoint_repo", "seed", "spec_version"]
 """Columns that uniquely identify a leaderboard row.
 
 `config_fingerprint` is what separates two hyperparameter settings of the same
 algorithm. Without it a 50-config sweep would collapse onto one row per seed,
 silently keeping only whichever ran last.
+
+`checkpoint_repo` is what separates two *people*. On a public board the other
+four columns are not unique: two contributors who both train `cgan_cnn_2d` with
+this repository's default hyperparameters on seed 1 produce the same key and
+genuinely different weights. Merging on that key would let either one's push
+silently replace the other's verified row -- no malice required, and no trace
+left afterwards. Their checkpoints live in their own repos, so that is the
+column that tells them apart.
 """
 
 RANK_PARTITION = ["problem_id", "spec_version"]
@@ -38,13 +47,15 @@ same protocol, so ranks restart per partition rather than running across the
 whole table.
 """
 
-ENTRY_KEY = ["problem_id", "algo_id", "config_fingerprint", "spec_version"]
-"""What a *ranked entry* is: one configuration of one algorithm under one spec.
+ENTRY_KEY = ["problem_id", "algo_id", "config_fingerprint", "checkpoint_repo", "spec_version"]
+"""What a *ranked entry* is: one person's configuration of one algorithm under one spec.
 
 `ROW_KEY` minus `seed`, because seeds are what a ranking aggregates over.
 Everything else must match: averaging one configuration's score with another's,
 or a score under `v1` with a score under `v2`, produces a number that describes
-no model and no protocol.
+no model and no protocol. `checkpoint_repo` is included for the same reason it is
+in `ROW_KEY` -- two contributors' identically-configured models are two entries,
+and pooling their seeds would produce a median over a mixture.
 """
 
 LEADERBOARD_FILE = "leaderboard.csv"
@@ -77,6 +88,8 @@ def rank(
     *,
     registry: MetricRegistry | None = None,
     aggregate: str = "median",
+    eval_spec: EvalSpec | None = None,
+    eligible_only: bool = True,
 ) -> pd.DataFrame:
     """Rank models by one metric, aggregating across seeds.
 
@@ -87,6 +100,11 @@ def rank(
         aggregate: How to combine seeds. Defaults to `median`, because
             simulation-backed objectives are heavy-tailed and a single blown-up
             run otherwise decides the ranking.
+        eval_spec: The spec these rows were scored under, for `required_seeds`.
+            Without it the seed-coverage rule cannot be applied and is skipped.
+        eligible_only: Rank only rows a public board should rank; see
+            `eligible_rows`. Turn it off to see the raw table, including rows
+            nobody has re-run.
 
     Returns:
         One row per `ENTRY_KEY` sorted best-first, with a `rank` column and the
@@ -99,10 +117,18 @@ def rank(
 
     spec = (registry or METRICS)[metric]
     if spec.higher_is_better is None:
-        raise ValueError(f"Metric {metric!r} has no ranking direction; it is diagnostic only.")
+        raise ValueError(
+            f"Metric {metric!r} has no ranking direction; it is diagnostic only. "
+            "Metrics like `novelty` and `cond_sens` say whether a score means what it looks like, "
+            "and ranking on them would just reward whichever extreme happens to be unoccupied."
+        )
+
+    ranked = eligible_rows(frame, eval_spec) if eligible_only else frame
+    if ranked.empty:
+        return ranked.assign(**{f"{metric}_{aggregate}": [], "n_seeds": [], "rank": []})
 
     grouped = (
-        frame.groupby(entry_key(frame), as_index=False)
+        ranked.groupby(entry_key(ranked), as_index=False)
         .agg(value=(metric, aggregate), n_seeds=(metric, "count"))
         .sort_values("value", ascending=not spec.higher_is_better)
         .reset_index(drop=True)
@@ -110,6 +136,51 @@ def rank(
     partition = [col for col in RANK_PARTITION if col in grouped.columns]
     grouped["rank"] = grouped.groupby(partition).cumcount() + 1 if partition else grouped.index + 1
     return grouped.rename(columns={"value": f"{metric}_{aggregate}"})
+
+
+def eligible_rows(frame: pd.DataFrame, eval_spec: EvalSpec | None = None) -> pd.DataFrame:
+    """The rows a public ranking may draw on.
+
+    Three conditions, each answering a different way a table of self-reported
+    numbers goes wrong:
+
+    1. **Verified.** Somebody re-fetched these weights and reproduced these
+       numbers. Without this the ranking is ordering claims.
+    2. **Unflagged.** A retrieval system posts an excellent `fog`, and it is not
+       wrong to publish that -- it is wrong to call it first place. Flagged rows
+       stay in the table and out of the order.
+    3. **Complete seeds.** An entry must cover every seed in
+       `EvalSpec.required_seeds`. A submitter who runs twenty seeds and publishes
+       their best three otherwise gets a median computed over a maximum, which is
+       the cheapest way to climb a board and leaves no trace in any single row.
+
+    Rows are dropped, never edited, so the board itself keeps everything.
+    """
+    from engiopt.evaluation.submission import is_flagged
+
+    eligible = frame
+    if "verified" in eligible.columns:
+        eligible = eligible[eligible["verified"].fillna(value=False).astype(bool)]
+    if "flags" in eligible.columns:
+        eligible = eligible[~eligible["flags"].map(is_flagged)]
+    if eval_spec is not None and eval_spec.required_seeds and "seed" in eligible.columns:
+        eligible = _entries_covering_seeds(eligible, eval_spec.required_seeds)
+    return eligible
+
+
+def _entries_covering_seeds(frame: pd.DataFrame, required: tuple[int, ...]) -> pd.DataFrame:
+    """Keep only entries that supply every required seed.
+
+    Applied per `ENTRY_KEY` rather than per row, because seed coverage is a
+    property of the group a ranking aggregates over -- no single row can be
+    inspected to tell whether its siblings exist.
+    """
+    if frame.empty:
+        return frame
+    key = entry_key(frame)
+    needed = set(required)
+    covered = frame.groupby(key)["seed"].transform(lambda seeds: needed.issubset(set(seeds.astype(int))))
+    return frame[covered.astype(bool)]
 
 
 def entry_key(frame: pd.DataFrame) -> list[str]:
@@ -131,6 +202,8 @@ def disagreement(
     *,
     registry: MetricRegistry | None = None,
     aggregate: str = "median",
+    eval_spec: EvalSpec | None = None,
+    eligible_only: bool = True,
 ) -> pd.DataFrame:
     """Show each metric's ranking side by side, to expose where they disagree.
 
@@ -144,7 +217,9 @@ def disagreement(
     key = entry_key(frame)
     boards = []
     for metric in metrics:
-        board = rank(frame, metric, registry=registry, aggregate=aggregate)
+        board = rank(
+            frame, metric, registry=registry, aggregate=aggregate, eval_spec=eval_spec, eligible_only=eligible_only
+        )
         boards.append(board.set_index(key)["rank"].rename(metric))
     return pd.concat(boards, axis=1).sort_values(metrics[0])
 
@@ -227,6 +302,8 @@ def push_to_hub(
     private: bool = False,
     commit_message: str | None = None,
     max_attempts: int = 3,
+    eval_spec: EvalSpec | None = None,
+    check_admission: bool = True,
 ) -> pd.DataFrame:
     """Merge `new_rows` into the published leaderboard and upload the result.
 
@@ -237,6 +314,11 @@ def push_to_hub(
     job published in between, the commit is rejected rather than overwriting it,
     and the read-merge-upload cycle is retried against the newer board.
 
+    Rows are put through `prepare_submission` first. That refuses anything with
+    no fetchable checkpoint -- a row nobody can re-run is not a result -- and
+    clears any verification stamp, since publishing is exactly the moment a
+    submitter would like to award themselves one.
+
     Args:
         new_rows: Rows to publish, as returned by `Evaluator.leaderboard`.
         repo_id: HuggingFace dataset repo, e.g. `"IDEALLab/engiopt-leaderboard"`.
@@ -244,15 +326,25 @@ def push_to_hub(
         private: Create the repo private if it does not exist yet.
         commit_message: Defaults to a summary of what was added.
         max_attempts: How many times to retry after losing a race.
+        eval_spec: Spec the rows were scored under, for the flag thresholds.
+        check_admission: Publish rows unchecked. Only for a verification runner
+            writing back rows it produced itself, which is the one caller whose
+            `verified=True` is not a self-assertion.
 
     Returns:
         The full merged leaderboard as uploaded.
 
     Raises:
         RuntimeError: If every attempt lost the race to a concurrent publisher.
+        SubmissionRejectedError: If a row cannot be published; see `submission`.
     """
     from huggingface_hub import HfApi
     from huggingface_hub.errors import HfHubHTTPError
+
+    from engiopt.evaluation.submission import prepare_submission
+
+    if check_admission:
+        new_rows = prepare_submission(new_rows, eval_spec)
 
     api = HfApi(token=token)
     api.create_repo(repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True)

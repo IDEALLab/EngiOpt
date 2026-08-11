@@ -68,11 +68,59 @@ plus a count.
 DESCRIPTIVE_FILES = frozenset({RUN_CONFIG_FILE, METADATA_FILE, METRICS_FILE})
 """Package files that describe the checkpoint rather than being part of it.
 
-Neither hashed as weights nor served as loadable checkpoint files. `metrics.json`
+Neither hashed as raw bytes nor served as loadable checkpoint files. `metrics.json`
 belongs here for a reason worth stating: it is written *after* evaluation, into
 the package it describes, so counting it would let scoring a checkpoint change
 that checkpoint's identity.
+
+`metadata.json` is excluded as a *file* but not as *content*: the fields in it
+that change what the model computes are folded into the hash separately, by
+`identity_metadata`. Hashing the file whole would fail the other way, since it
+records the package's own path and revision, which differ between the two
+locations one run writes.
 """
+
+ADDRESS_METADATA_FIELDS = frozenset(
+    {
+        "hf_repo_id",
+        "hf_package_path",
+        "hf_config_package_path",
+        "hf_revision",
+        "hf_config_revision",
+        "promoted_from",
+        "wandb_entity",
+        "wandb_project",
+        "wandb_run_id",
+        "wandb_run_url",
+        PACKAGE_COMPLETE_FIELD,
+    }
+)
+"""Metadata fields describing *where a package sits*, not *what it computes*.
+
+Excluded from the content hash. Everything else in `metadata.json` is included,
+and that direction is deliberate: a field that changes the model's output but is
+missed by the hash lets a behaviourally different checkpoint inherit an old
+score, while a field that is merely bookkeeping but gets hashed only causes a
+harmless re-evaluation. An allowlist would fail the dangerous way round every
+time someone adds a field and forgets to list it.
+
+`package_complete` is here because an incomplete package is now refused at load,
+so it can never reach a leaderboard row to be confused with a complete one.
+"""
+
+
+def identity_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
+    """The part of a package's metadata that changes what the model computes.
+
+    Preprocessing state lives here -- `condition_stats`, `condition_normalizer`,
+    `design_normalizer`, `condition_keys`. Those are fitted on the training split
+    and replayed at load, so two packages with byte-identical weights and
+    different normalizer bounds *decode differently* and are different models.
+    Leaving them out of the hash would let `--skip-existing` hand one of them the
+    other's leaderboard row.
+    """
+    return {key: value for key, value in metadata.items() if key not in ADDRESS_METADATA_FIELDS}
+
 
 CheckpointBackend = Literal["hf", "none"]
 ModelSource = Literal["auto", "hf", "local"]
@@ -96,6 +144,22 @@ class ResolvedCheckpoint:
     the repo path cannot tell them apart. This can, so a leaderboard row is
     traceable to the model that produced it.
     """
+    repo_id: str | None = None
+    """HF repo the package came from; None for local packages.
+
+    Recorded so a leaderboard row can name where its weights live. Without it a
+    row published by anyone outside the default entity points at nothing
+    fetchable, and no third party can re-run the evaluation that produced it.
+    """
+    package_path: str | None = None
+    """Path of the package inside `repo_id`, e.g. `beams2d/cfg_023dd1fb/seed_1`."""
+
+    @property
+    def reference(self) -> str | None:
+        """A `hf://entity/repo/path` reference that round-trips through `resolve_checkpoint_reference`."""
+        if self.repo_id is None or self.package_path is None:
+            return None
+        return f"hf://{self.repo_id}/{self.package_path}"
 
 
 def build_hf_repo_id(hf_entity: str, hf_repo_prefix: str, algo: str) -> str:
@@ -422,6 +486,11 @@ def promote_to_canonical(
             folder_path=str(stage_dir),
             path_in_repo=canonical_path,
             commit_message=f"Promote cfg_{config_fingerprint} to canonical {canonical_path}",
+            # A promotion copies a whole package, so it replaces whatever held
+            # the canonical path before. Leaving the previous occupant's files
+            # in place would blend two configurations under the name that a bare
+            # `--seeds 1` resolves to.
+            delete_patterns=["*"],
         )
     return canonical_path
 
@@ -431,8 +500,18 @@ def resolve_checkpoint_reference(
     model_source: ModelSource,
     model_ref: str,
     required_files: list[str] | None = None,
+    revision: str | None = None,
 ) -> ResolvedCheckpoint:
     """Resolve a checkpoint package from an explicit `hf://` or local reference.
+
+    Args:
+        model_source: `auto` infers `local` for an existing directory, else `hf`.
+        model_ref: `hf://<entity>/<repo>/<package_path>`, or a local directory.
+        required_files: Files the package must contain.
+        revision: Repo commit to fetch. Pass the revision a leaderboard row
+            recorded to re-read exactly the package it was scored on; without it
+            the current head is fetched, which is a different question and can
+            be a different model.
 
     Raises:
         ValueError: If the reference cannot be interpreted.
@@ -443,7 +522,9 @@ def resolve_checkpoint_reference(
 
     if inferred_source == "hf":
         repo_id, package_path = _parse_hf_reference(model_ref)
-        return _resolve_hf_package(repo_id=repo_id, package_path=package_path, required_files=required_files or [])
+        return _resolve_hf_package(
+            repo_id=repo_id, package_path=package_path, required_files=required_files or [], revision=revision
+        )
     if inferred_source == "local":
         return _resolve_local_package(model_ref.removeprefix("file://"), required_files or [])
 
@@ -477,15 +558,41 @@ def _upload_package_to_hf(
             folder_path=tmpdir,
             path_in_repo=package_path,
             commit_message=f"Upload checkpoint for {algo} {package_path}",
+            delete_patterns=_stale_file_patterns(metadata),
         )
     return getattr(commit_info, "oid", None)
 
 
-def _resolve_hf_package(*, repo_id: str, package_path: str, required_files: list[str]) -> ResolvedCheckpoint:
+def _stale_file_patterns(metadata: dict[str, Any]) -> list[str] | None:
+    """What to delete from a package path that this upload is not replacing.
+
+    `upload_folder` overwrites the files it carries and leaves everything else
+    alone, so re-training a configuration into a path that already held a
+    *larger* set of files produces a package mixing two runs' weights. Discovery
+    then serves that mixture, and it loads: the filenames are all present, so
+    nothing complains.
+
+    Which files are stale depends on whether this upload is the whole package:
+
+    - **Complete** (`package_complete=True`): these files *are* the package, so
+      anything else at the path is left over from a previous run and goes. That
+      includes `metrics.json`, which described weights that no longer exist.
+    - **Incomplete**: a stage of a multi-stage run, deliberately additive.
+      VQGAN's second stage uploads `vqgan.pth` and `discriminator.pth` without
+      re-uploading the `cvqgan.pth` its first stage wrote, so deleting here
+      would destroy the earlier stage's work.
+    """
+    return ["*"] if metadata.get(PACKAGE_COMPLETE_FIELD, True) else None
+
+
+def _resolve_hf_package(
+    *, repo_id: str, package_path: str, required_files: list[str], revision: str | None = None
+) -> ResolvedCheckpoint:
     repo_snapshot = snapshot_download(
         repo_id=repo_id,
         repo_type="model",
         allow_patterns=[f"{package_path}/*"],
+        revision=revision,
     )
     root_dir = os.path.join(repo_snapshot, package_path)
     if not os.path.isdir(root_dir):
@@ -493,7 +600,12 @@ def _resolve_hf_package(*, repo_id: str, package_path: str, required_files: list
     # `snapshot_download` returns `.../snapshots/<commit sha>`, which is the
     # revision the files were actually taken from.
     return _load_package_from_directory(
-        root_dir=root_dir, required_files=required_files, source="hf", revision=os.path.basename(repo_snapshot)
+        root_dir=root_dir,
+        required_files=required_files,
+        source="hf",
+        revision=os.path.basename(repo_snapshot),
+        repo_id=repo_id,
+        package_path=package_path,
     )
 
 
@@ -504,31 +616,40 @@ def _resolve_local_package(local_model_dir: str, required_files: list[str]) -> R
 
 
 def hash_package_contents(root_dir: str) -> str:
-    """Content hash of every weight file in a package, identifying these exact weights.
+    """Content hash of a package: everything that decides what it generates.
 
-    Hashes what the package *contains* rather than what the model declared it
-    needs. A model may load a file it did not list -- VQGAN's conditional
-    variant reads `cvqgan.pth`, which is not in its `checkpoint_files` because
-    the unconditional variant has none -- and two packages differing only in
-    that file generate differently. Hashing the declared list would give them
-    the same identity.
+    This is the identity a leaderboard row is traced back to, so the property it
+    must have is that *any* change to what the model computes changes the hash.
+    Two things decide that, and both are covered:
 
-    Files that *describe* the package rather than constitute it are excluded:
+    **The weight files.** Hashed by what the package *contains* rather than what
+    the model declared it needs. A model may load a file it did not list --
+    VQGAN's conditional variant reads `cvqgan.pth`, which is not in its
+    `checkpoint_files` because the unconditional variant has none -- and two
+    packages differing only in that file generate differently. Hashing the
+    declared list would give them the same identity.
 
-    - `run_config.json`, `metadata.json` -- metadata records the package path and
-      revision, which differ between the two locations one run writes, so
-      including it would give identical weights two different hashes.
+    **The fitted preprocessing.** Normalizer bounds and condition statistics are
+    replayed at load and rescale both what goes into the network and what comes
+    out, so they are part of the model even though they never reached a state
+    dict. See `identity_metadata` for exactly which fields count.
+
+    Two files are excluded outright:
+
+    - `run_config.json` -- the hyperparameters are already what
+      `config_fingerprint` identifies, and it carries operational keys (W&B
+      entity, tracking flags) that do not change a single output value.
     - `metrics.json` -- written by `publish_checkpoint_metrics` *after* the
       weights, into this same directory. Including it would make attaching a
       score change the identity of the thing scored: the next `--skip-existing`
       run would see a new hash, re-evaluate, rewrite the metrics, and change the
-      hash again. The hash must be a property of the weights alone.
+      hash again -- an evaluation loop with no fixed point.
 
     Args:
         root_dir: Local directory holding the package.
 
     Returns:
-        A 16-character hash over the file names and their bytes.
+        A 16-character hash over the weight bytes and the identity metadata.
     """
     weight_files = sorted(
         entry
@@ -541,11 +662,23 @@ def hash_package_contents(root_dir: str) -> str:
         with open(os.path.join(root_dir, file_name), "rb") as handle:
             for chunk in iter(lambda: handle.read(1 << 20), b""):
                 hasher.update(chunk)
+
+    metadata_path = os.path.join(root_dir, METADATA_FILE)
+    metadata = _read_json(metadata_path) if os.path.exists(metadata_path) else {}
+    identity = identity_metadata(metadata)
+    if identity:
+        hasher.update(json.dumps(identity, sort_keys=True, default=str).encode())
     return hasher.hexdigest()[:16]
 
 
 def _load_package_from_directory(
-    *, root_dir: str, required_files: list[str], source: Literal["hf", "local"], revision: str | None = None
+    *,
+    root_dir: str,
+    required_files: list[str],
+    source: Literal["hf", "local"],
+    revision: str | None = None,
+    repo_id: str | None = None,
+    package_path: str | None = None,
 ) -> ResolvedCheckpoint:
     run_config_path = os.path.join(root_dir, RUN_CONFIG_FILE)
     metadata_path = os.path.join(root_dir, METADATA_FILE)
@@ -553,6 +686,13 @@ def _load_package_from_directory(
         raise FileNotFoundError(f"Missing {RUN_CONFIG_FILE} in {root_dir}")
     run_config = _read_json(run_config_path)
     metadata = _read_json(metadata_path) if os.path.exists(metadata_path) else {}
+    # Checked before the files are even looked at. A stage that happens to have
+    # written every file the *next* stage's loader asks for is still a package
+    # from a run that did not finish, and it must not load just because the
+    # filenames line up -- that is precisely the case where a silently wrong
+    # model reaches a leaderboard row.
+    if metadata.get(PACKAGE_COMPLETE_FIELD) is False:
+        raise FileNotFoundError(_incomplete_package_message(root_dir, metadata))
     package_files = required_files or _discover_package_files(root_dir, metadata)
     files = {file_name: os.path.join(root_dir, file_name) for file_name in package_files}
     missing = [file_name for file_name, file_path in files.items() if not os.path.exists(file_path)]
@@ -566,11 +706,18 @@ def _load_package_from_directory(
         metadata=metadata,
         revision=revision,
         content_hash=hash_package_contents(root_dir),
+        repo_id=repo_id,
+        package_path=package_path,
     )
 
 
-def _missing_files_message(root_dir: str, missing: list[str], metadata: dict[str, Any]) -> str:
-    """Explain a package that is missing weights, saying so when the run never finished.
+def _present_files(root_dir: str) -> list[str]:
+    """The package's weight files, for error messages that say how far a run got."""
+    return sorted(entry for entry in os.listdir(root_dir) if entry not in DESCRIPTIVE_FILES)
+
+
+def _incomplete_package_message(root_dir: str, metadata: dict[str, Any]) -> str:
+    """Explain a package whose run never finished.
 
     A multi-stage model uploads after each stage, so a run killed partway leaves
     a package that has a `run_config.json` and a `metadata.json` and therefore
@@ -578,16 +725,27 @@ def _missing_files_message(root_dir: str, missing: list[str], metadata: dict[str
     the two apart, and saying which stage it stopped at turns "file not found"
     into something the reader can act on.
     """
-    present = sorted(entry for entry in os.listdir(root_dir) if entry not in DESCRIPTIVE_FILES)
-    lines = [f"Missing checkpoint file(s) {missing} in {root_dir}; the package holds {present or 'no weight files'}."]
-    if metadata.get(PACKAGE_COMPLETE_FIELD) is False:
-        stage = metadata.get("stage")
-        reached = f" It reached the {stage!r} stage." if stage else ""
-        lines.append(
-            f"This package is marked incomplete: the training run that wrote it did not finish.{reached} "
-            "Re-run training to completion; a partial package cannot be loaded."
-        )
-    return " ".join(lines)
+    present = _present_files(root_dir)
+    stage = metadata.get("stage")
+    reached = f" It reached the {stage!r} stage." if stage else ""
+    return (
+        f"Refusing to load {root_dir}: it is marked incomplete, so the training run that wrote it "
+        f"did not finish.{reached} The package holds {present or 'no weight files'}. "
+        "Re-run training to completion; a partial package cannot be loaded."
+    )
+
+
+def _missing_files_message(root_dir: str, missing: list[str], metadata: dict[str, Any]) -> str:
+    """Explain a finished package that is nevertheless missing weights.
+
+    Reached only for packages marked complete -- an unfinished one is refused
+    before file discovery, by `_incomplete_package_message` -- so this must not
+    blame the run for stopping early. Something else is wrong: the wrong
+    `checkpoint_files` for this model, or an upload that lost a file.
+    """
+    del metadata  # completeness is decided before this point
+    present = _present_files(root_dir)
+    return f"Missing checkpoint file(s) {missing} in {root_dir}; the package holds {present or 'no weight files'}."
 
 
 def _discover_package_files(root_dir: str, metadata: dict[str, Any]) -> list[str]:

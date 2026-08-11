@@ -301,6 +301,8 @@ class Generator(abc.ABC):
         condition_stats: tuple[list[float], list[float]] | None = None,
         checkpoint_revision: str | None = None,
         checkpoint_hash: str | None = None,
+        checkpoint_repo: str | None = None,
+        checkpoint_path: str | None = None,
     ) -> None:
         self.problem = problem
         self.problem_id = problem_id
@@ -313,6 +315,16 @@ class Generator(abc.ABC):
         """Commit the checkpoint was downloaded at, when it came from the Hub."""
         self.checkpoint_hash = checkpoint_hash
         """Content hash of the weight files, identifying the exact weights scored."""
+        self.checkpoint_repo = checkpoint_repo
+        """HF repo holding the weights, e.g. `someone/engiopt-gan-cnn-2d`.
+
+        Together with `checkpoint_path` and `checkpoint_revision` this is the
+        address a leaderboard row is audited from: it is what lets a third party
+        fetch the exact weights behind a score and re-run it. A row that cannot
+        name its repo cannot be verified, and an unverifiable row is a claim.
+        """
+        self.checkpoint_path = checkpoint_path
+        """Package path inside `checkpoint_repo`, e.g. `beams2d/cfg_023dd1fb/seed_1`."""
         self.last_sample_seconds: float | None = None
         """Wall-clock seconds for the most recent `sample` call (cost metrics)."""
 
@@ -404,6 +416,8 @@ class Generator(abc.ABC):
             condition_stats=condition_stats_for(resolved),
             checkpoint_revision=resolved.revision,
             checkpoint_hash=resolved.content_hash,
+            checkpoint_repo=resolved.repo_id,
+            checkpoint_path=resolved.package_path,
             **kwargs,
         )
 

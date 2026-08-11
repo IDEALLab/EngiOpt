@@ -27,8 +27,14 @@ if TYPE_CHECKING:
 MetricCost = Literal["cheap", "expensive"]
 """`cheap` metrics never invoke a simulator or optimizer; `expensive` ones may."""
 
-MetricFamily = Literal["feasibility", "conditions", "performance", "distribution", "diversity", "cost"]
-"""The question a metric answers. Also the grouping used by leaderboard views."""
+MetricFamily = Literal["feasibility", "conditions", "performance", "distribution", "diversity", "memorization", "cost"]
+"""The question a metric answers. Also the grouping used by leaderboard views.
+
+`memorization` and `conditions` are integrity families: they do not say how good
+a model is, they say whether its other scores mean what they appear to. A
+retrieval system and an unconditional model both post excellent `mmd`, and only
+these two families distinguish them from a model that earned it.
+"""
 
 MetricFn = Callable[["EvaluationContext"], "float | dict[str, float]"]
 

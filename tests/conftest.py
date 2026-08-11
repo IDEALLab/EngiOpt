@@ -59,9 +59,16 @@ class FakeProblem:
 
     @property
     def dataset(self) -> dict[str, Any]:
-        """One split whose columns are the declared conditions, all scalar."""
+        """One split whose columns are the declared conditions, plus optimal designs.
+
+        `optimal_design` is here because the memorization check draws its corpus
+        from the training split -- the designs a model could have been fitted on
+        are exactly the ones it could be reproducing.
+        """
         rows = 3
-        return {"train": FakeDataset({key: [0.5] * rows for key in self.conditions_keys})}
+        columns: dict[str, list[Any]] = {key: [0.5] * rows for key in self.conditions_keys}
+        columns["optimal_design"] = [np.full(self.design_space.shape, value) for value in (0.1, 0.2, 0.3)]
+        return {"train": FakeDataset(columns)}
 
     def check_constraints(self, design: Any, config: dict[str, Any]) -> FakeViolations:
         """Mirror `Problem.check_constraints`: declared constraints plus design-space membership.
@@ -114,6 +121,15 @@ class FakeDataset:
 
     def __len__(self) -> int:
         return len(next(iter(self._columns.values())))
+
+    def select(self, indices: Any) -> FakeDataset:
+        """Reorder or subset rows, as `datasets.Dataset.select` does.
+
+        Needed by the condition-sensitivity check, which re-draws from a
+        generator under a permutation of the same conditions.
+        """
+        order = list(indices)
+        return FakeDataset({name: [values[i] for i in order] for name, values in self._columns.items()})
 
 
 @pytest.fixture

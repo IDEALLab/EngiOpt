@@ -96,6 +96,21 @@ class EvalSpec:
             trade-off instead of fixing it. thermoelastic2d's `weight` splits
             the first two objectives as `(w, 1 - w)`, so a purely structural
             sample (`w = 1`) is unaffected by thermal compliance.
+        required_seeds: Which training seeds an entry must supply before it can
+            be ranked. Named rather than counted, because a count only stops a
+            submitter running one seed -- it does not stop them running twenty
+            and publishing their best three, which produces a median over a
+            maximum. Fixing *which* seeds removes the choice.
+        copy_tol: Per-element RMS distance below which a generated design counts
+            as a copy of a design the model could have memorized. See the
+            `novelty` metric.
+        max_copy_rate: The share of copied designs above which an entry is
+            flagged and left out of the ranking. Set to 1.0 to disable the gate
+            and report `copy_rate` without acting on it.
+        copy_corpus_size: How many dataset designs to draw as the memorization
+            corpus. The scored reference designs are always included on top of
+            these, since the public spec names them and they are the most
+            attractive thing to copy.
         condition_digest: Hash of the drawn indices, condition values, and
             reference designs. Recomputed at evaluation time and compared, so an
             upstream dataset change is caught instead of silently shifting every
@@ -122,12 +137,16 @@ class EvalSpec:
     version: str = "v1"
     n_samples: int = 50
     condition_seed: int = 1
-    metrics: tuple[str, ...] = ("mmd", "dpp", "viol", "iog", "cog", "fog")
+    metrics: tuple[str, ...] = ("mmd", "dpp", "novelty", "cond_sens", "viol", "iog", "cog", "fog")
     sigma: float = 10.0
     volfrac_tol: float = 0.01
     volume_condition: str | None = None
     objective_weights: tuple[float, ...] | None = None
     objective_weight_condition: str | None = None
+    required_seeds: tuple[int, ...] = (1, 2, 3)
+    copy_tol: float = 0.01
+    max_copy_rate: float = 0.5
+    copy_corpus_size: int = 512
     condition_digest: str | None = None
     dataset_id: str | None = None
     dataset_revision: str | None = None
@@ -142,6 +161,7 @@ class EvalSpec:
         carry lists and compare unequal to the spec that produced it.
         """
         object.__setattr__(self, "metrics", tuple(self.metrics))
+        object.__setattr__(self, "required_seeds", tuple(int(seed) for seed in self.required_seeds))
         if self.objective_weights is not None:
             object.__setattr__(self, "objective_weights", tuple(self.objective_weights))
         if self.problem_conditions is not None:
@@ -337,12 +357,29 @@ def engibench_version() -> str:
     import engibench
 
     version = getattr(engibench, "__version__", "unknown")
-    sha = _installed_vcs_commit() or _source_checkout_commit(Path(engibench.__file__).resolve().parent.parent)
+    sha = source_checkout_commit(Path(engibench.__file__).resolve().parent.parent, distribution="engibench")
     return f"{version}+{sha}" if sha else version
 
 
-def _installed_vcs_commit() -> str | None:
-    """The commit recorded by `pip install "engibench @ git+..."`, if it was installed that way.
+def source_checkout_commit(source_root: Path, *, distribution: str) -> str | None:
+    """The git commit a package was installed from, or None if that cannot be established.
+
+    Two ways a commit can be known, tried in that order: pip recorded it at
+    install time (PEP 610), or the package is being imported out of a source
+    checkout. Anything else -- a plain wheel from PyPI, a vendored copy --
+    honestly has no commit, and says so.
+
+    Args:
+        source_root: The directory that would be the repository root if this
+            package were a source checkout, i.e. the parent of the package
+            directory itself.
+        distribution: Installed distribution name, for the PEP 610 lookup.
+    """
+    return _installed_vcs_commit(distribution) or _checkout_commit(source_root)
+
+
+def _installed_vcs_commit(distribution: str) -> str | None:
+    """The commit recorded by `pip install "<dist> @ git+..."`, if it was installed that way.
 
     A non-editable VCS install leaves no `.git` directory, but pip records the
     exact commit in the distribution's `direct_url.json` (PEP 610). That is the
@@ -351,7 +388,7 @@ def _installed_vcs_commit() -> str | None:
     from importlib import metadata
 
     try:
-        raw = metadata.distribution("engibench").read_text("direct_url.json")
+        raw = metadata.distribution(distribution).read_text("direct_url.json")
     except (metadata.PackageNotFoundError, OSError):
         return None
     if not raw:
@@ -363,8 +400,8 @@ def _installed_vcs_commit() -> str | None:
     return str(commit)[:12] if commit else None
 
 
-def _source_checkout_commit(source_root: Path) -> str | None:
-    """The commit of an EngiBench *source checkout*, or None if it is not one.
+def _checkout_commit(source_root: Path) -> str | None:
+    """The commit of a *source checkout*, or None if `source_root` is not one.
 
     `git -C` searches parent directories, so asking it about a wheel unpacked
     into a virtualenv inside another repository answers with *that* repository's
@@ -413,10 +450,16 @@ def freeze_spec(
     version: str = "v1",
     n_samples: int = 50,
     condition_seed: int = 1,
-    metrics: tuple[str, ...] = ("mmd", "dpp", "viol", "iog", "cog", "fog"),
+    metrics: tuple[str, ...] = EvalSpec.metrics,
     sigma: float = 10.0,
+    volume_condition: str | None = None,
+    volfrac_tol: float = EvalSpec.volfrac_tol,
     objective_weights: tuple[float, ...] | None = None,
     objective_weight_condition: str | None = None,
+    required_seeds: tuple[int, ...] = EvalSpec.required_seeds,
+    copy_tol: float = EvalSpec.copy_tol,
+    max_copy_rate: float = EvalSpec.max_copy_rate,
+    copy_corpus_size: int = EvalSpec.copy_corpus_size,
     notes: str = "",
 ) -> Path:
     """Draw a problem's test conditions once and commit them as a spec.
@@ -424,6 +467,12 @@ def freeze_spec(
     Run this once per problem, then never again for that version -- the point of
     a spec is that it stops moving. The dataset revision in force is recorded,
     so later uploads to the dataset repo cannot change what the spec means.
+
+    Every field of the contract is settable here. That is not merely convenient:
+    a parameter this entry point omits is a field it silently resets to the
+    dataclass default, so freezing a new version of an existing spec would
+    quietly hand it a different feasibility rule or a different copy gate than
+    the version it was meant to succeed.
 
     Returns:
         Path to the written spec file.
@@ -439,8 +488,14 @@ def freeze_spec(
         condition_seed=condition_seed,
         metrics=metrics,
         sigma=sigma,
+        volume_condition=volume_condition,
+        volfrac_tol=volfrac_tol,
         objective_weights=objective_weights,
         objective_weight_condition=objective_weight_condition,
+        required_seeds=required_seeds,
+        copy_tol=copy_tol,
+        max_copy_rate=max_copy_rate,
+        copy_corpus_size=copy_corpus_size,
         notes=notes,
     ).freeze(problem)
     path = spec.save()

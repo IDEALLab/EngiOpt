@@ -31,6 +31,10 @@ from engiopt.evaluation.leaderboard import disagreement
 from engiopt.evaluation.leaderboard import load_from_hub
 from engiopt.evaluation.leaderboard import push_to_hub
 from engiopt.evaluation.registry import METRICS
+from engiopt.evaluation.submission import FLAG_IGNORES_CONDITIONS
+from engiopt.evaluation.submission import FLAG_MEMORIZED
+from engiopt.evaluation.submission import FLAG_UNVERIFIED
+from engiopt.evaluation.submission import integrity_flags
 from engiopt.utils.all_generators import BUILTIN_GENERATORS
 from engiopt.utils.all_generators import generators_for
 
@@ -98,17 +102,75 @@ class Args:
     """Print each metric's ranking side by side after evaluating."""
     list_generators: bool = False
     """List registered generators and exit."""
+    check_availability: bool = False
+    """With `--list-generators`, also report which have published checkpoints.
+
+    One Hub request per generator. Being registered means an adapter exists in
+    this repository; being available additionally means somebody published
+    weights, and only the second lets you evaluate anything."""
     list_metrics: bool = False
     """List registered metrics and exit."""
 
 
-def _print_generators() -> None:
-    """Print every registered generator, including any that failed to import."""
+def _print_generators(args: Args) -> None:
+    """Print every registered generator, and say which ones can actually be loaded.
+
+    Registered and available are different things, and the gap is wide enough to
+    mislead: an adapter is code in this repository, while a usable model also
+    needs published weights. Listing all fourteen as though they were
+    interchangeable sends people to `--generators all` and a wall of load
+    failures that look like bugs.
+    """
     print(f"{len(BUILTIN_GENERATORS)} generators registered:\n")
+    published = _published_packages(args)
     for name, generator in sorted(BUILTIN_GENERATORS.items()):
         kinds = "/".join(generator.design_kinds)
         conditioning = "conditional" if generator.conditional else "unconditional"
-        print(f"  {name:<20} {kinds:<10} {conditioning}")
+        availability = "" if published is None else f"  {_availability_label(published.get(name))}"
+        print(f"  {name:<20} {kinds:<10} {conditioning:<15}{availability}")
+    if published is not None:
+        missing = sorted(name for name, count in published.items() if not count)
+        if missing:
+            print(
+                f"\n{len(missing)} generator(s) have no published {args.problem_id} checkpoint under "
+                f"{args.hf_entity}: {', '.join(missing)}.\n"
+                "They can be trained and evaluated, but `--generators all` will report them as load "
+                "failures until someone publishes weights. W&B is not a checkpoint source."
+            )
+    else:
+        print(
+            f"\nPass --check-availability to also query {args.hf_entity} for which of these have "
+            f"published {args.problem_id} checkpoints."
+        )
+
+
+def _published_packages(args: Args) -> dict[str, int] | None:
+    """How many packages each generator has for this problem, or None if not asked.
+
+    Behind a flag because it is one Hub request per generator, and `-h`-adjacent
+    commands should not depend on the network.
+    """
+    if not args.check_availability:
+        return None
+    from engiopt.checkpoint_store import build_hf_repo_id
+    from engiopt.checkpoint_store import list_packages
+
+    counts: dict[str, int] = {}
+    for name in BUILTIN_GENERATORS:
+        repo = build_hf_repo_id(args.hf_entity, args.hf_repo_prefix, name)
+        try:
+            counts[name] = len(list_packages(repo, args.problem_id))
+        # A repo that does not exist is the answer, not an error.
+        except Exception:  # noqa: BLE001
+            counts[name] = 0
+    return counts
+
+
+def _availability_label(count: int | None) -> str:
+    """One-word availability, with the package count when there is one."""
+    if not count:
+        return "no published checkpoints"
+    return f"{count} package(s)"
 
 
 def _print_metrics() -> None:
@@ -245,7 +307,7 @@ def main(args: Args) -> int:
         discard the rest of the results.
     """
     if args.list_generators:
-        _print_generators()
+        _print_generators(args)
     if args.list_metrics:
         _print_metrics()
     if args.list_generators or args.list_metrics:
@@ -280,24 +342,59 @@ def main(args: Args) -> int:
     print(f"\n{board.to_string(index=False)}\n")
     print(f"Wrote {len(board)} rows to {destination}")
 
-    _publish(args, board)
+    _publish(args, evaluator, board)
     return 0
 
 
-def _publish(args: Args, board: pd.DataFrame) -> None:
+def _publish(args: Args, evaluator: Evaluator, board: pd.DataFrame) -> None:
     """Push the results wherever the flags asked, then print the ranking comparison."""
     if args.push_to:
-        merged = push_to_hub(board, args.push_to)
+        merged = push_to_hub(board, args.push_to, eval_spec=evaluator.spec)
         print(f"Published {len(board)} row(s) to {args.push_to}; board now holds {len(merged)} rows.")
+        print(
+            "These rows are unverified. They will not be ranked until a runner re-fetches the "
+            f"checkpoints and reproduces the scores: `python -m engiopt.verify --board {args.push_to}`."
+        )
 
     if args.attach_metrics:
         _attach_metrics_to_checkpoints(args, board)
 
+    _print_integrity_warnings(board)
+
     if args.show_disagreement and len(board) > 1:
         ranked = [m for m in board.columns if m in METRICS and METRICS[m].higher_is_better is not None]
         if len(ranked) > 1:
+            # Freshly computed rows are unverified by construction, so the
+            # eligibility filter would empty this table. It is a local preview
+            # of one run, not the public ordering.
             print("\nRankings by metric (1 = best) -- where these disagree is the interesting part:\n")
-            print(disagreement(board, ranked).to_string())
+            print(disagreement(board, ranked, eligible_only=False).to_string())
+
+
+def _print_integrity_warnings(board: pd.DataFrame) -> None:
+    """Say so, locally and immediately, when a row will not be rankable.
+
+    Better here than on the board: the submitter finds out while they can still
+    do something about it, rather than after publishing and wondering why their
+    model never appears in the ordering.
+    """
+    for row in board.to_dict("records"):
+        flags = [flag for flag in integrity_flags(row) if flag != FLAG_UNVERIFIED]
+        if not flags:
+            continue
+        label = f"{row.get('algo_id')} seed {row.get('seed')}"
+        if FLAG_MEMORIZED in flags:
+            print(
+                f"\n  [{label}] copy_rate={row.get('copy_rate'):.2f}: most of this batch reproduces designs "
+                "from the dataset rather than generating them. Its distribution and performance scores "
+                "measure retrieval, and it will be published but not ranked."
+            )
+        if FLAG_IGNORES_CONDITIONS in flags:
+            print(
+                f"\n  [{label}] cond_sens=0: output did not change at all when the conditions were shuffled, "
+                "though this model declares itself conditional. Its conditions are most likely not reaching "
+                "the network. It will be published but not ranked."
+            )
 
 
 if __name__ == "__main__":

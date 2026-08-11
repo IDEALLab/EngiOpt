@@ -21,6 +21,8 @@ import numpy as np
 from engiopt import metrics as metrics_mod
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from datasets import Dataset
     from engibench.core import Problem
     import numpy.typing as npt
@@ -93,6 +95,17 @@ class EvaluationContext:
         objective_weight_condition: Name of a per-sample condition carrying the
             trade-off instead. thermoelastic2d's `weight` splits the first two
             objectives as `(w, 1 - w)`; any remaining objectives get zero.
+        copy_corpus_fn: Returns the designs a model could plausibly have copied
+            -- the dataset designs it may have trained on, plus the reference
+            optima it is being scored against. Deferred behind a callable so
+            that fetching a training split is paid for only when a memorization
+            metric actually runs, and shared across every model in a sweep.
+        copy_tol: RMS per-element distance below which a generated design counts
+            as a copy of something in the corpus.
+        resample_permuted: Re-runs the generator on a permutation of the same
+            conditions, with the same latent draw. `None` when the comparison is
+            unavailable -- an unconditional problem, or a context built directly
+            from arrays rather than from a live generator.
     """
 
     problem: Problem
@@ -106,6 +119,9 @@ class EvaluationContext:
     sample_seconds: float | None = None
     objective_weights: tuple[float, ...] | None = None
     objective_weight_condition: str | None = None
+    copy_corpus_fn: Callable[[], npt.NDArray[Any]] | None = None
+    copy_tol: float = 0.01
+    resample_permuted: Callable[[npt.NDArray[Any]], npt.NDArray[Any]] | None = None
 
     @property
     def n_samples(self) -> int:
@@ -129,6 +145,66 @@ class EvaluationContext:
             return np.asarray(self.ref_designs).reshape(len(self.ref_designs), -1)
         flattened = [np.asarray(spaces.flatten(self.problem.design_space, design)) for design in self.ref_designs]
         return np.asarray(flattened)
+
+    @cached_property
+    def copy_corpus(self) -> npt.NDArray[Any] | None:
+        """Flattened designs a generator could have memorized, or None if there are none.
+
+        The scored reference designs are always in here, even though they are
+        also `mmd`'s comparison target. They are the single most attractive
+        thing to copy precisely *because* the protocol is public and names them,
+        so a memorization check that omitted them would miss the easiest attack
+        on this board. `copy_corpus_fn` widens the corpus to the training split
+        the model was actually fitted on.
+
+        Parts whose flattened width does not match the generated designs are
+        dropped rather than raising: a mismatched corpus makes the check
+        unavailable, and that is not a reason to fail an evaluation.
+        """
+        width = self.gen_flat.shape[1]
+        parts = [part for part in (self.ref_flat,) if part.shape[1] == width]
+        if self.copy_corpus_fn is not None:
+            extra = np.asarray(self.copy_corpus_fn())
+            if len(extra):
+                flattened = extra.reshape(len(extra), -1)
+                if flattened.shape[1] == width:
+                    parts.append(flattened)
+        return np.concatenate(parts) if parts else None
+
+    @cached_property
+    def nearest_corpus_distance(self) -> npt.NDArray[Any] | None:
+        """Per-design RMS distance to the closest design in `copy_corpus`.
+
+        Normalized by the square root of the design dimension so the number is a
+        *per-element* deviation. That makes one tolerance meaningful across
+        problems of different resolution, where a raw L2 norm would not be.
+        """
+        corpus = self.copy_corpus
+        if corpus is None or not len(corpus):
+            return None
+        from scipy.spatial.distance import cdist
+
+        distances = cdist(self.gen_flat, corpus, "euclidean")
+        return np.asarray(distances.min(axis=1) / np.sqrt(self.gen_flat.shape[1]))
+
+    @cached_property
+    def permuted_designs(self) -> npt.NDArray[Any] | None:
+        """Designs the generator produces when the conditions are shuffled between samples.
+
+        Same latent draw, same model, different brief. A model that reads its
+        conditions produces something different; a model that ignores them
+        produces the identical batch in a different order at best, and an
+        identical batch outright at worst. Comparing the two is what turns "this
+        model declares itself conditional" into a measurement.
+        """
+        if self.resample_permuted is None or self.n_samples < 2:  # noqa: PLR2004 - a permutation needs two rows
+            return None
+        # Derangement by rotation: every sample is scored against a condition
+        # that belongs to some *other* sample, with no fixed points to dilute
+        # the signal, and no RNG to make the metric irreproducible.
+        permutation = np.roll(np.arange(self.n_samples), 1)
+        permuted = self.resample_permuted(permutation)
+        return None if permuted is None else np.asarray(permuted).reshape(self.n_samples, -1)
 
     def condition_at(self, index: int) -> dict[str, Any] | None:
         """Conditions for sample `index`, or None when the problem is unconditional."""

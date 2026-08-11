@@ -41,12 +41,22 @@ def hub_error(error_cls: type[Exception], message: str, status: int = 500) -> Ex
 
 
 def _row(algo: str, mmd: float) -> dict[str, Any]:
+    """A publishable row: identity, a fetchable checkpoint address, and a score.
+
+    The address is not decoration. `push_to_hub` refuses rows without one,
+    because a row nobody can re-run cannot be verified and so can never be
+    ranked -- see `engiopt.evaluation.submission`.
+    """
     return {
         "problem_id": "p",
         "algo_id": algo,
         "config_fingerprint": "default",
         "seed": 1,
         "spec_version": "v1",
+        "checkpoint_repo": f"someone/engiopt-{algo}",
+        "checkpoint_path": "p/seed_1",
+        "checkpoint_revision": "cafe1234",
+        "checkpoint_hash": f"hash-{algo}",
         "mmd": mmd,
     }
 

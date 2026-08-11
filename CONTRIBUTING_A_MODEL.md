@@ -139,22 +139,64 @@ conditions.dataset  # original columns, if you need them
 conditions.keys  # condition names, in column order
 ```
 
-Most models want `require_tensor`. Reach for `dataset` only when your model
-preprocesses conditions the way `vqgan` does (dropping constant columns,
-re-normalizing). Unconditional models ignore the argument entirely — and the
-conditional-adherence metrics are what will show that.
+Most models want `require_tensor`. Reach for `dataset` only for conditions that
+**cannot travel in the dense tensor at all** — thermoelastic2d's 65x65 boundary
+matrices, for instance, which `condition_keys` excludes for exactly that reason.
+
+Do **not** use it to re-derive preprocessing. Dropping constant columns or
+re-fitting a normalizer against `dataset` at evaluation time changes the scale
+your network sees, because the 50 evaluation rows have neither the training
+split's statistics nor the same set of columns that never vary. Anything you
+fitted during training travels with the weights instead, and is replayed on load:
+
+```python
+save_checkpoint_package(
+    ...,
+    condition_stats={"mean": [...], "std": [...]},   # if you rescaled conditions
+    condition_normalizer=normalizer_state(cond_norm),  # if you used a min/max Normalizer
+    design_normalizer=normalizer_state(design_norm),
+)
+```
+
+These are part of your model's identity: they are folded into the checkpoint
+content hash, so changing a bound produces a different checkpoint rather than
+inheriting the previous one's leaderboard row.
+
+Unconditional models ignore the argument entirely, which is allowed. They are
+still handed conditions so that `cond_sens` can measure it — see
+[LEADERBOARD.md](LEADERBOARD.md).
 
 ## 4. Check it
 
 ```bash
 python -m engiopt.evaluate --list-generators              # your model should appear
-python -m engiopt.evaluate --problem-id beams2d --generators my_model
+python -m engiopt.evaluate --problem-id beams2d --generators my_model --hf-entity my-hf-username
 ```
 
-Adding `--include-expensive` also runs the simulator-backed metrics (COG, IOG,
-FOG, feasibility). Those are slow; leave them off while iterating.
+The default pass runs the cheap metrics: `mmd`, `dpp`, `viol`, and the two
+integrity checks (`novelty`, `cond_sens`). Feasibility is among them because it
+describes the design as generated, so it is a constraint check rather than a
+solver run. `--include-expensive` adds the optimality gaps (`iog`, `cog`,
+`fog`), which do run the optimizer and are slow — leave them off while
+iterating.
 
-## 5. Adding a metric instead
+Watch two columns while you develop:
+
+- **`cond_sens`** should be greater than zero if you declared `conditional =
+  True`. Exactly zero means your conditions are not reaching the network, which
+  is a wiring bug far more often than a modelling choice.
+- **`copy_rate`** should be near zero. High means your model is reproducing
+  training designs rather than generating, and the board will publish it without
+  ranking it.
+
+## 5. Publish it
+
+See [LEADERBOARD.md](LEADERBOARD.md) for the full submission path. The short
+version: train and evaluate under your own `--hf-entity`, run seeds 1, 2 and 3,
+and push. Your rows appear immediately and are ranked once a runner has
+re-fetched the weights and reproduced the scores.
+
+## 6. Adding a metric instead
 
 Metrics are registered functions, not model methods — a metric compares a
 generated set against a reference set under a problem, so it belongs to the
@@ -177,7 +219,7 @@ accidentally launch a simulation.
 Importing the module is what registers it — which means you can define a metric
 in a notebook cell and it will appear in the next leaderboard you build.
 
-## 6. Where things live
+## 7. Where things live
 
 | Artifact | Home |
 |---|---|
@@ -196,7 +238,7 @@ To attach a model's scores to its own checkpoint:
 python -m engiopt.evaluate --problem-id beams2d --generators my_model --attach-metrics
 ```
 
-## 7. Evaluation specs
+## 8. Evaluation specs
 
 A leaderboard only means something if every row was measured the same way. Each
 problem has a committed spec (`engiopt/specs/<problem_id>/v1.json`) freezing the

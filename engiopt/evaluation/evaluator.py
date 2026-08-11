@@ -17,9 +17,9 @@ import datetime as dt
 import functools
 import importlib.metadata
 from pathlib import Path
-import subprocess
 from typing import Any, TYPE_CHECKING
 
+import numpy as np
 import pandas as pd
 
 from engiopt.core import ConditionBatch
@@ -30,13 +30,17 @@ from engiopt.evaluation.registry import METRICS
 from engiopt.evaluation.registry import MetricSpec
 from engiopt.evaluation.spec import EvalSpec
 from engiopt.evaluation.spec import ResolvedSpec
+from engiopt.evaluation.spec import source_checkout_commit
 from engiopt.utils.all_generators import design_kind_of
 
 # Importing the metrics package is what populates the registry.
 import engiopt.evaluation.metrics  # noqa: F401  # isort: skip
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from engibench.core import Problem
+    import numpy.typing as npt
     import torch as th
 
     from engiopt.core import Generator
@@ -49,11 +53,17 @@ PROVENANCE_COLUMNS = (
     "spec_version",
     "n_samples",
     "sample_seconds",
+    "checkpoint_repo",
+    "checkpoint_path",
     "checkpoint_revision",
     "checkpoint_hash",
     "code_version",
     "engibench_version",
     "evaluated_at",
+    "verified",
+    "verified_by",
+    "verified_at",
+    "flags",
 )
 """Columns identifying *what was measured*, as opposed to metric values.
 
@@ -61,6 +71,17 @@ PROVENANCE_COLUMNS = (
 `checkpoint_hash` says which *weights* did. Re-training the same configuration
 and seed, or changing the training code, yields different weights under the same
 name, so without it a row cannot be traced back to the model that earned it.
+
+`checkpoint_repo` and `checkpoint_path` complete that into an *address*. A hash
+proves two rows describe the same weights; only the address lets someone else go
+and fetch them. Those four columns together are what make a row a reproducible
+claim rather than an assertion, and they are the input to `engiopt.verify`.
+
+`verified` is never set by whoever computed the row. It is stamped by a runner
+that re-fetched the checkpoint and reproduced the numbers; see
+`engiopt.evaluation.verify`. `flags` carries the integrity checks a row tripped,
+which is how a retrieval system stays visible in the table while staying out of
+the ranking.
 
 `engibench_version` is the EngiBench that *ran* the evaluation, as opposed to the
 one the spec was frozen against. A change to `simulate` or `optimize` moves the
@@ -142,15 +163,7 @@ class Evaluator:
                 f"{generator.algo_id!r} supports {generator.design_kinds} design spaces, "
                 f"but {self.problem_id!r} is {kind!r}."
             )
-        designs = generator.sample(
-            ConditionBatch(
-                tensor=self.resolved.conditions_tensor,
-                dataset=self.resolved.conditions,
-                keys=self.resolved.condition_keys,
-            ),
-            n=self.resolved.n_samples,
-            seed=getattr(generator, "seed", None),
-        )
+        designs = self._sample(generator)
         return EvaluationContext(
             problem=self.problem,
             problem_id=self.problem_id,
@@ -163,7 +176,73 @@ class Evaluator:
             sample_seconds=generator.last_sample_seconds,
             objective_weights=self.spec.objective_weights,
             objective_weight_condition=self.spec.objective_weight_condition,
+            copy_corpus_fn=self.copy_corpus,
+            copy_tol=self.spec.copy_tol,
+            resample_permuted=self._permuted_sampler(generator),
         )
+
+    def _sample(self, generator: Generator, order: npt.NDArray[Any] | None = None) -> npt.NDArray[Any]:
+        """Draw this spec's batch from a generator, optionally reordering the conditions.
+
+        The seed is the generator's own, so re-drawing with a different
+        condition order reuses the identical latent sample and isolates the
+        model's response to the conditions themselves.
+        """
+        conditions = self.resolved.conditions
+        tensor = self.resolved.conditions_tensor
+        if order is not None:
+            conditions = conditions.select(order) if conditions is not None else None
+            tensor = tensor[order] if tensor is not None else None
+        return generator.sample(
+            ConditionBatch(tensor=tensor, dataset=conditions, keys=self.resolved.condition_keys),
+            n=self.resolved.n_samples,
+            seed=getattr(generator, "seed", None),
+        )
+
+    def _permuted_sampler(self, generator: Generator) -> Callable[[npt.NDArray[Any]], npt.NDArray[Any]] | None:
+        """A callable re-drawing from `generator` under a permutation, or None if meaningless.
+
+        Withheld when the problem supplies no conditions at all: shuffling
+        nothing measures nothing, and a metric that reported 0 there would say
+        "this model ignores its conditions" about a model that was never given
+        any.
+        """
+        if self.resolved.conditions_tensor is None and self.resolved.conditions is None:
+            return None
+        return lambda order: self._sample(generator, order)
+
+    @functools.cached_property
+    def copy_corpus(self) -> Callable[[], npt.NDArray[Any]]:
+        """Designs from the training split that a model on this problem could have memorized.
+
+        Built once per evaluator and shared by every model in a sweep, and
+        deferred behind a callable so a run that selects no memorization metric
+        never pays for the fetch.
+        """
+
+        @functools.cache
+        def corpus() -> npt.NDArray[Any]:
+            return self._draw_copy_corpus()
+
+        return corpus
+
+    def _draw_copy_corpus(self) -> npt.NDArray[Any]:
+        """Subsample the training split's optimal designs, deterministically.
+
+        Drawn with the spec's own `condition_seed`, so the corpus a model is
+        checked against is as reproducible as the conditions it is scored on --
+        an audit that drew a different corpus could reach a different verdict.
+        """
+        try:
+            train = self.problem.dataset["train"]
+            designs = np.asarray(train["optimal_design"])
+        # A problem with no training split simply has no wider corpus; the
+        # reference designs still are one, and they are the case that matters.
+        except (KeyError, TypeError, AttributeError):
+            return np.empty((0, 0))
+        size = min(self.spec.copy_corpus_size, len(designs))
+        rng = np.random.default_rng(self.spec.condition_seed)
+        return designs[rng.choice(len(designs), size, replace=False)]
 
     def score(
         self,
@@ -209,6 +288,13 @@ class Evaluator:
         return specs
 
     def _provenance(self, generator: Generator, ctx: EvaluationContext) -> dict[str, Any]:
+        """The row's identity and audit trail, minus the verification stamp.
+
+        `verified` is deliberately False here and cannot be set from this side.
+        The whole point of the column is that it records someone *else* having
+        re-fetched these weights and reproduced these numbers, so a value
+        written by the process that computed them would mean nothing.
+        """
         return {
             "problem_id": self.problem_id,
             "algo_id": generator.algo_id,
@@ -217,11 +303,17 @@ class Evaluator:
             "spec_version": self.spec.version,
             "n_samples": ctx.n_samples,
             "sample_seconds": ctx.sample_seconds,
+            "checkpoint_repo": getattr(generator, "checkpoint_repo", None),
+            "checkpoint_path": getattr(generator, "checkpoint_path", None),
             "checkpoint_revision": getattr(generator, "checkpoint_revision", None),
             "checkpoint_hash": getattr(generator, "checkpoint_hash", None),
             "code_version": code_version(),
             "engibench_version": engibench_version(),
             "evaluated_at": dt.datetime.now(dt.timezone.utc).isoformat(timespec="seconds"),
+            "verified": False,
+            "verified_by": None,
+            "verified_at": None,
+            "flags": "",
         }
 
     # ------------------------------------------------------------------
@@ -280,22 +372,19 @@ def code_version() -> str:
 
     Two evaluations of the same checkpoint can differ if the evaluation code
     changed between them, so the row records which code it was.
+
+    The sha is taken with the same guards as EngiBench's, and for the same
+    reason: `git -C` searches upward, so an EngiOpt wheel installed into a
+    virtualenv inside some *other* repository would otherwise report that
+    repository's commit as the code that produced the score. A row claiming a
+    commit it did not run is worse than a row claiming none, because verifying
+    it means checking out the wrong tree.
     """
     try:
         version = importlib.metadata.version("engiopt")
     except importlib.metadata.PackageNotFoundError:
         version = "unknown"
-    try:
-        sha = subprocess.run(
-            ["git", "-C", str(Path(__file__).resolve().parent), "rev-parse", "--short", "HEAD"],
-            capture_output=True,
-            text=True,
-            check=True,
-            timeout=5,
-        ).stdout.strip()
-    # Outside a checkout (an installed wheel, a container) the version is all there is.
-    except (OSError, subprocess.SubprocessError):
-        return version
+    sha = source_checkout_commit(Path(__file__).resolve().parent.parent.parent, distribution="engiopt")
     return f"{version}+{sha}" if sha else version
 
 

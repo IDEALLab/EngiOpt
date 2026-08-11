@@ -57,6 +57,90 @@ def dpp(ctx: EvaluationContext) -> float:
 
 
 # ----------------------------------------------------------------------
+# Memorization: did the model generate this, or retrieve it?
+# ----------------------------------------------------------------------
+
+
+@register_metric(
+    "novelty",
+    family="memorization",
+    cost="cheap",
+    higher_is_better=None,
+    outputs=("novelty", "copy_rate"),
+    description="Distance from generated designs to the nearest design the model could have memorized.",
+)
+def novelty(ctx: EvaluationContext) -> dict[str, float]:
+    """How far the generated designs sit from the corpus a model could copy from.
+
+    The evaluation protocol is public: which conditions are scored, and the
+    dataset-optimal design for each one, can be recomputed by anyone from the
+    committed spec. A lookup table keyed on the condition vector therefore tops
+    `mmd`, `iog`, and `fog` -- not by cheating the implementation, but because
+    those metrics are *defined* as closeness to exactly the designs it returns.
+    No amount of care in the evaluator changes that; the only defence available
+    to a public board is to measure retrieval and say so.
+
+    Two columns, because they answer different questions:
+
+    - `novelty` -- mean per-element RMS distance to the nearest corpus design.
+      Diagnostic, deliberately: it has no good direction. Zero means the model
+      is a retrieval system, but large means only that the output is far from
+      the data, which pure noise also achieves. Read it next to `mmd` and
+      `viol`, never on its own.
+    - `copy_rate` -- the fraction of designs closer than `copy_tol`, i.e. the
+      share of this batch that is a reproduction rather than a generation. This
+      is the one that gates a submission.
+
+    Returns NaN when no corpus is available, rather than claiming novelty that
+    was never checked.
+    """
+    distances = ctx.nearest_corpus_distance
+    if distances is None:
+        return {"novelty": float("nan"), "copy_rate": float("nan")}
+    return {
+        "novelty": float(np.mean(distances)),
+        "copy_rate": float(np.mean(distances < ctx.copy_tol)),
+    }
+
+
+# ----------------------------------------------------------------------
+# Conditions: does the model actually read the brief it was given?
+# ----------------------------------------------------------------------
+
+
+@register_metric(
+    "cond_sens",
+    family="conditions",
+    cost="cheap",
+    higher_is_better=None,
+    description="How much the generated design changes when the conditions are shuffled.",
+)
+def cond_sens(ctx: EvaluationContext) -> float:
+    """Mean per-element RMS change in output when each sample is given another's conditions.
+
+    Sampled from the same seed, so the latent draw is held fixed and the only
+    thing that varies is the brief. A model that ignores its conditions returns
+    the identical batch and scores 0; a model that responds to them scores the
+    size of that response.
+
+    Diagnostic rather than ranked. Being unconditional is a legitimate thing for
+    a model to be -- the contract says so, and such models are still handed
+    conditions so that this can be measured -- while a large response is not by
+    itself a good one, since responding *wrongly* also moves the output.
+    Its job is to stop an unconditional model quietly collecting a conditional
+    model's `mmd` score, not to be maximized.
+
+    Returns NaN when there is nothing to compare: an unconditional problem, or
+    fewer than two samples.
+    """
+    permuted = ctx.permuted_designs
+    if permuted is None:
+        return float("nan")
+    deltas = np.linalg.norm(ctx.gen_flat - permuted, axis=1) / np.sqrt(ctx.gen_flat.shape[1])
+    return float(np.mean(deltas))
+
+
+# ----------------------------------------------------------------------
 # Feasibility: is the design admissible, and does it respect its budget?
 # ----------------------------------------------------------------------
 

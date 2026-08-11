@@ -38,7 +38,7 @@ def test_a_vcs_install_reports_its_recorded_commit(monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(importlib_metadata, "distribution", lambda _name: _Distribution())
 
-    assert spec_mod._installed_vcs_commit() == "0a028c03d02b"
+    assert spec_mod._installed_vcs_commit("engibench") == "0a028c03d02b"
 
 
 def test_a_wheel_without_vcs_info_reports_nothing(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -53,7 +53,7 @@ def test_a_wheel_without_vcs_info_reports_nothing(monkeypatch: pytest.MonkeyPatc
 
     monkeypatch.setattr(importlib_metadata, "distribution", lambda _name: _Distribution())
 
-    assert spec_mod._installed_vcs_commit() is None
+    assert spec_mod._installed_vcs_commit("engibench") is None
 
 
 def test_an_installed_package_is_never_read_as_a_checkout(tmp_path: Path) -> None:
@@ -66,7 +66,7 @@ def test_an_installed_package_is_never_read_as_a_checkout(tmp_path: Path) -> Non
     site_packages = tmp_path / ".venv" / "lib" / "python3.12" / "site-packages"
     site_packages.mkdir(parents=True)
 
-    assert spec_mod._source_checkout_commit(site_packages) is None
+    assert spec_mod._checkout_commit(site_packages) is None
 
 
 def test_a_directory_inside_an_unrelated_repo_is_not_that_repo(tmp_path: Path) -> None:
@@ -79,7 +79,7 @@ def test_a_directory_inside_an_unrelated_repo_is_not_that_repo(tmp_path: Path) -
 
     # `nested` sits inside a git repo but is not its root, so it is not a checkout
     # of the package -- exactly the shape a vendored install takes.
-    assert spec_mod._source_checkout_commit(repo / "nested") is None
+    assert spec_mod._checkout_commit(repo / "nested") is None
 
 
 def test_freeze_and_the_row_report_the_same_kind_of_string() -> None:
@@ -102,15 +102,15 @@ def test_the_runtime_engibench_is_recorded_on_every_row() -> None:
 
 def test_the_version_carries_a_sha_when_one_is_identifiable(monkeypatch: pytest.MonkeyPatch) -> None:
     """The composed value is `<version>+<sha>`, which is what the specs record."""
-    monkeypatch.setattr(spec_mod, "_installed_vcs_commit", lambda: "abcdef123456")
+    monkeypatch.setattr(spec_mod, "_installed_vcs_commit", lambda _dist: "abcdef123456")
 
     assert spec_mod.engibench_version().endswith("+abcdef123456")
 
 
 def test_the_version_degrades_to_the_bare_release(monkeypatch: pytest.MonkeyPatch) -> None:
     """With nothing identifying the source, the release version is all there is."""
-    monkeypatch.setattr(spec_mod, "_installed_vcs_commit", lambda: None)
-    monkeypatch.setattr(spec_mod, "_source_checkout_commit", lambda _root: None)
+    monkeypatch.setattr(spec_mod, "_installed_vcs_commit", lambda _dist: None)
+    monkeypatch.setattr(spec_mod, "_checkout_commit", lambda _root: None)
 
     assert "+" not in spec_mod.engibench_version()
 

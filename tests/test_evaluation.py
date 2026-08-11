@@ -87,8 +87,13 @@ def test_builtin_metrics_declare_their_cost() -> None:
 
     `viol` is cheap: feasibility describes the design as generated, so it is
     judged by a constraint check rather than by running the optimizer.
+
+    The two integrity metrics are cheap too, and that matters more than it
+    sounds: `novelty` and `cond_sens` decide whether a row can be ranked at all,
+    so a board that could only afford the cheap pass would otherwise have to
+    rank models it had never checked for memorization.
     """
-    assert {spec.name for spec in METRICS.select(cost="cheap")} == {"mmd", "dpp", "viol"}
+    assert {spec.name for spec in METRICS.select(cost="cheap")} == {"mmd", "dpp", "viol", "novelty", "cond_sens"}
     assert {spec.name for spec in METRICS.select(cost="expensive")} == {"iog", "cog", "fog"}
 
 
@@ -157,6 +162,7 @@ def _board() -> pd.DataFrame:
                 "problem_id": "p",
                 "algo_id": "a",
                 "config_fingerprint": "cfg_a",
+                "checkpoint_repo": "someone/engiopt-a",
                 "seed": 1,
                 "spec_version": "v1",
                 "mmd": 0.1,
@@ -166,6 +172,7 @@ def _board() -> pd.DataFrame:
                 "problem_id": "p",
                 "algo_id": "a",
                 "config_fingerprint": "cfg_a",
+                "checkpoint_repo": "someone/engiopt-a",
                 "seed": 2,
                 "spec_version": "v1",
                 "mmd": 0.3,
@@ -175,6 +182,7 @@ def _board() -> pd.DataFrame:
                 "problem_id": "p",
                 "algo_id": "b",
                 "config_fingerprint": "cfg_b",
+                "checkpoint_repo": "someone/engiopt-b",
                 "seed": 1,
                 "spec_version": "v1",
                 "mmd": 0.05,
@@ -200,8 +208,8 @@ def test_rank_aggregates_seeds_with_the_median_by_default() -> None:
 def test_disagreement_surfaces_conflicting_rankings() -> None:
     """The two metrics crown different winners; the view must show both."""
     table = disagreement(_board(), ["mmd", "dpp"])
-    assert table.loc[("p", "b", "cfg_b", "v1"), "mmd"] == 1
-    assert table.loc[("p", "a", "cfg_a", "v1"), "dpp"] == 1
+    assert table.loc[("p", "b", "cfg_b", "someone/engiopt-b", "v1"), "mmd"] == 1
+    assert table.loc[("p", "a", "cfg_a", "someone/engiopt-a", "v1"), "dpp"] == 1
 
 
 def _two_configs_board() -> pd.DataFrame:
@@ -256,7 +264,7 @@ def test_append_rows_supersedes_a_rerun_instead_of_duplicating(tmp_path: Any) ->
 
     stored = pd.read_csv(destination)
     assert len(stored) == 3
-    match = stored.set_index(ROW_KEY).loc[("p", "a", "cfg_a", 1, "v1")]
+    match = stored.set_index(ROW_KEY).loc[("p", "a", "cfg_a", "someone/engiopt-a", 1, "v1")]
     assert match["mmd"] == pytest.approx(0.999)
 
 
