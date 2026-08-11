@@ -139,9 +139,29 @@ class Args:
     decoder_lipschitz_scale: float = 1.0
     """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
     predictor_lipschitz_ratio: float = 1.0
-    """Ratio multiplier for auto-scaled predictor Lipschitz bound. Effective bound is
-    ratio * L_dec * sqrt(design_dim / n_perf), which strengthens the predictor
-    proportionally to the dimensionality gap so it can shape the latent space."""
+    """Ratio multiplier on the predictor's Lipschitz bound. Under the default
+    `measured` mode the effective bound is `ratio * L_dec * S`, where `S` is the
+    dataset's performance-to-geometry sensitivity, so `ratio = 1.0` means the
+    geometric and performance bounds bind equally often. See
+    `predictor_lipschitz_mode`."""
+    predictor_lipschitz_mode: Literal["measured", "legacy"] = "measured"
+    """How the predictor's Lipschitz bound is derived from the decoder's.
+
+    `measured` (default): `L_pred = ratio * L_dec * S` with `S = median|dp| /
+    median|dx|` measured on the training split. Latent distance is lower-bounded
+    by `max(|dx|/L_dec, |dp|/L_pred)`, so the two terms are comparable only when
+    `L_pred/L_dec` equals the data's own performance-to-geometry ratio. Setting
+    it this way is what makes latent distance reflect both geometry and
+    performance rather than whichever term happens to dominate.
+
+    `legacy`: `L_pred = ratio * L_dec * sqrt(design_dim / n_perf)`, the original
+    formula, kept so the published checkpoint packages stay reproducible. It was
+    introduced to rebalance *gradient magnitudes* (MSE over many pixels dilutes
+    the reconstruction gradient), but the constraint gate and
+    `nmse_threshold_perf` already handle loss balance. Using the Lipschitz cap
+    for that job overrides its metric meaning, and its `sqrt(design_dim)` factor
+    scales the wrong way: `|dx|` grows like `sqrt(design_dim)`, so the true
+    sensitivity `S` *falls* as the mesh is refined while this formula rises."""
     perf_scaler: Literal["robust", "quantile"] = "robust"
     """Scaler for performance values. 'robust' preserves cardinal structure (RobustScaler);
     'quantile' maps to N(0,1) via rank transform (QuantileTransformer), making Lipschitz
@@ -156,6 +176,46 @@ class Args:
     """Inclusive [lo, hi] range to filter on. Overrides condition_filter_value."""
     condition_filter_tolerance: float = 0.01
     """Tolerance for exact-value matching."""
+
+
+def measure_perf_sensitivity(problem: object, obj_keys: list[str], n: int = 400, seed: int = 0) -> float:
+    """Measure how much performance moves per unit of design distance.
+
+    The decoder's bound gives `|dz| >= |dx| / L_dec` and the predictor's gives
+    `|dz| >= |dp| / L_pred`; latent distance is set by whichever is larger. For
+    both to matter, `L_pred / L_dec` has to equal the ratio the data actually
+    exhibits, which is what this returns.
+
+    Args:
+        problem: The EngiBench problem, used for its training split.
+        obj_keys: Objective column names.
+        n: Designs to sample; pairs are drawn from these.
+        seed: RNG seed, so the bound is reproducible across runs.
+
+    Returns:
+        `median|dp| / median|dx|`, with performance variance-normalized per
+        objective so the result is scale-free in objective units. Falls back to
+        1.0 if the split is too small or degenerate to measure.
+    """
+    ds = problem.dataset["train"]  # type: ignore[attr-defined]
+    present = [k for k in obj_keys if k in ds.column_names]
+    if len(ds) < 2 or not present:
+        return 1.0
+    rng = np.random.default_rng(seed)
+    take = rng.choice(len(ds), min(n, len(ds)), replace=False)
+    designs = np.asarray([np.ravel(ds[int(i)]["optimal_design"]) for i in take], dtype=np.float64)
+    perf = np.stack([np.asarray(ds[k], dtype=np.float64)[take] for k in present], axis=1)
+    perf = (perf - perf.mean(0)) / (perf.std(0) + 1e-12)
+
+    i = rng.integers(0, len(take), 4000)
+    j = rng.integers(0, len(take), 4000)
+    keep = i != j
+    i, j = i[keep], j[keep]
+    med_dx = float(np.median(np.linalg.norm(designs[i] - designs[j], axis=1)))
+    med_dp = float(np.median(np.linalg.norm(perf[i] - perf[j], axis=1)))
+    if not np.isfinite(med_dx) or med_dx <= 0.0 or not np.isfinite(med_dp) or med_dp <= 0.0:
+        return 1.0
+    return med_dp / med_dx
 
 
 BATCH_WITH_IMAGE_CONDITIONS = 3
@@ -249,14 +309,17 @@ if __name__ == "__main__":
     n_perf = len(obj_keys)
 
     # Build MLP predictor (input: perf_dim latent dims + condition embedding)
-    # Auto-scale predictor Lipschitz bound to strengthen predictor proportionally to
-    # the dimensionality gap:  L_pred = ratio * L_dec * sqrt(design_dim / n_perf)
-    # MSE over design_dim pixels dilutes decoder gradients; this compensates so the
-    # predictor has enough capacity to shape the latent space for performance.
+    #
+    # The predictor's bound is derived from the decoder's, because latent distance
+    # obeys  |dz| >= max(|dx| / L_dec, |dp| / L_pred)  and only the *ratio* of the
+    # two bounds decides which term binds -- i.e. whether latent distance reflects
+    # geometry, performance, or both. See `Args.predictor_lipschitz_mode`.
     design_dim = math.prod(design_shape)
-    predictor_lipschitz_scale = (
-        args.predictor_lipschitz_ratio * args.decoder_lipschitz_scale * math.sqrt(design_dim / n_perf)
-    )
+    if args.predictor_lipschitz_mode == "legacy":
+        perf_sensitivity = math.sqrt(design_dim / n_perf)
+    else:
+        perf_sensitivity = measure_perf_sensitivity(problem, obj_keys)
+    predictor_lipschitz_scale = args.predictor_lipschitz_ratio * args.decoder_lipschitz_scale * perf_sensitivity
 
     predictor_input_dim = perf_dim + cond_dim_for_predictor
     predictor = SNMLPPredictor(
@@ -275,7 +338,11 @@ if __name__ == "__main__":
     print(f"Perf dim: {perf_dim} (first {perf_dim} dims predict performance)")
     print(f"Predictor mode: {'Conditional' if args.conditional_predictor else 'Unconditional'}")
     print(
-        f"Predictor: SNMLPPredictor (lipschitz_scale={predictor_lipschitz_scale:.6f}, ratio={args.predictor_lipschitz_ratio}, design_dim={design_dim}, n_perf={n_perf})"
+        f"Predictor: SNMLPPredictor (lipschitz_scale={predictor_lipschitz_scale:.6g}, ratio={args.predictor_lipschitz_ratio}, design_dim={design_dim}, n_perf={n_perf})"
+    )
+    print(
+        f"Predictor bound mode: {args.predictor_lipschitz_mode} "
+        f"(sensitivity={perf_sensitivity:.6g}, L_pred/L_dec={predictor_lipschitz_scale / args.decoder_lipschitz_scale:.6g})"
     )
     print(f"Predictor input: {predictor_input_dim} (perf_dim={perf_dim}, cond_dim={cond_dim_for_predictor})")
     if n_img_conds > 0:
@@ -294,9 +361,17 @@ if __name__ == "__main__":
         print("Latent whitening: enabled (PCA-rotation decorrelation)")
     print(f"{'=' * 60}\n")
 
-    # Log computed predictor_lipschitz_scale to wandb for model reconstruction
+    # Log computed predictor_lipschitz_scale to wandb for model reconstruction.
+    # `perf_sensitivity` goes with it: under `measured` mode the bound depends on
+    # the dataset, so the scale alone no longer identifies the configuration.
     if args.track:
-        wandb.config.update({"predictor_lipschitz_scale": predictor_lipschitz_scale})
+        wandb.config.update(
+            {
+                "predictor_lipschitz_scale": predictor_lipschitz_scale,
+                "predictor_lipschitz_mode": args.predictor_lipschitz_mode,
+                "perf_sensitivity": perf_sensitivity,
+            }
+        )
 
     # Collect all parameters for optimizer (including condition encoder if present)
     all_params = list(enc.parameters()) + list(dec.parameters()) + list(predictor.parameters())
