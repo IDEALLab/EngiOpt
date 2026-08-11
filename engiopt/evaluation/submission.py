@@ -44,9 +44,6 @@ FLAG_MEMORIZED = "memorized"
 FLAG_UNVERIFIED = "unverified"
 """No runner has re-fetched these weights and reproduced these numbers."""
 
-FLAG_INCOMPLETE_SEEDS = "incomplete_seeds"
-"""The entry does not cover every seed the spec requires; see `EvalSpec.required_seeds`."""
-
 FLAG_IGNORES_CONDITIONS = "ignores_conditions"
 """Output did not move when the conditions did, on a problem where they vary."""
 
@@ -96,7 +93,7 @@ def integrity_flags(row: dict[str, Any], spec: EvalSpec | None = None) -> list[s
     ranking instead -- see `leaderboard.rank`.
     """
     flags: list[str] = []
-    copy_rate = _as_float(row.get("copy_rate"))
+    copy_rate = as_metric_value(row.get("copy_rate"))
     max_copy_rate = spec.max_copy_rate if spec is not None else 0.5
     if copy_rate is not None and copy_rate > max_copy_rate:
         flags.append(FLAG_MEMORIZED)
@@ -118,7 +115,7 @@ def _declares_conditioning_it_does_not_use(row: dict[str, Any]) -> bool:
     An honestly unconditional model is not flagged. The contract permits those,
     and they are handed conditions only so that this can be measured.
     """
-    sensitivity = _as_float(row.get("cond_sens"))
+    sensitivity = as_metric_value(row.get("cond_sens"))
     if sensitivity is None or sensitivity > 0:
         return False
     from engiopt.utils.all_generators import BUILTIN_GENERATORS
@@ -174,12 +171,14 @@ class SubmissionRejectedError(ValueError):
         super().__init__("\n".join(lines))
 
 
-def _as_float(value: Any) -> float | None:
-    """A cell as a usable number, or None when it carries no measurement.
+def as_metric_value(value: Any) -> float | None:
+    """A leaderboard cell as a usable number, or None when it carries no measurement.
 
-    NaN counts as no measurement, which matters: `cond_sens` is NaN on an
-    unconditional problem, and treating that as zero would flag every model on
-    it for ignoring conditions that were never supplied.
+    NaN counts as no measurement, which matters in both places this is used: a
+    metric that did not run must not be flagged as a zero, and it must not be
+    reported as a claim the verifier failed to reproduce. `cond_sens` is NaN on
+    an unconditional problem, and reading that as 0.0 would accuse every model
+    on it of ignoring conditions it was never given.
     """
     if _is_blank(value):
         return None

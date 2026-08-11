@@ -27,7 +27,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import field
 import datetime as dt
-import math
 from typing import Any, Literal, TYPE_CHECKING
 
 import pandas as pd
@@ -39,6 +38,7 @@ from engiopt.core import pick_device
 from engiopt.evaluation.evaluator import Evaluator
 from engiopt.evaluation.leaderboard import ROW_KEY
 from engiopt.evaluation.registry import METRICS
+from engiopt.evaluation.submission import as_metric_value
 from engiopt.evaluation.submission import integrity_flags
 from engiopt.utils.all_generators import BUILTIN_GENERATORS
 
@@ -223,7 +223,7 @@ def _uncorroborated(submitted: dict[str, Any], recomputed: dict[str, Any]) -> di
     for name in METRICS.columns():
         if name not in submitted or name not in recomputed:
             continue
-        claimed, actual = _as_float(submitted[name]), _as_float(recomputed[name])
+        claimed, actual = as_metric_value(submitted[name]), as_metric_value(recomputed[name])
         if claimed is None or actual is None:
             continue
         scale = max(abs(actual), abs(claimed), 1e-12)
@@ -240,15 +240,6 @@ def _corroboration_note(uncorroborated: dict[str, tuple[float, float]]) -> str:
         f"{name} claimed {claimed:.4g} vs {actual:.4g}" for name, (claimed, actual) in sorted(uncorroborated.items())
     )
     return f"re-scored; submitted values NOT reproduced ({reported})"
-
-
-def _as_float(value: Any) -> float | None:
-    """Coerce a cell to a comparable float, or None when it is not one."""
-    try:
-        number = float(value)
-    except (TypeError, ValueError):
-        return None
-    return None if math.isnan(number) else number
 
 
 def verify_board(
