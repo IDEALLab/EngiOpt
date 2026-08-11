@@ -57,6 +57,8 @@ EPS = 1e-8
 METRIC_NAMES = (
     "mmd",
     "pca_mmd",
+    "pca_vendi",
+    "pca_coverage",
     "dpp",
     "pixel_vendi",
     "pixel_paired_distance",
@@ -79,6 +81,8 @@ METRIC_NAMES = (
 # strict flatness there would fail a metric for behaving sensibly.
 EXPECTED = {
     "fidelity": {
+        "pca_vendi": "<=0",
+        "pca_coverage": "-",
         "mmd": "+",
         "pca_mmd": "+",
         "lv_mmd": "+",
@@ -92,6 +96,8 @@ EXPECTED = {
         "novelty": "+",
     },
     "mode_drop": {
+        "pca_vendi": "-",
+        "pca_coverage": "-",
         "lv_coverage": "-",
         "lv_vendi": "-",
         "pixel_vendi": "-",
@@ -105,6 +111,8 @@ EXPECTED = {
         "novelty": "0",
     },
     "mode_invent": {
+        "pca_vendi": "<=0",
+        "pca_coverage": "-",
         "lv_residual": "+",
         "mmd": "+",
         "pca_mmd": "+",
@@ -118,6 +126,8 @@ EXPECTED = {
         "novelty": "+",
     },
     "collapse": {
+        "pca_vendi": "-",
+        "pca_coverage": "-",
         "lv_vendi": "-",
         "pixel_vendi": "-",
         "dpp": "-",
@@ -135,6 +145,8 @@ EXPECTED = {
     # reference set *is* a perfect distribution match. Only novelty can object,
     # so the others are scored as "must not improve" and are expected to fail.
     "memorization": {
+        "pca_vendi": "0",
+        "pca_coverage": "0",
         "novelty": "-",
         "mmd": "0",
         "pca_mmd": "0",

@@ -219,6 +219,24 @@ class EvaluationContext:
         )
 
     @cached_property
+    def pixel_sigma(self) -> float:
+        """Kernel bandwidth for pixel-space metrics, by the median heuristic.
+
+        A fixed bandwidth cannot serve two problems at once. `sigma = 10.0`
+        against ~40-unit pixel distances in photonics2d's 14400 dimensions puts
+        `exp(-d^2 / 2 sigma^2)` near 1e-4, so the kernel is numerically dead and
+        MMD cannot separate real optima from random fields. The latent metrics
+        already calibrate; this closes the same gap on the pixel side.
+
+        Calibrated on the validation split, so the bandwidth is not tuned on the
+        reference set the metric then scores against. Falls back to the
+        reference designs when no validation split was supplied, which keeps the
+        metric computable while making the weaker protocol explicit.
+        """
+        basis = self.sigma_designs if self.sigma_designs is not None else self.ref_designs
+        return metrics_mod.compute_median_sigma(np.asarray(basis))
+
+    @cached_property
     def latent_sigma(self) -> float:
         """Kernel bandwidth for latent metrics, calibrated on the validation split.
 

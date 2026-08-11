@@ -36,7 +36,7 @@ if TYPE_CHECKING:
 )
 def mmd(ctx: EvaluationContext) -> float:
     """Maximum Mean Discrepancy between generated and reference designs."""
-    return float(metrics_mod.mmd(ctx.gen_flat, ctx.ref_flat, sigma=ctx.sigma))
+    return float(metrics_mod.mmd(ctx.gen_flat, ctx.ref_flat, sigma=ctx.pixel_sigma))
 
 
 # ----------------------------------------------------------------------
@@ -53,7 +53,7 @@ def mmd(ctx: EvaluationContext) -> float:
 )
 def dpp(ctx: EvaluationContext) -> float:
     """Determinantal Point Process diversity of the generated designs."""
-    return float(metrics_mod.dpp_diversity(ctx.gen_flat, sigma=ctx.sigma))
+    return float(metrics_mod.dpp_diversity(ctx.gen_flat, sigma=ctx.pixel_sigma))
 
 
 # ----------------------------------------------------------------------

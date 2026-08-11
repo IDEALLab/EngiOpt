@@ -148,7 +148,11 @@ def main() -> None:
         print(shown.to_string())
 
         print(f"\n--- {instrument}: verdicts ---")
-        print(sub.pivot_table(index="metric", columns="family", values="verdict", aggfunc="first").reindex(metrics).to_string())
+        print(
+            sub.pivot_table(index="metric", columns="family", values="verdict", aggfunc="first")
+            .reindex(metrics)
+            .to_string()
+        )
 
     bad = res[res["verdict"].isin(("WRONG", "REWARDED", "blind"))]
     if len(bad):

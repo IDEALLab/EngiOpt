@@ -20,6 +20,7 @@ import numpy as np
 from scipy.spatial.distance import cdist
 
 from engiopt import metrics as metrics_mod
+from engiopt.evaluation.metrics.latent import COVERAGE_QUANTILE
 from engiopt.evaluation.registry import register_metric
 
 if TYPE_CHECKING:
@@ -27,6 +28,30 @@ if TYPE_CHECKING:
 
 DEFAULT_PCA_COMPONENTS = 16
 """Used when no instrument is pinned to match dimensionality against."""
+
+
+def _pca_codes(ctx: EvaluationContext) -> tuple[np.ndarray, np.ndarray]:
+    """Generated and reference designs in a PCA subspace matched to the instrument.
+
+    Components are fitted on the validation split -- never on the reference set
+    the metric then scores against -- and the subspace is given as many
+    components as the instrument keeps active, so every PCA baseline is compared
+    at matched dimensionality rather than matched effort.
+    """
+    from sklearn.decomposition import PCA
+
+    fit_designs = ctx.sigma_designs if ctx.sigma_designs is not None else ctx.ref_designs
+    fit_flat = np.asarray(fit_designs).reshape(len(fit_designs), -1)
+
+    n_components = DEFAULT_PCA_COMPONENTS
+    if ctx.latent_lvae is not None:
+        from engiopt.lvae.encode import get_active_mask
+
+        n_components = int(get_active_mask(ctx.latent_lvae.encoder).sum())
+    n_components = max(1, min(n_components, *fit_flat.shape))
+
+    pca = PCA(n_components=n_components).fit(fit_flat)
+    return pca.transform(ctx.gen_flat), pca.transform(ctx.ref_flat)
 
 
 @register_metric(
@@ -77,20 +102,41 @@ def pca_mmd(ctx: EvaluationContext) -> float:
     linear projection does not already provide, and the latent machinery is not
     worth its instrument.
     """
-    from sklearn.decomposition import PCA
-
-    fit_designs = ctx.sigma_designs if ctx.sigma_designs is not None else ctx.ref_designs
-    fit_flat = np.asarray(fit_designs).reshape(len(fit_designs), -1)
-
-    n_components = DEFAULT_PCA_COMPONENTS
-    if ctx.latent_lvae is not None:
-        from engiopt.lvae.encode import get_active_mask
-
-        n_components = int(get_active_mask(ctx.latent_lvae.encoder).sum())
-    n_components = max(1, min(n_components, *fit_flat.shape))
-
-    pca = PCA(n_components=n_components).fit(fit_flat)
-    generated = pca.transform(ctx.gen_flat)
-    reference = pca.transform(ctx.ref_flat)
-
+    generated, reference = _pca_codes(ctx)
     return float(metrics_mod.mmd(generated, reference, sigma=metrics_mod.compute_median_sigma(reference)))
+
+
+@register_metric(
+    "pca_vendi",
+    family="diversity",
+    cost="cheap",
+    higher_is_better=True,
+    description="Vendi score in a PCA subspace matched to the instrument's active dimensionality.",
+)
+def pca_vendi(ctx: EvaluationContext) -> float:
+    """The linear control for `lv_vendi`.
+
+    Exists to separate two explanations of why latent diversity behaves better
+    than pixel diversity: that any low-dimensional projection suppresses the
+    high-frequency noise a pixel-space score mistakes for variety, or that the
+    performance constraint specifically is what does it. Only a matched linear
+    projection can tell those apart.
+    """
+    generated, reference = _pca_codes(ctx)
+    return metrics_mod.vendi_score(generated, sigma=metrics_mod.compute_median_sigma(reference))
+
+
+@register_metric(
+    "pca_coverage",
+    family="distribution",
+    cost="cheap",
+    higher_is_better=True,
+    description="Fraction of reference optima with a generated design within tau in a matched PCA subspace.",
+)
+def pca_coverage(ctx: EvaluationContext) -> float:
+    """The linear control for `lv_coverage`, with the same tau rule."""
+    generated, reference = _pca_codes(ctx)
+    within_reference = cdist(reference, reference)
+    np.fill_diagonal(within_reference, np.inf)
+    tau = float(np.quantile(within_reference.min(axis=1), 1.0 - COVERAGE_QUANTILE))
+    return float((cdist(reference, generated).min(axis=1) <= tau).mean())

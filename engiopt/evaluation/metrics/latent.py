@@ -271,4 +271,4 @@ def pixel_paired_distance(ctx: EvaluationContext) -> float:
 )
 def pixel_vendi(ctx: EvaluationContext) -> float:
     """The baseline `lv_vendi` has to beat."""
-    return metrics_mod.vendi_score(ctx.gen_flat, sigma=ctx.sigma)
+    return metrics_mod.vendi_score(ctx.gen_flat, sigma=ctx.pixel_sigma)

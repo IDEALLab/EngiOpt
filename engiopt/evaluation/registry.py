@@ -8,7 +8,7 @@ Registering a metric is one decorated function::
 
     @register_metric("mmd", family="distribution", cost="cheap", higher_is_better=False)
     def mmd(ctx: EvaluationContext) -> float:
-        return engiopt.metrics.mmd(ctx.gen_designs, ctx.ref_designs, sigma=ctx.sigma)
+        return engiopt.metrics.mmd(ctx.gen_designs, ctx.ref_designs, sigma=ctx.pixel_sigma)
 
 The declaration is what lets the evaluator keep simulation-free metrics strictly
 separate from simulator-backed ones, and what lets the leaderboard know which
