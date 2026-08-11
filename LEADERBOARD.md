@@ -154,7 +154,7 @@ from engiopt.evaluation.spec import EvalSpec
 board = load_from_hub("IDEALLab/engiopt-leaderboard")
 spec = EvalSpec.load("beams2d/v1")
 
-rank(board, "fog", eval_spec=spec)                    # the public ordering
+rank(board, "fog", eval_spec=spec)  # the public ordering
 rank(board, "fog", eval_spec=spec, eligible_only=False)  # everything, including claims
 disagreement(board, ["mmd", "dpp", "fog"], eval_spec=spec)
 ```

@@ -152,7 +152,7 @@ fitted during training travels with the weights instead, and is replayed on load
 ```python
 save_checkpoint_package(
     ...,
-    condition_stats={"mean": [...], "std": [...]},   # if you rescaled conditions
+    condition_stats={"mean": [...], "std": [...]},  # if you rescaled conditions
     condition_normalizer=normalizer_state(cond_norm),  # if you used a min/max Normalizer
     design_normalizer=normalizer_state(design_norm),
 )

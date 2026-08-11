@@ -556,3 +556,26 @@ def test_two_contributors_are_ranked_as_separate_entries() -> None:
     assert len(ranked) == 2
     assert list(ranked["rank"]) == [1, 2]
     assert ranked["checkpoint_repo"].iloc[0] == "me/engiopt-cgan-cnn-2d"
+
+
+# ----------------------------------------------------------------------
+# A model must never fall off a run without saying so
+# ----------------------------------------------------------------------
+
+
+def test_a_model_no_fingerprint_is_scoped_to_falls_back_to_canonical() -> None:
+    """Otherwise it is dropped before the load is attempted -- silently.
+
+    `--generators gan_cnn_2d vqgan --config-fingerprints gan_cnn_2d:6293adb3`
+    scopes the only entry to `gan_cnn_2d`, leaving `vqgan` with an empty
+    fingerprint list. An empty list means the loop body never runs, so vqgan
+    produces no row, no error, and no message. A leaderboard quietly missing an
+    entrant is worse than one reporting a load failure.
+    """
+    from engiopt.evaluate import _fingerprints_for
+
+    assert _fingerprints_for(("gan_cnn_2d:6293adb3",), "vqgan") == (None,)
+    # The cases that already worked must keep working.
+    assert _fingerprints_for(("gan_cnn_2d:6293adb3",), "gan_cnn_2d") == ("6293adb3",)
+    assert _fingerprints_for(("abc123",), "vqgan") == ("abc123",)
+    assert _fingerprints_for((), "vqgan") == (None,)

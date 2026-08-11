@@ -202,6 +202,13 @@ def _fingerprints_for(requested: tuple[str, ...], algo: str) -> tuple[str | None
     scopes an entry to its owner; a bare fingerprint still applies to every
     algorithm, which is what a single-model run wants.
 
+    A model that no entry is scoped to falls back to its canonical checkpoint
+    rather than to nothing. Returning an empty tuple would drop it before the
+    load is even attempted -- no row, no error, no message -- so
+    `--generators gan_cnn_2d vqgan --config-fingerprints gan_cnn_2d:6293adb3`
+    would quietly score one model and never mention the other. A leaderboard
+    silently missing an entrant is worse than one reporting a load failure.
+
     Args:
         requested: Raw `--config-fingerprints` values.
         algo: The algorithm being loaded.
@@ -216,7 +223,7 @@ def _fingerprints_for(requested: tuple[str, ...], algo: str) -> tuple[str | None
         for entry in requested
         if ":" not in entry or entry.split(":", 1)[0] == algo
     ]
-    return tuple(selected)
+    return tuple(selected) or (None,)
 
 
 def _load_generators(args: Args, evaluator: Evaluator) -> list[Generator]:
