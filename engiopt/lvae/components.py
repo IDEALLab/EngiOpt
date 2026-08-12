@@ -29,9 +29,28 @@ from torchvision import transforms
 def spectral_norm_conv(module: nn.Module, input_shape: tuple[int, int]) -> nn.Module:  # noqa: ARG001
     """Apply spectral normalization to a convolutional layer.
 
+    **This normalizes the reshaped weight matrix, not the convolution operator.**
+    `torch.nn.utils.parametrizations.spectral_norm` divides the weight by the
+    largest singular value of its `(out_channels, -1)` reshape, which for a
+    convolution is a lower bound on the operator norm rather than the operator
+    norm itself, so the true Lipschitz constant of the layer can exceed 1. Chen
+    singles this case out -- "for accurate regularization of any convolutional
+    layers, we employ the power method" -- which requires `input_shape` to run
+    power iteration against the actual convolution.
+
+    `input_shape` is accepted and threaded through by every call site so the
+    correct implementation can be dropped in without touching them, but it is
+    **currently unused**. Measured on the published decoders, the conv stages are
+    strongly contractive in practice (the whole stack ran ~7e-4 before the output
+    scale), so this gap was not the binding error -- BatchNorm was. Re-measure
+    with `slurm/layerslope.py` after any architecture change; if the realised
+    slope exceeds the cap once normalization layers are gone, this is the next
+    thing to fix.
+
     Args:
         module: A Conv2d or ConvTranspose2d module to normalize.
-        input_shape: The spatial dimensions (H, W) of the input to this layer.
+        input_shape: Spatial dimensions (H, W) of this layer's input. Reserved
+            for the operator-norm implementation; not currently read.
 
     Returns:
         The module wrapped with spectral normalization.
@@ -225,12 +244,25 @@ class TrueSNDeconv2DCombo(nn.Module):
             ),
             input_shape,
         )
-        self.bn = nn.BatchNorm2d(out_channels)
-        self.activation = nn.ReLU(inplace=True)
+        # No normalization layer here, deliberately. BatchNorm scales by
+        # `gamma / sqrt(running_var + eps)`, which is unbounded and destroys the
+        # bound the spectral norm above constructs -- measured at 319x, 33x and
+        # 15x on the three published heatconduction2d decoder blocks, for a
+        # product of ~1.5e5 and a realised decoder slope 103x its configured cap
+        # of 1.0. Chen's guarantee is stated over "all linear layers ... with
+        # 1-Lipschitz functions such as LeakyReLU as activation functions", with
+        # nothing between them, and Algorithm 1 lists `g_theta is K-Lipschitz` as
+        # a precondition rather than an option. GroupNorm/InstanceNorm are not
+        # substitutes: they also divide by a data-dependent standard deviation.
+        #
+        # LeakyReLU rather than ReLU for the same reason Chen uses it: with no
+        # normalization to recentre activations, a hard zero half-plane makes
+        # dead units likely in a stack that is contractive by construction.
+        self.activation = nn.LeakyReLU(0.2, inplace=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass through the layer."""
-        return self.activation(self.bn(self.conv(x)))
+        return self.activation(self.conv(x))
 
 
 class TrueSNDecoder2D(nn.Module):
@@ -285,7 +317,7 @@ class TrueSNDecoder2D(nn.Module):
         # Spectral normalized linear projection (input includes condition embedding when cond_dim > 0)
         self.proj = nn.Sequential(
             spectral_norm(nn.Linear(latent_dim + cond_dim, 512 * 7 * 7)),
-            nn.ReLU(inplace=True),
+            nn.LeakyReLU(0.2, inplace=True),
         )
 
         # Build deconvolutional layers with spectral normalization (no final sigmoid)

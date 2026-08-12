@@ -139,9 +139,25 @@ class Args:
     decoder_lipschitz_scale: float = 1.0
     """Lipschitz bound for spectrally normalized decoder. Controls output scaling."""
     predictor_lipschitz_ratio: float = 1.0
-    """Ratio multiplier for auto-scaled predictor Lipschitz bound. Effective bound is
-    ratio * L_dec * sqrt(design_dim / n_perf), which strengthens the predictor
-    proportionally to the dimensionality gap so it can shape the latent space."""
+    """Multiplier on the predictor's Lipschitz bound:
+    `L_pred = ratio * L_dec * S`, with `S` measured by `measure_perf_sensitivity`.
+    `ratio = 1.0` means the geometry and performance bounds bind equally often.
+
+    Chen's Corollary 4.14 (labeled GLV in the L-infinity product metric) gives the
+    decoder `g^x` and the performance head `g^y` the *same* constant `K`, because
+    bounding both individually is equivalent to bounding the joint map under
+    `max(||dx||, ||dp||)`. Taken literally that means `L_pred = L_dec`. But a
+    single `K` only does useful work when the two arms are on comparable scales:
+    here `|dx| ~ 28` against `|dp| ~ 0.6`, so the max is always the geometry term
+    and the performance head could never shape the latent. Chen handles this by
+    scaling the labels instead -- "scale up d_Y with some factor c to make
+    c * d_Y dominate d'_X" -- and scaling performance by `c` with both heads at
+    `K` is algebraically identical to leaving performance alone and setting
+    `L_pred = K / c`. `S = 1/c` is that factor, measured per dataset.
+
+    The earlier `sqrt(design_dim / n_perf)` term (~70-120 here) was a different
+    thing entirely: pure shape arithmetic with no counterpart in the method,
+    which made the performance bound slack enough never to bind."""
     perf_scaler: Literal["robust", "quantile"] = "robust"
     """Scaler for performance values. 'robust' preserves cardinal structure (RobustScaler);
     'quantile' maps to N(0,1) via rank transform (QuantileTransformer), making Lipschitz
@@ -156,6 +172,59 @@ class Args:
     """Inclusive [lo, hi] range to filter on. Overrides condition_filter_value."""
     condition_filter_tolerance: float = 0.01
     """Tolerance for exact-value matching."""
+
+
+MIN_DESIGNS_FOR_SENSITIVITY = 2
+"""Below this many designs there are no pairs to measure a distance ratio from."""
+
+
+def measure_perf_sensitivity(problem: object, obj_keys: list[str], n: int = 400, seed: int = 0) -> float:
+    """Measure typical performance change per unit of design distance.
+
+    Chen's Corollary 4.14 bounds the decoder `g^x` and the performance head `g^y`
+    by the *same* constant `K`, which is equivalent to bounding the joint map
+    under the L-infinity product metric: `max(|dx|, |dp|) <= K |dz|`. A single
+    `K` only does useful work if the two arms are on comparable scales -- with
+    `|dx| ~ 28` against `|dp| ~ 0.6`, the max is always the geometry term and the
+    performance head cannot shape the latent at all. Chen supplies the missing
+    piece separately: "scale up `d_Y` with some factor `c` to make `c * d_Y`
+    dominate `d'_X`".
+
+    Scaling performance by `c` with both heads at `K` is algebraically identical
+    to leaving performance alone and setting `L_pred = K / c`, so this returns
+    `1 / c = median|dp| / median|dx|` and the caller applies it as the predictor
+    ratio. Balance -- neither term trivially dominating -- is `ratio = 1.0`.
+
+    Args:
+        problem: The EngiBench problem, used for its training split.
+        obj_keys: Objective column names.
+        n: Designs to sample; pairs are drawn from these.
+        seed: RNG seed, so the bound is reproducible across runs.
+
+    Returns:
+        `median|dp| / median|dx|`, performance variance-normalized per objective
+        so the result is scale-free in objective units. Falls back to 1.0 if the
+        split is too small or degenerate to measure.
+    """
+    ds = problem.dataset["train"]  # type: ignore[attr-defined]
+    present = [k for k in obj_keys if k in ds.column_names]
+    if len(ds) < MIN_DESIGNS_FOR_SENSITIVITY or not present:
+        return 1.0
+    rng = np.random.default_rng(seed)
+    take = rng.choice(len(ds), min(n, len(ds)), replace=False)
+    designs = np.asarray([np.ravel(ds[int(i)]["optimal_design"]) for i in take], dtype=np.float64)
+    perf = np.stack([np.asarray(ds[k], dtype=np.float64)[take] for k in present], axis=1)
+    perf = (perf - perf.mean(0)) / (perf.std(0) + 1e-12)
+
+    i = rng.integers(0, len(take), 4000)
+    j = rng.integers(0, len(take), 4000)
+    keep = i != j
+    i, j = i[keep], j[keep]
+    med_dx = float(np.median(np.linalg.norm(designs[i] - designs[j], axis=1)))
+    med_dp = float(np.median(np.linalg.norm(perf[i] - perf[j], axis=1)))
+    if not np.isfinite(med_dx) or med_dx <= 0.0 or not np.isfinite(med_dp) or med_dp <= 0.0:
+        return 1.0
+    return med_dp / med_dx
 
 
 BATCH_WITH_IMAGE_CONDITIONS = 3
@@ -249,14 +318,15 @@ if __name__ == "__main__":
     n_perf = len(obj_keys)
 
     # Build MLP predictor (input: perf_dim latent dims + condition embedding)
-    # Auto-scale predictor Lipschitz bound to strengthen predictor proportionally to
-    # the dimensionality gap:  L_pred = ratio * L_dec * sqrt(design_dim / n_perf)
-    # MSE over design_dim pixels dilutes decoder gradients; this compensates so the
-    # predictor has enough capacity to shape the latent space for performance.
+    #
+    # Same Lipschitz constant as the decoder (Chen Cor. 4.14): bounding `g^x` and
+    # `g^y` by the same K is equivalent to bounding the joint decoder under the
+    # L-infinity product metric, which is what makes latent distance control
+    # `max(||dx||, ||dp||)` rather than either one alone. See
+    # `Args.predictor_lipschitz_ratio`.
     design_dim = math.prod(design_shape)
-    predictor_lipschitz_scale = (
-        args.predictor_lipschitz_ratio * args.decoder_lipschitz_scale * math.sqrt(design_dim / n_perf)
-    )
+    perf_sensitivity = measure_perf_sensitivity(problem, obj_keys)
+    predictor_lipschitz_scale = args.predictor_lipschitz_ratio * args.decoder_lipschitz_scale * perf_sensitivity
 
     predictor_input_dim = perf_dim + cond_dim_for_predictor
     predictor = SNMLPPredictor(
@@ -275,7 +345,10 @@ if __name__ == "__main__":
     print(f"Perf dim: {perf_dim} (first {perf_dim} dims predict performance)")
     print(f"Predictor mode: {'Conditional' if args.conditional_predictor else 'Unconditional'}")
     print(
-        f"Predictor: SNMLPPredictor (lipschitz_scale={predictor_lipschitz_scale:.6f}, ratio={args.predictor_lipschitz_ratio}, design_dim={design_dim}, n_perf={n_perf})"
+        f"Predictor: SNMLPPredictor (lipschitz_scale={predictor_lipschitz_scale:.6g}, ratio={args.predictor_lipschitz_ratio}, design_dim={design_dim}, n_perf={n_perf})"
+    )
+    print(
+        f"Perf sensitivity (median|dp|/median|dx|): {perf_sensitivity:.6g}  -> L_pred/L_dec = {predictor_lipschitz_scale / args.decoder_lipschitz_scale:.6g}"
     )
     print(f"Predictor input: {predictor_input_dim} (perf_dim={perf_dim}, cond_dim={cond_dim_for_predictor})")
     if n_img_conds > 0:
@@ -294,9 +367,16 @@ if __name__ == "__main__":
         print("Latent whitening: enabled (PCA-rotation decorrelation)")
     print(f"{'=' * 60}\n")
 
-    # Log computed predictor_lipschitz_scale to wandb for model reconstruction
+    # Log the computed predictor scale for model reconstruction, and the measured
+    # sensitivity beside it: the scale now depends on the dataset, so it no longer
+    # identifies the configuration on its own.
     if args.track:
-        wandb.config.update({"predictor_lipschitz_scale": predictor_lipschitz_scale})
+        wandb.config.update(
+            {
+                "predictor_lipschitz_scale": predictor_lipschitz_scale,
+                "perf_sensitivity": perf_sensitivity,
+            }
+        )
 
     # Collect all parameters for optimizer (including condition encoder if present)
     all_params = list(enc.parameters()) + list(dec.parameters()) + list(predictor.parameters())

@@ -266,6 +266,46 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         """Latent values that pruned dimensions are held at."""
         return self._z
 
+    def loss_vol_active(self, z: torch.Tensor) -> torch.Tensor:
+        """Volume penalty over the active subspace only, scaled by `|I| / n`.
+
+        This is Chen's Algorithm 1 form,
+        `v = (|I|/n) * (prod_{i in I} sigma_i) ** (1/|I|)`, where `I` is the set
+        of unpruned dimensions. Two properties matter and neither survives a
+        mean taken over all `n` dimensions:
+
+        - Restricting the product to active dimensions is what keeps the result
+          from depending on the *nominal* latent width. Including frozen
+          dimensions reintroduces the rigidity that "makes the dimension
+          reduction result dependent on the choice of the latent space dimension
+          n, especially when it is much larger than the dataset's intrinsic
+          dimension" -- our exact configuration (100 against 2-4).
+        - The `|I| / n` factor exists "to unify the magnitude of L_vol's
+          gradient throughout pruning". Averaging over all `n` instead makes the
+          gradient on a surviving dimension proportional to the all-dimension
+          geometric mean, so every newly frozen (small) sigma multiplicatively
+          weakens the pressure on the survivors. Volume pressure then decays
+          toward zero as pruning proceeds and pruning stalls above the intrinsic
+          dimension.
+
+        The clamp is a guard against `log(0)` only; it sits far below any real
+        standard deviation and is not the `eta` of the Chapter-3 formulation,
+        which dynamic pruning deliberately supersedes.
+
+        Args:
+            z: Latent codes of shape `(batch, latent_dim)`.
+
+        Returns:
+            Scalar volume penalty.
+        """
+        active = ~self._p
+        n_total = self._p.numel()
+        n_active = int(active.sum().item())
+        if n_active == 0:
+            return torch.zeros((), device=z.device, dtype=z.dtype)
+        s = z[:, active].std(0).clamp_min(1e-12)
+        return (n_active / n_total) * torch.exp(torch.log(s).mean())
+
     def decode(self, z: torch.Tensor) -> torch.Tensor:
         """Decode with pruned dimensions frozen to their mean values."""
         z = z.clone()
@@ -285,14 +325,7 @@ class LeastVolumeAE_DynamicPruning(LeastVolumeAE):  # noqa: N801
         x_hat = self.decode(z)
         self._update_moving_mean(z)
 
-        # Volume loss: pruned dims use frozen std (captured at prune time),
-        # active dims use current std. This makes pruning volume-neutral.
-        s = self._frozen_std.clone()
-        if (~self._p).any():
-            s[~self._p] = z[:, ~self._p].std(0)
-        vol_loss = torch.exp(torch.log(s).mean())
-
-        return torch.stack([self.loss_rec(x, x_hat), vol_loss])
+        return torch.stack([self.loss_rec(x, x_hat), self.loss_vol_active(z)])
 
     @torch.no_grad()
     def _update_moving_mean(self, z: torch.Tensor) -> None:
@@ -497,11 +530,7 @@ class PerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
         # Performance prediction using full latent + conditions
         p_hat = self.predictor(torch.cat([z, c], dim=-1))
 
-        # Volume loss: pruned dims use frozen std, active dims use current std
-        s = self._frozen_std.clone()
-        if (~self._p).any():
-            s[~self._p] = z[:, ~self._p].std(0)
-        vol_loss = torch.exp(torch.log(s).mean())
+        vol_loss = self.loss_vol_active(z)
 
         return torch.stack(
             [
@@ -635,11 +664,7 @@ class ConstrainedLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N801
 
         rec_loss = self.loss_rec(x, x_hat)
 
-        # Volume loss: pruned dims use frozen std, active dims use current std
-        s = self._frozen_std.clone()
-        if (~self._p).any():
-            s[~self._p] = z[:, ~self._p].std(0)
-        vol_loss = torch.exp(torch.log(s).mean())
+        vol_loss = self.loss_vol_active(z)
 
         # Compute NMSE = MSE / Var(data)
         nmse = rec_loss / self._data_var
@@ -749,11 +774,7 @@ class InterpretablePerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: 
         pz = z[:, : self.perf_dim]
         p_hat = self.predictor(torch.cat([pz, c], dim=-1)) if c.shape[-1] > 0 else self.predictor(pz)
 
-        # Volume loss: pruned dims use frozen std, active dims use current std
-        s = self._frozen_std.clone()
-        if (~self._p).any():
-            s[~self._p] = z[:, ~self._p].std(0)
-        vol_loss = torch.exp(torch.log(s).mean())
+        vol_loss = self.loss_vol_active(z)
 
         return torch.stack(
             [
@@ -1032,11 +1053,7 @@ class ConstrainedPerfLeastVolumeAE_DP(LeastVolumeAE_DynamicPruning):  # noqa: N8
         else:
             perf_loss = torch.tensor(0.0, device=x.device)
 
-        # Volume loss: pruned dims use frozen std, active dims use current std
-        s = self._frozen_std.clone()
-        if (~self._p).any():
-            s[~self._p] = z[:, ~self._p].std(0)
-        vol_loss = torch.exp(torch.log(s).mean())
+        vol_loss = self.loss_vol_active(z)
 
         # Compute NMSEs
         nmse_rec = rec_loss / self._data_var
