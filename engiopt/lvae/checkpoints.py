@@ -15,6 +15,8 @@ Nothing in this module imports W&B.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from dataclasses import field
+from functools import cached_property
 from typing import Any, TYPE_CHECKING
 
 import numpy as np
@@ -107,26 +109,72 @@ def build_decoder(checkpoint: dict[str, Any], config: LVAEConfig, device: th.dev
     return decoder.to(device).eval()
 
 
-@dataclass(frozen=True)
-class LoadedLVAE:
-    """A trained LVAE with both halves available.
+class DecoderUnavailableError(RuntimeError):
+    """Raised when a package's decoder cannot be rebuilt by the current code.
 
-    Encoder-only loading is enough for distribution metrics, but anything that
-    measures a design *against the manifold* -- the projection residual, the
-    dual-LVAE gap, encode-decode projection -- has to decode as well.
+    Kept distinct from a generic load error because the usual cause is an
+    architecture change that the published weights predate, and the answer is to
+    retrain rather than to retry. The encoder is unaffected, so the metrics that
+    only encode stay available and only the ones that must decode fail.
+    """
+
+    def __init__(self, package: str, reason: str) -> None:
+        super().__init__(
+            f"the decoder in {package} cannot be rebuilt by the current code: {reason}\n"
+            "Encoder-only latent metrics (lv_mmd, lv_coverage, lv_vendi, lv_paired_distance) still work; "
+            "lv_residual and lv_dual_gap need a decoder and will stay unavailable until the instrument is "
+            "retrained against the current architecture."
+        )
+
+
+@dataclass
+class LoadedLVAE:
+    """A trained LVAE, with the decoder built on demand.
+
+    Encoder-only loading is enough for the distribution and diversity metrics.
+    Anything that measures a design *against the manifold* -- the projection
+    residual, the dual-LVAE gap, encode-decode projection -- has to decode too.
+
+    The decoder is built lazily rather than at load time so that a package whose
+    decoder the current code cannot rebuild still serves every metric that only
+    needs to encode. Building both eagerly meant one architecture change took
+    down the whole latent family, including columns that never decode.
 
     Attributes:
         encoder: Eval-mode encoder, pruning wrapper included.
-        decoder: Eval-mode decoder.
         config: Architecture arguments recovered from `run_config.json`.
         resolved: The checkpoint package, whose `revision` and `content_hash`
             identify exactly which instrument produced a number.
     """
 
     encoder: nn.Module
-    decoder: nn.Module
     config: LVAEConfig
     resolved: ResolvedCheckpoint
+    _decoder_factory: Any = field(default=None, repr=False)
+
+    @cached_property
+    def decoder(self) -> nn.Module:
+        """The decoder, rebuilt on first use.
+
+        Raises:
+            DecoderUnavailableError: If the published weights do not match the
+                architecture the current code builds.
+        """
+        if self._decoder_factory is None:
+            raise DecoderUnavailableError(str(self.resolved.root_dir), "no decoder was loaded")
+        try:
+            return self._decoder_factory()
+        except RuntimeError as exc:
+            raise DecoderUnavailableError(str(self.resolved.root_dir), str(exc).split("\n")[0]) from exc
+
+    @property
+    def has_decoder(self) -> bool:
+        """Whether the decoder can actually be built, without raising to find out."""
+        try:
+            _ = self.decoder
+        except DecoderUnavailableError:
+            return False
+        return True
 
     def project(self, designs: npt.NDArray, batch_size: int = 256) -> npt.NDArray:
         """Project designs onto the learned manifold by encoding then decoding.
@@ -159,9 +207,9 @@ def load_lvae(**kwargs: Any) -> LoadedLVAE:
     checkpoint = th.load(resolved.files[filename], map_location=device, weights_only=False)
     return LoadedLVAE(
         encoder=encoder,
-        decoder=build_decoder(checkpoint, config, device),
         config=config,
         resolved=resolved,
+        _decoder_factory=lambda: build_decoder(checkpoint, config, device),
     )
 
 

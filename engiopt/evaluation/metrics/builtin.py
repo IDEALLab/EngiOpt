@@ -52,8 +52,48 @@ def mmd(ctx: EvaluationContext) -> float:
     description="Determinantal Point Process diversity of the generated set.",
 )
 def dpp(ctx: EvaluationContext) -> float:
-    """Determinantal Point Process diversity of the generated designs."""
+    """Determinantal Point Process diversity of the generated designs.
+
+    Kept in its published raw-determinant form on purpose. It is already frozen
+    into `beams2d/v2` and recorded in every `metrics.json` written against it,
+    and silently changing what a column *means* is the failure the whole spec
+    mechanism exists to prevent. `dpp_geometric` is the repaired column; report
+    that one and leave this where it is.
+    """
     return float(metrics_mod.dpp_diversity(ctx.gen_flat, sigma=ctx.pixel_sigma))
+
+
+@register_metric(
+    "dpp_geometric",
+    family="diversity",
+    cost="cheap",
+    higher_is_better=True,
+    description="DPP diversity as the n-th root of the determinant: bounded in (0, 1] and comparable across n.",
+)
+def dpp_geometric(ctx: EvaluationContext) -> float:
+    """`dpp` on a scale that survives being written down.
+
+    Same kernel, same determinant, `n`-th root taken. See
+    `metrics.dpp_geometric_mean` for why that is the form worth reporting.
+    """
+    return float(metrics_mod.dpp_geometric_mean(ctx.gen_flat, sigma=ctx.pixel_sigma))
+
+
+@register_metric(
+    "dpp_logdet",
+    family="diversity",
+    cost="cheap",
+    higher_is_better=True,
+    description="Log-determinant form of DPP diversity; unbounded below and scales with the sample count.",
+)
+def dpp_logdet(ctx: EvaluationContext) -> float:
+    """The log-determinant, reported alongside so the three forms can be compared.
+
+    Not the recommended column -- it is not comparable across sample sizes --
+    but it is what "fix DPP with slogdet" usually means, and showing it beside
+    `dpp_geometric` is what makes the difference between the two visible.
+    """
+    return float(metrics_mod.log_dpp_diversity(ctx.gen_flat, sigma=ctx.pixel_sigma))
 
 
 # ----------------------------------------------------------------------

@@ -59,6 +59,17 @@ class KNNRetrieval(DatasetGenerator):
         super().__init__(**kwargs)
         self.k = neighbours or self.neighbours
 
+    def parameter_count(self) -> int:
+        """Every number the method must keep: the training designs themselves.
+
+        A retrieval model has no weights, and reporting nothing would let it sit
+        on a cost board for free. Its training set *is* its parameters -- it
+        cannot answer a query without them -- so that is what it declares, and
+        a kNN's data cost lands on the same axis as a network's weight cost.
+        """
+        split = self.bank.split("train")
+        return int(np.prod(split.designs.shape))
+
     def _sample(self, conditions: ConditionBatch, n: int) -> npt.NDArray[Any]:
         """Average the `k` nearest training designs, then match the volume budget."""
         requested = self.requested(conditions, n)
@@ -91,6 +102,17 @@ class LinearRegression(DatasetGenerator):
 
     fit_samples: ClassVar[int] = 2000
     ridge: ClassVar[float] = 1e-2
+
+    def parameter_count(self) -> int:
+        """Size of the fitted weight matrix: one row per feature, one column per pixel.
+
+        Declared rather than measured because the weights are solved for inside
+        `_sample` and never stored, so there is nothing for a torch walk to find.
+        The shape is fixed by the problem, so the count is exact.
+        """
+        split = self.bank.split("train")
+        n_features = 1 + 2 * split.conditions.shape[1]
+        return int(n_features * np.prod(split.designs.shape[1:]))
 
     def _features(self, conditions: npt.NDArray[Any]) -> npt.NDArray[Any]:
         """Bias, the conditions, and their squares."""

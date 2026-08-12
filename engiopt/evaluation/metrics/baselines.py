@@ -26,32 +26,15 @@ from engiopt.evaluation.registry import register_metric
 if TYPE_CHECKING:
     from engiopt.evaluation.context import EvaluationContext
 
-DEFAULT_PCA_COMPONENTS = 16
-"""Used when no instrument is pinned to match dimensionality against."""
-
-
 def _pca_codes(ctx: EvaluationContext) -> tuple[np.ndarray, np.ndarray]:
     """Generated and reference designs in a PCA subspace matched to the instrument.
 
-    Components are fitted on the validation split -- never on the reference set
-    the metric then scores against -- and the subspace is given as many
-    components as the instrument keeps active, so every PCA baseline is compared
-    at matched dimensionality rather than matched effort.
+    Thin wrapper over `EvaluationContext.pca_codes`, which fits the components on
+    the validation split and caches them so the decomposition is not repeated
+    once per metric.
     """
-    from sklearn.decomposition import PCA
-
-    fit_designs = ctx.sigma_designs if ctx.sigma_designs is not None else ctx.ref_designs
-    fit_flat = np.asarray(fit_designs).reshape(len(fit_designs), -1)
-
-    n_components = DEFAULT_PCA_COMPONENTS
-    if ctx.latent_lvae is not None:
-        from engiopt.lvae.encode import get_active_mask
-
-        n_components = int(get_active_mask(ctx.latent_lvae.encoder).sum())
-    n_components = max(1, min(n_components, *fit_flat.shape))
-
-    pca = PCA(n_components=n_components).fit(fit_flat)
-    return pca.transform(ctx.gen_flat), pca.transform(ctx.ref_flat)
+    generated, reference, _ = ctx.pca_codes
+    return generated, reference
 
 
 @register_metric(
@@ -103,7 +86,7 @@ def pca_mmd(ctx: EvaluationContext) -> float:
     worth its instrument.
     """
     generated, reference = _pca_codes(ctx)
-    return float(metrics_mod.mmd(generated, reference, sigma=metrics_mod.compute_median_sigma(reference)))
+    return float(metrics_mod.mmd(generated, reference, sigma=ctx.pca_sigma))
 
 
 @register_metric(
@@ -123,7 +106,7 @@ def pca_vendi(ctx: EvaluationContext) -> float:
     projection can tell those apart.
     """
     generated, reference = _pca_codes(ctx)
-    return metrics_mod.vendi_score(generated, sigma=metrics_mod.compute_median_sigma(reference))
+    return metrics_mod.vendi_score(generated, sigma=ctx.pca_sigma)
 
 
 @register_metric(

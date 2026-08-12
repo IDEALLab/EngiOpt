@@ -68,8 +68,24 @@ NOVELTY_ANCHOR_SAMPLES = 1000
 
 
 def _count_parameters(generator: Generator) -> int | None:
-    """Total parameters across every torch module a generator holds."""
+    """How many numbers this model had to store to make its predictions.
+
+    Counting torch parameters covers the trained models, but it reads `None` for
+    anything that is not a network -- which would quietly exempt the retrieval
+    and regression baselines from the one column that prices what a model costs
+    to keep. A method whose "parameters" are its training set has a size, and
+    the comparison is only honest if that size lands on the same axis.
+
+    So a generator may declare its own count via `parameter_count()`; the torch
+    walk is the fallback for everything that does not.
+    """
     import torch as th
+
+    declared = getattr(generator, "parameter_count", None)
+    if callable(declared):
+        count = declared()
+        if count is not None:
+            return int(count)
 
     modules = [value for value in vars(generator).values() if isinstance(value, th.nn.Module)]
     if not modules:

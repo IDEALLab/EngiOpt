@@ -99,6 +99,50 @@ def log_dpp_diversity(x: np.ndarray, sigma: float = 1.0) -> float:
     return float(logabsdet)
 
 
+def dpp_geometric_mean(x: np.ndarray, sigma: float = 1.0) -> float:
+    r"""`n`-th root of the DPP determinant: the geometric mean of its eigenvalues.
+
+    The same quantity `dpp_diversity` reports, on the only scale of the three
+    that is readable *and* comparable across sample sizes.
+
+    - The raw determinant is a product of `n` numbers below one, so it underflows
+      (1e-11 at n=50, and worse) and distinct models render as identical zeros.
+    - The log-determinant fixes the underflow but is unbounded below and still
+      scales with `n`, so a value means nothing without knowing the sample count
+      it was computed at -- and two papers reporting "log-DPP" at n=50 and n=200
+      are not comparable.
+    - `det(K)^(1/n) = exp(logdet / n)` is the geometric mean of the eigenvalues.
+      Since `K` has a unit diagonal its eigenvalues sum to `n`, so their
+      arithmetic mean is exactly 1 and the geometric mean lands in `(0, 1]` by
+      AM-GM: **1 means a perfectly diverse set (`K = I`), and values approach 0
+      as samples collapse onto each other.** That bound holds at every `n`.
+
+    Interpretation is therefore fixed rather than relative: 0.5 is the same
+    statement about a set of 50 designs as about a set of 500.
+
+    This does **not** fix the pathology `vendi_score` exists to resist -- a
+    determinant still rewards any perturbation that pushes samples apart, so
+    adding noise to a collapsed set raises this too. It fixes the *numerical*
+    failure only, which is a different and more embarrassing one.
+
+    Args:
+        x: Samples of shape `(n, ...)`; flattened internally.
+        sigma: Bandwidth of the Gaussian kernel.
+
+    Returns:
+        The geometric mean of the kernel eigenvalues, in `(0, 1]`. Returns 0.0
+        for a degenerate set, which is the honest limit rather than `-inf`.
+    """
+    n = x.shape[0]
+    if n == 0:
+        return 0.0
+
+    logdet = log_dpp_diversity(x, sigma=sigma)
+    if not np.isfinite(logdet):
+        return 0.0
+    return float(np.exp(logdet / n))
+
+
 def vendi_score(x: np.ndarray, sigma: float = 1.0) -> float:
     """Effective number of distinct samples in a set.
 

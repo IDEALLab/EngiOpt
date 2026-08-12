@@ -77,6 +77,10 @@ class MultiObjectiveScalarizationError(ValueError):
         )
 
 
+DEFAULT_PCA_COMPONENTS = 16
+"""PCA width used when no instrument is pinned to match dimensionality against."""
+
+
 @dataclass
 class OptimizationResults:
     """Per-sample outputs of the simulator/optimizer pass.
@@ -233,8 +237,62 @@ class EvaluationContext:
         reference designs when no validation split was supplied, which keeps the
         metric computable while making the weaker protocol explicit.
         """
-        basis = self.sigma_designs if self.sigma_designs is not None else self.ref_designs
-        return metrics_mod.compute_median_sigma(np.asarray(basis))
+        return metrics_mod.compute_median_sigma(self.sigma_basis)
+
+    @cached_property
+    def sigma_basis(self) -> npt.NDArray[Any]:
+        """The designs every kernel bandwidth is calibrated on.
+
+        One rule for all three spaces: the median heuristic, taken on the
+        validation split. Calibrating on the reference set would tune the
+        kernel on the very designs the metric then scores against, and a
+        comparison between two metrics is only fair if both were calibrated the
+        same way -- otherwise a bandwidth advantage reads as a metric advantage.
+
+        Falls back to the reference designs when no validation split was
+        supplied, which keeps every metric computable while leaving the weaker
+        protocol explicit rather than silent.
+        """
+        return np.asarray(self.sigma_designs if self.sigma_designs is not None else self.ref_designs)
+
+    @cached_property
+    def pca_codes(self) -> tuple[npt.NDArray[Any], npt.NDArray[Any], npt.NDArray[Any]]:
+        """Generated, reference and bandwidth-basis designs in one matched PCA subspace.
+
+        Cached because three metrics need the same projection and fitting PCA
+        per metric repeated the same decomposition on every row of the board.
+
+        Components are fitted on the validation split, and the subspace is given
+        as many components as the pinned instrument keeps active, so the linear
+        control is compared at matched dimensionality rather than matched effort.
+        """
+        from sklearn.decomposition import PCA
+
+        basis = self.sigma_basis
+        fit_flat = basis.reshape(len(basis), -1)
+
+        n_components = DEFAULT_PCA_COMPONENTS
+        if self.latent_lvae is not None:
+            from engiopt.lvae.encode import get_active_mask
+
+            n_components = int(get_active_mask(self.latent_lvae.encoder).sum())
+        n_components = max(1, min(n_components, *fit_flat.shape))
+
+        pca = PCA(n_components=n_components).fit(fit_flat)
+        return pca.transform(self.gen_flat), pca.transform(self.ref_flat), pca.transform(fit_flat)
+
+    @cached_property
+    def pca_sigma(self) -> float:
+        """Kernel bandwidth for PCA-space metrics, on the same rule as the others.
+
+        Previously these took the median over the *projected reference* set
+        while the pixel and latent metrics used validation, so the linear
+        control was scored under a different protocol than the thing it was
+        controlling for. That difference is exactly the size of effect the
+        comparison is trying to detect.
+        """
+        _, _, basis = self.pca_codes
+        return metrics_mod.compute_median_sigma(basis)
 
     @cached_property
     def latent_sigma(self) -> float:
@@ -246,13 +304,9 @@ class EvaluationContext:
         """
         from engiopt.lvae.encode import encode_active
 
-        if self.sigma_designs is None:
-            _, reference = self.latent_codes
-            return metrics_mod.compute_median_sigma(reference)
-
         lvae = self.require_latent_lvae()
         device = next(lvae.encoder.parameters()).device
-        return metrics_mod.compute_median_sigma(encode_active(lvae.encoder, np.asarray(self.sigma_designs), device))
+        return metrics_mod.compute_median_sigma(encode_active(lvae.encoder, self.sigma_basis, device))
 
     @cached_property
     def gen_projected(self) -> npt.NDArray[Any]:
