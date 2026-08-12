@@ -31,6 +31,7 @@ from engiopt.evaluation.registry import METRICS
 from engiopt.evaluation.registry import MetricSpec
 from engiopt.evaluation.spec import EvalSpec
 from engiopt.evaluation.spec import ResolvedSpec
+from engiopt.lvae.checkpoints import DecoderUnavailableError
 from engiopt.utils.all_generators import design_kind_of
 
 # Importing the metrics package is what populates the registry.
@@ -110,6 +111,7 @@ class Evaluator:
     resolved: ResolvedSpec
     device: th.device
     registry: MetricRegistry = field(default_factory=lambda: METRICS)
+    _reported_unavailable: set[str] = field(default_factory=set, repr=False)
 
     @classmethod
     def for_problem(
@@ -314,11 +316,36 @@ class Evaluator:
         only: list[str] | None = None,
         include_expensive: bool = False,
     ) -> dict[str, Any]:
-        """Run the selected metrics against an existing context."""
+        """Run the selected metrics against an existing context.
+
+        A metric whose *instrument* cannot serve it yields NaN columns and a
+        stated reason, rather than failing the row. The distinction matters on a
+        pool scan: `iog`, `cog` and `fog` never touch the autoencoder, so an
+        instrument whose decoder the current code cannot rebuild must not be
+        able to void a board that does not depend on it. Every other exception
+        still propagates -- this is not a general "keep going" clause.
+        """
         values: dict[str, Any] = {}
         for spec in self._selected(only, include_expensive=include_expensive):
-            values.update(_as_columns(spec, spec.fn(ctx)))
+            values.update(self._run_metric(spec, ctx))
         return values
+
+    def _run_metric(self, spec: MetricSpec, ctx: EvaluationContext) -> dict[str, Any]:
+        """One metric's columns, or NaNs when its instrument cannot serve it.
+
+        Only `DecoderUnavailableError` is caught, and only to NaN out that
+        metric's own columns. Every other exception propagates: this is not a
+        general "keep going" clause, it is the single case where a column is
+        unavailable for a stated reason that has nothing to do with the model
+        being scored.
+        """
+        try:
+            return _as_columns(spec, spec.fn(ctx))
+        except DecoderUnavailableError as exc:
+            if spec.name not in self._reported_unavailable:
+                self._reported_unavailable.add(spec.name)
+                print(f"  [unavailable] {spec.name}: {str(exc).splitlines()[0]}")
+            return dict.fromkeys(spec.columns, float("nan"))
 
     def _selected(self, only: list[str] | None, *, include_expensive: bool) -> list[MetricSpec]:
         names = list(only) if only is not None else list(self.spec.metrics)
