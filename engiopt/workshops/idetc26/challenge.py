@@ -31,6 +31,7 @@ import numpy as np
 import pandas as pd
 
 from engiopt.evaluation import Evaluator
+from engiopt.evaluation.context import EvaluationContext
 from engiopt.evaluation.registry import METRICS
 from engiopt.workshops.idetc26.bank import ModelBank
 from engiopt.workshops.idetc26.config import WorkshopConfig
@@ -180,9 +181,19 @@ class Challenge:
         return designs
 
     def score(self, label: str, metrics: tuple[str, ...], seed: int = 1) -> dict[str, Any]:
-        """Score one model on the given columns, reusing anything already computed."""
+        """Score one model on the given metrics, reusing anything already computed.
+
+        A metric is not always one column: `lv_residual` fills `lv_residual_mean`
+        and `lv_residual_p90`. The cache is keyed by the columns a metric
+        actually emits, so a multi-output metric is recognised as already
+        computed instead of being recomputed on every board.
+        """
         row = self._rows.setdefault((label, seed), {})
-        missing = [name for name in self.config.available(metrics) if name not in row]
+        missing = [
+            name
+            for name in self.config.available(metrics)
+            if any(column not in row for column in METRICS[name].columns)
+        ]
         if not missing:
             return row
 
@@ -198,15 +209,17 @@ class Challenge:
         """Compute a metric board over the whole bank.
 
         Args:
-            metrics: Columns to compute; defaults to the config's opening set.
+            metrics: Metric names to compute; defaults to the config's opening
+                set. A name may expand to more than one column.
             seed: Sampling seed every model is drawn at.
             ranks: Return competition ranks (1 = best) instead of raw values.
 
         Returns:
             A DataFrame indexed by anonymous label.
         """
-        columns = self.config.available(metrics or self.config.opening_metrics)
-        rows = {label: self.score(label, tuple(columns), seed=seed) for label in self.bank.labels}
+        names = self.config.available(metrics or self.config.opening_metrics)
+        rows = {label: self.score(label, tuple(names), seed=seed) for label in self.bank.labels}
+        columns = [column for name in names for column in METRICS[name].columns]
         frame = pd.DataFrame(rows).T[columns]
         frame.index.name = "model"
         return self.rank(frame) if ranks else frame
@@ -220,7 +233,7 @@ class Challenge:
         """
         ranked = {}
         for column in frame.columns:
-            higher_is_better = METRICS[column].higher_is_better
+            higher_is_better = _direction_of(column)
             if higher_is_better is None or _is_constant(frame[column]):
                 continue
             ranked[column] = frame[column].rank(ascending=not higher_is_better, method="min")
@@ -323,6 +336,191 @@ class Challenge:
         if not self.config.withheld_metrics:
             return pd.DataFrame()
         return self.board(metrics=self.config.withheld_metrics, seed=seed)
+
+    def manifold(self, seed: int = 1) -> pd.DataFrame:
+        """The same questions, asked in a learned latent space instead of in pixels.
+
+        Costs what the pixel columns cost -- an encode and a decode -- so this is
+        not the expensive tier arriving early. What changes is the space the
+        distance is measured in, and the argument of the segment is that the
+        space is a modelling choice nobody in a results table declares.
+
+        Returns:
+            A board of the configured manifold columns, or an empty frame when
+            this problem's spec pins no latent instrument.
+        """
+        self._require_verdict()
+        if not self.config.manifold_metrics:
+            return pd.DataFrame()
+        if not self.config.has_latent_instrument():
+            print(
+                f"{self.config.spec} pins no latent instrument, so the manifold columns cannot be computed "
+                "here. That is a property of the spec, not of the models: someone has to train and pin an "
+                "autoencoder for a problem before anyone can report a latent metric on it."
+            )
+            return pd.DataFrame()
+        return self.board(metrics=self.config.manifold_metrics, seed=seed)
+
+    def instrument(self) -> pd.Series:
+        """Which autoencoder the manifold columns were measured in.
+
+        Printed rather than assumed. A latent metric is only comparable between
+        two rows that were encoded by the same instrument, and the only way a
+        reader can check that is if the row says which one it was.
+        """
+        pinned = self.evaluator.spec.latent_instrument
+        if pinned is None:
+            return pd.Series(dtype=object, name="latent instrument")
+        fields = {
+            "algo": pinned.algo,
+            "config_fingerprint": pinned.config_fingerprint,
+            "seed": pinned.seed,
+            "expected_n_active": pinned.expected_n_active,
+            "recon_only_config_fingerprint": pinned.recon_only_config_fingerprint,
+            "revision": pinned.revision,
+        }
+        return pd.Series(fields, name="latent instrument")
+
+    def reference_row(self, metrics: tuple[str, ...] | None = None, seed: int = 1) -> pd.DataFrame:
+        """Score the calibration instruments -- what a metric reads at a known input.
+
+        These are never ranked and never in the bank. A collapsed model tells you
+        what a diversity column reads on one design repeated fifty times; a
+        noise-doped one tells you what it reads on real optima plus noise. That
+        is a scale bar under the board, and without one a diversity number is
+        just a number.
+
+        Args:
+            metrics: Columns to compute; defaults to the opening set.
+            seed: Sampling seed.
+
+        Returns:
+            A frame indexed by instrument name, or empty if none are configured.
+        """
+        from engiopt.baselines import REFERENCE_INSTRUMENTS
+
+        names = tuple(entry["algo"] for entry in self.config.reference_instruments)
+        if not names:
+            return pd.DataFrame()
+
+        columns = self.config.available(metrics or self.config.opening_metrics)
+        rows = {}
+        for name in names:
+            factory = REFERENCE_INSTRUMENTS.get(name)
+            if factory is None:
+                continue
+            generator = factory.from_problem(
+                self.evaluator.problem,
+                problem_id=self.config.problem_id,
+                seed=seed,
+            )
+            context = self.evaluator.context_for(generator)
+            rows[name] = self.evaluator.score_context(context, only=columns, include_expensive=False)
+        frame = pd.DataFrame(rows).T
+        frame.index.name = "reference instrument"
+        return frame
+
+    def run_physics(
+        self,
+        labels: list[str] | None = None,
+        n_samples: int = 3,
+        seed: int = 1,
+        *,
+        confirm: bool = False,
+    ) -> pd.DataFrame:
+        """Compute the expensive columns yourself, on as many samples as you can afford.
+
+        The sealed board exists because nobody can run the simulator during a
+        session. This is the other half of that lesson: run it on a handful of
+        designs and watch what it costs, so "expensive" stops being a word in a
+        table caption and becomes a number you waited for.
+
+        Every sample runs one optimization and two simulations, so cost is linear
+        in `n_samples * len(labels)` and the estimate below is honest rather than
+        reassuring. The sealed board is computed at the spec's full sample count;
+        a board you compute here on 3 samples is *not* comparable to it, and
+        seeing how far a 3-sample estimate lands from the sealed 50-sample one is
+        the most useful thing this method does.
+
+        Args:
+            labels: Models to score; defaults to the whole bank.
+            n_samples: Conditions per model. Kept small on purpose.
+            seed: Sampling seed the designs are drawn at.
+            confirm: Pass True to actually run. Without it the method prints a
+                cost estimate and returns an empty frame, because a cell that
+                silently starts a twenty-minute job in a workshop is a trap.
+
+        Returns:
+            A frame of the expensive columns, indexed by label. Empty when
+            `confirm` is False.
+        """
+        import time
+
+        chosen = labels or list(self.bank.labels)
+        columns = self.config.available(self.config.expensive_metrics)
+        total = n_samples * len(chosen)
+        seconds = total * self._seconds_per_physics_sample()
+        print(
+            f"{len(chosen)} models x {n_samples} samples = {total} optimizer runs, "
+            f"about {seconds / 60:.0f} min on this machine "
+            f"({self._seconds_per_physics_sample():.0f}s per sample, measured on this problem).\n"
+            "Sampling is on top of that for any model you have not already scored -- "
+            "the diffusion model alone takes minutes to draw its designs."
+        )
+        if not confirm:
+            print("Nothing has run. Re-run with confirm=True when you are ready to wait.")
+            return pd.DataFrame()
+
+        rows = {}
+        measured: list[float] = []
+        resolved = self.evaluator.resolved
+        for label in chosen:
+            started = time.perf_counter()
+            # `designs()` is cached per (label, seed), so a team that already
+            # computed a board pays nothing to sample again here. Going through
+            # `context_for` would re-sample all 50 designs before truncating,
+            # which on the diffusion model costs minutes to then optimize two.
+            designs = self.designs(label, seed=seed)
+            # Truncate every per-sample array together, so sample i still means
+            # the same condition in all of them.
+            trimmed = EvaluationContext(
+                problem=self.evaluator.problem,
+                problem_id=self.config.problem_id,
+                gen_designs=designs[:n_samples],
+                ref_designs=resolved.ref_designs[:n_samples],
+                conditions=resolved.conditions.select(range(n_samples)) if resolved.conditions is not None else None,
+                sigma=self.evaluator.spec.sigma,
+                volfrac_tol=self.evaluator.spec.volfrac_tol,
+                volume_condition=self.evaluator.spec.volume_condition,
+                objective_weights=self.evaluator.spec.objective_weights,
+                objective_weight_condition=self.evaluator.spec.objective_weight_condition,
+            )
+            rows[label] = self.evaluator.score_context(trimmed, only=columns, include_expensive=True)
+            elapsed = time.perf_counter() - started
+            measured.append(elapsed)
+            print(f"  {label}: {elapsed:5.1f}s  ({elapsed / n_samples:.1f}s per sample)")
+
+        actual = sum(measured)
+        per_sample = actual / max(total, 1)
+        print(
+            f"\nActually took {actual / 60:.1f} min ({per_sample:.1f}s per sample) against an estimate of "
+            f"{seconds / 60:.1f} min. The published per-sample figure is a starting guess; "
+            "what you just measured is the number for this machine."
+        )
+
+        frame = pd.DataFrame(rows).T[columns]
+        frame.index.name = "model"
+        return frame
+
+    def _seconds_per_physics_sample(self) -> float:
+        """Measured per-sample cost of the expensive tier on this problem.
+
+        A published figure rather than a guess: beams2d runs one optimization and
+        two simulations per sample at about 3.4 s on a laptop CPU. Problems
+        without a measurement fall back to that, which is the right order of
+        magnitude for the 2D topology problems and stated so it can be corrected.
+        """
+        return {"beams2d": 3.4, "heatconduction2d": 3.0, "photonics2d": 36.0}.get(self.config.problem_id, 3.4)
 
     def unseal_physics(self, passphrase: str, path: str | Path | None = None) -> pd.DataFrame:
         """Open the sealed physics board.
@@ -431,6 +629,21 @@ class Challenge:
         figure.suptitle("Same conditions, every row", fontsize=13)
         figure.tight_layout()
         return figure
+
+
+def _direction_of(column: str) -> bool | None:
+    """Whether higher is better for a leaderboard *column*, not a metric name.
+
+    The two differ whenever a metric emits several columns, and ranking is done
+    per column. A column nothing in the registry claims has no direction, which
+    is the honest answer rather than an error: it simply will not be ranked.
+    """
+    if column in METRICS:
+        return METRICS[column].higher_is_better
+    for spec in METRICS.select():
+        if column in spec.columns:
+            return spec.higher_is_better
+    return None
 
 
 def _is_constant(series: pd.Series) -> bool:

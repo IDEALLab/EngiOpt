@@ -265,7 +265,7 @@ runs it.
 ---
 ## Reveal 2 · The columns you were not given
 
-Five more metrics. **Every one of them is cheap.** No simulator, no cluster, no
+Seven more metrics. **Every one of them is cheap.** No simulator, no cluster, no
 waiting. They were affordable the entire time; you simply were not handed them.
 
 | metric | asks | direction |
@@ -274,7 +274,9 @@ waiting. They were affordable the entire time; you simply were not handed them.
 | `cond_err` | Did the design hit the volume fraction it was asked for? | lower is better |
 | `pixel_vendi` | How many *effectively distinct* designs are in the set? | higher is better |
 | `pca_mmd` | `mmd`, but measured in a PCA subspace instead of raw pixels | lower is better |
+| `pca_vendi` | `pixel_vendi`, likewise moved off raw pixels | higher is better |
 | `gen_seconds` | What did it cost to generate the set? | lower is better |
+| `params` | How big is the model? For the lookup table, that is its training set. | lower is better |
 """
     ),
     code(
@@ -325,6 +327,155 @@ uncommunicable, and that failure is invisible in the code.
     md(
         """
 ---
+## Reveal 2b · What does a diversity number *mean*?
+
+You now have three diversity columns disagreeing with each other. Before
+arguing about which is right, calibrate them: score models whose answer you
+already know.
+
+- `collapsed` — one design, repeated fifty times. The floor of any diversity
+  column.
+- `noise_doped` — real optimal designs with noise added. Strictly worse designs,
+  by construction.
+- `volume_only` — hits the volume budget exactly, with material arranged to
+  carry no load. Perfect feasibility, useless structure.
+
+These are **not** in your bank and they are never ranked. They are a scale bar.
+"""
+    ),
+    code(
+        """
+reference = ch.reference_row(metrics=("dpp", "pixel_vendi", "novelty", "viol"))
+reference.round(4)
+"""
+    ),
+    md(
+        """
+Read `noise_doped` against the models in your bank. Adding noise to a real
+optimal design cannot make it a better design — but look at what it does to
+`pixel_vendi`, and to `dpp`.
+
+**A diversity metric that rewards corruption is not measuring diversity.** It is
+measuring entropy, and entropy is free.
+"""
+    ),
+    md(
+        """
+---
+## Reveal 2c · The space you measured in
+
+Every column so far compared designs **pixel by pixel**. That is a modelling
+choice. Nobody declares it, and it is not obviously the right one: two designs
+that differ by a one-pixel shift are nearly identical structurally and far apart
+in pixels.
+
+`pca_mmd` already hinted at this — same question, linear subspace instead of raw
+pixels, different answer. Now go further and measure in the latent space of an
+autoencoder trained on **real optimal designs for this problem**, with a
+performance-prediction constraint that forces it to keep the variation that
+changes how a design performs.
+
+These columns are **cheap**: an encode and a decode, the same seconds the pixel
+columns cost. What you are buying is not compute, it is a space.
+
+| metric | asks |
+|---|---|
+| `lv_mmd` | `mmd`, measured on the manifold instead of on pixels |
+| `lv_coverage` | What fraction of real design modes did the generator reach? |
+| `lv_vendi` | How many effectively distinct designs, counted structurally? |
+| `lv_paired_distance` | Did each design answer the condition it was actually asked for? |
+
+All four **encode only**. Two further columns — `lv_residual` (how far off the
+manifold each design sits) and `lv_dual_gap` (whether that deviation was
+performance-relevant or cosmetic) — additionally need to *decode*, and are held
+back while the instruments are retrained. That is worth saying out loud rather
+than hiding: a metric that depends on a fitted instrument inherits that
+instrument's version history, which is a cost the pixel columns do not have.
+"""
+    ),
+    code(
+        """
+manifold = ch.manifold()
+manifold.round(4)
+"""
+    ),
+    md(
+        """
+The instrument is pinned in the frozen spec, not chosen here. Which autoencoder
+you measure in decides every number above, so a latent column is only comparable
+between two rows encoded by the *same* instrument — which is why it has to be
+declared, and why the spec carries its fingerprint and revision.
+"""
+    ),
+    code("""ch.instrument()"""),
+    code(
+        """
+full_board = pd.concat([full_board, manifold], axis=1)
+ch.winners(full_board)
+"""
+    ),
+    md(
+        """
+**Rerun the reference row in this space** and compare it to the pixel one you
+just computed. The noise-doped instrument is the test: pixel diversity rises
+when you corrupt a real design, and the question is whether the latent version
+does the same thing.
+"""
+    ),
+    code(
+        """
+ch.reference_row(metrics=("pixel_vendi", "pca_vendi", "lv_vendi")).round(4)
+"""
+    ),
+    md(
+        """
+---
+## Optional · Run the simulator yourself
+
+Everything so far cost seconds. The next section reveals a board somebody else
+computed, and the reason it was precomputed is that **it costs hours**.
+
+You do not have to take that on faith. Run it on two or three designs and watch
+the clock. Each sample runs one optimization and two simulations.
+
+The first call only prints an estimate — it does not run anything. Pass
+`confirm=True` when you have decided to wait.
+"""
+    ),
+    code(
+        """
+# What would it cost? (This does not run the simulator.)
+ch.run_physics(n_samples=3)
+"""
+    ),
+    code(
+        """
+# START FILL -- pick how much you are willing to wait for
+my_models = ch.bank.labels[:2]   # which models
+my_samples = 2                   # conditions per model
+# END FILL
+
+mine = ch.run_physics(labels=my_models, n_samples=my_samples, confirm=True)
+mine.round(3)
+"""
+    ),
+    md(
+        """
+Two things to take from that number.
+
+**Your estimate is not the sealed board.** That one is computed at the spec's
+full 50 conditions; yours is 2 or 3. When the board is unsealed, compare the two
+for a model you ran — the gap between a cheap estimate of an expensive metric
+and the expensive metric is exactly the thing nobody reports.
+
+**Now multiply.** A hyperparameter sweep is fifty configurations. Five seeds
+each. Three problems. At the rate you just watched, that is the reason every
+paper you have read reports `mmd` and not `cog`.
+"""
+    ),
+    md(
+        """
+---
 ## Reveal 3 · The physics
 
 Now the simulator. `iog`, `cog` and `fog` measure how far each design is from an
@@ -363,23 +514,27 @@ ch.winners(final)
     code("""ch.identities()"""),
     md(
         """
-Several of the models in your bank were **not trained**. They were constructed,
-each in under fifty lines, each aimed at exactly one metric:
+There was no trick in the bank. Every entry is a model somebody might really
+ship: trained checkpoints across five architectures, plus two dataset-fitted
+baselines that are **not** jokes —
 
-- a **lookup table** that returns the nearest training design, rescaled to hit
-  the requested volume budget
-- a **one-trick pony** that emits a single good design and never reads its input
-- a **volume cheater** that hits the budget exactly with blobs that carry no load
-- a **noise-doped** model — real optimal designs with noise added, which *raises*
-  pixel diversity
-- a **checkerboard** — the classic topology-optimization artifact, which looks
-  broken and scores well
-- a **linear regression**, with no generative model in it at all
+- a **lookup table** (`knn_retrieval`) that returns the nearest training design,
+  rescaled to hit the requested volume budget
+- a **ridge regression** (`linear_regression`) from conditions straight to
+  pixels, with no generative model in it at all
 
-None of them required a GPU. Several of them beat models that people trained.
+Neither needed a GPU. The lookup table's checkpoint *is* its training set, and
+it costs about a thousandth of what the diffusion model costs to sample.
 
-The disclosure is the lesson, not a trick: **if a benchmark can be topped by a
-fifty-line fraud, the benchmark is the problem.**
+Look at where they landed. If a retrieval baseline tops your board, that is a
+result and not a broken leaderboard — it is exactly what Habibi et al. found on
+this task. **The honest version of the lesson is harder than a planted fraud:
+nothing here was rigged, and the metrics still could not tell you what to
+ship.**
+
+Two of the pairs in the bank differ only by training seed. Find them in the
+table. Any gap you attributed to architecture that is smaller than that pair's
+gap was never about architecture.
 """
     ),
     md(
@@ -387,7 +542,7 @@ fifty-line fraud, the benchmark is the problem.**
 ---
 ## Debrief · Write the recipe you would actually trust
 
-You now have eleven columns and a demonstration that any one of them can be
+You now have nineteen columns and a demonstration that any one of them can be
 gamed. So write down what you would require before believing a claim that model
 X is better than model Y.
 """

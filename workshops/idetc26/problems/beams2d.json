@@ -1,6 +1,6 @@
 {
   "problem_id": "beams2d",
-  "spec": "beams2d/v1",
+  "spec": "beams2d/v2",
   "display_name": "Beams2D -- cantilever topology optimization",
   "opening_metrics": [
     "mmd",
@@ -12,7 +12,15 @@
     "cond_err",
     "pixel_vendi",
     "pca_mmd",
-    "gen_seconds"
+    "pca_vendi",
+    "gen_seconds",
+    "params"
+  ],
+  "manifold_metrics": [
+    "lv_mmd",
+    "lv_coverage",
+    "lv_vendi",
+    "lv_paired_distance"
   ],
   "expensive_metrics": [
     "iog",
@@ -49,7 +57,7 @@
       "algo": "vqgan",
       "seed": 2,
       "optional": true,
-      "summary": "VQGAN, a different training seed."
+      "summary": "VQGAN, same configuration, a different training seed."
     },
     {
       "kind": "pretrained",
@@ -61,32 +69,50 @@
     {
       "kind": "pretrained",
       "algo": "cgan_cnn_2d",
-      "seed": 42,
-      "config_fingerprint": "6293adb3",
+      "seed": 3,
+      "config_fingerprint": "825831f6",
       "optional": true,
       "summary": "Conditional GAN, CNN backbone, centre of the hyperparameter sweep."
     },
     {
       "kind": "pretrained",
-      "algo": "gan_cnn_2d",
+      "algo": "cgan_cnn_2d",
+      "seed": 1,
+      "config_fingerprint": "825831f6",
+      "optional": true,
+      "summary": "The same conditional GAN configuration at another training seed."
+    },
+    {
+      "kind": "pretrained",
+      "algo": "cgan_cnn_2d",
       "seed": 42,
+      "config_fingerprint": "c7837a0c",
+      "optional": true,
+      "summary": "Conditional GAN at a different point in the hyperparameter sweep."
+    },
+    {
+      "kind": "pretrained",
+      "algo": "gan_cnn_2d",
+      "seed": 2,
       "config_fingerprint": "6293adb3",
       "optional": true,
-      "summary": "Unconditional GAN, CNN backbone."
+      "summary": "Unconditional GAN, CNN backbone. It never sees the conditions."
     },
     {
       "kind": "pretrained",
       "algo": "constrained_plvae_2d",
       "seed": 1,
-      "config_fingerprint": "36c3f928",
+      "config_fingerprint": "fc4477d9",
       "optional": true,
-      "summary": "Performance-constrained least-volume autoencoder."
+      "summary": "Least-volume autoencoder, sampled from its latent space. Trained without the performance constraint."
     }
   ],
   "narrative": {
-    "opening": "Three metrics, eight models, no simulator. Pick one and defend it.",
+    "opening": "Three metrics, ten models, no simulator. Pick one and defend it.",
     "why_these_three": "mmd, dpp and viol are the columns almost every generative-design paper reports, because they are the columns you can afford.",
-    "habibi": "Habibi et al., When Is it Actually Worth Learning Inverse Design? (J. Mech. Des. 148(6):061704, 2026) found kNN beats deconvolutional networks for topology-optimization warm-starting at limited data, once data-generation cost is counted. Two entries in your bank are exactly that comparison."
+    "habibi": "Habibi et al., When Is it Actually Worth Learning Inverse Design? (J. Mech. Des. 148(6):061704, 2026) found kNN beats deconvolutional networks for topology-optimization warm-starting at limited data, once data-generation cost is counted. Two entries in your bank are exactly that comparison.",
+    "same_config_twice": "Two pairs in this bank differ only by training seed. If your ranking separates them, some of what you are ranking is the seed.",
+    "manifold": "The manifold columns are computed in the latent space of an autoencoder trained on real optima for this problem. They cost the same seconds the pixel columns do -- the difference is which space the distance is measured in, not how much compute you spent."
   },
   "reference_instruments": [
     {

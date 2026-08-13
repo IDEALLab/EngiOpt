@@ -43,6 +43,11 @@ class WorkshopConfig:
         withheld_metrics: Cheap columns held back for the reveal. These were
             affordable all along, which is the point they make.
         expensive_metrics: Simulator-backed columns, revealed last.
+        manifold_metrics: Cheap columns that need a fitted latent instrument.
+            Held separately from `withheld_metrics` because they are the one
+            group with a prerequisite a team can fail to have: the spec must
+            pin a `latent_instrument`. A problem whose spec pins none simply
+            leaves this empty and the notebook says so instead of raising.
         bank: Bank members, as `{"kind": "constructed"|"pretrained", ...}` specs.
         reveal_seeds: Seeds the lottery re-runs the opening metrics at.
         narrative: Free-text strings the notebook prints, kept out of the code.
@@ -54,7 +59,9 @@ class WorkshopConfig:
     opening_metrics: tuple[str, ...]
     withheld_metrics: tuple[str, ...] = ()
     expensive_metrics: tuple[str, ...] = ()
+    manifold_metrics: tuple[str, ...] = ()
     bank: tuple[dict[str, Any], ...] = ()
+    reference_instruments: tuple[dict[str, Any], ...] = ()
     reveal_seeds: tuple[int, ...] = (1, 2, 3)
     narrative: dict[str, str] = field(default_factory=dict)
 
@@ -77,7 +84,9 @@ class WorkshopConfig:
             opening_metrics=tuple(payload["opening_metrics"]),
             withheld_metrics=tuple(payload.get("withheld_metrics", ())),
             expensive_metrics=tuple(payload.get("expensive_metrics", ())),
+            manifold_metrics=tuple(payload.get("manifold_metrics", ())),
             bank=tuple(payload.get("bank", ())),
+            reference_instruments=tuple(payload.get("reference_instruments", ())),
             reveal_seeds=tuple(payload.get("reveal_seeds", (1, 2, 3))),
             narrative=payload.get("narrative", {}),
         )
@@ -86,6 +95,15 @@ class WorkshopConfig:
     def cheap_metrics(self) -> tuple[str, ...]:
         """Every simulation-free column, opening and withheld together."""
         return (*self.opening_metrics, *self.withheld_metrics)
+
+    def has_latent_instrument(self) -> bool:
+        """Whether this problem's spec pins the autoencoder the latent columns need.
+
+        Asked rather than assumed: the manifold columns are the only ones in the
+        suite that depend on a fitted instrument, and a spec that pins none has
+        to say so plainly rather than fail inside a metric.
+        """
+        return EvalSpec.load(self.spec).latent_instrument is not None
 
     def unavailable_metrics(self) -> dict[str, str]:
         """Configured metrics that cannot produce a number on this problem, and why.
