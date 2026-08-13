@@ -178,7 +178,13 @@ MIN_DESIGNS_FOR_SENSITIVITY = 2
 """Below this many designs there are no pairs to measure a distance ratio from."""
 
 
-def measure_perf_sensitivity(problem: object, obj_keys: list[str], n: int = 400, seed: int = 0) -> float:
+def measure_perf_sensitivity(
+    problem: object,
+    obj_keys: list[str],
+    scaler: Literal["robust", "quantile"] = "robust",
+    n: int = 400,
+    seed: int = 0,
+) -> float:
     """Measure typical performance change per unit of design distance.
 
     Chen's Corollary 4.14 bounds the decoder `g^x` and the performance head `g^y`
@@ -195,16 +201,25 @@ def measure_perf_sensitivity(problem: object, obj_keys: list[str], n: int = 400,
     `1 / c = median|dp| / median|dx|` and the caller applies it as the predictor
     ratio. Balance -- neither term trivially dominating -- is `ratio = 1.0`.
 
+    The performance side must be measured in the *same units the model trains
+    on*, which is `perf_scaler` applied to the raw objectives -- not a z-score.
+    RobustScaler divides by the IQR, which for a Gaussian is about 1.35 standard
+    deviations and for a heavy-tailed objective like compliance can differ far
+    more, so measuring on one scale and applying the result to a bound that
+    operates on the other mis-calibrates the predictor by an unknown per-problem
+    factor.
+
     Args:
         problem: The EngiBench problem, used for its training split.
         obj_keys: Objective column names.
+        scaler: Must match `Args.perf_scaler`, so the ratio is measured in the
+            units the predictor's bound actually constrains.
         n: Designs to sample; pairs are drawn from these.
         seed: RNG seed, so the bound is reproducible across runs.
 
     Returns:
-        `median|dp| / median|dx|`, performance variance-normalized per objective
-        so the result is scale-free in objective units. Falls back to 1.0 if the
-        split is too small or degenerate to measure.
+        `median|dp| / median|dx|` with performance scaled as in training. Falls
+        back to 1.0 if the split is too small or degenerate to measure.
     """
     ds = problem.dataset["train"]  # type: ignore[attr-defined]
     present = [k for k in obj_keys if k in ds.column_names]
@@ -213,8 +228,15 @@ def measure_perf_sensitivity(problem: object, obj_keys: list[str], n: int = 400,
     rng = np.random.default_rng(seed)
     take = rng.choice(len(ds), min(n, len(ds)), replace=False)
     designs = np.asarray([np.ravel(ds[int(i)]["optimal_design"]) for i in take], dtype=np.float64)
-    perf = np.stack([np.asarray(ds[k], dtype=np.float64)[take] for k in present], axis=1)
-    perf = (perf - perf.mean(0)) / (perf.std(0) + 1e-12)
+    # Fit on the full column so the median/IQR match what training will compute,
+    # then transform only the sampled subset.
+    perf_all = np.stack([np.asarray(ds[k], dtype=np.float64) for k in present], axis=1)
+    fitted = (
+        QuantileTransformer(output_distribution="normal", n_quantiles=min(1000, len(perf_all)))
+        if scaler == "quantile"
+        else RobustScaler()
+    )
+    perf = fitted.fit(perf_all).transform(perf_all)[take]
 
     i = rng.integers(0, len(take), 4000)
     j = rng.integers(0, len(take), 4000)
@@ -325,7 +347,7 @@ if __name__ == "__main__":
     # `max(||dx||, ||dp||)` rather than either one alone. See
     # `Args.predictor_lipschitz_ratio`.
     design_dim = math.prod(design_shape)
-    perf_sensitivity = measure_perf_sensitivity(problem, obj_keys)
+    perf_sensitivity = measure_perf_sensitivity(problem, obj_keys, scaler=args.perf_scaler)
     predictor_lipschitz_scale = args.predictor_lipschitz_ratio * args.decoder_lipschitz_scale * perf_sensitivity
 
     predictor_input_dim = perf_dim + cond_dim_for_predictor
