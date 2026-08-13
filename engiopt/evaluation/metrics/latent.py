@@ -145,6 +145,7 @@ def lv_paired_distance(ctx: EvaluationContext) -> float:
 
 @register_metric(
     "cond_err",
+    requires=("volume_condition",),
     family="conditions",
     cost="cheap",
     higher_is_better=False,
@@ -272,3 +273,38 @@ def pixel_paired_distance(ctx: EvaluationContext) -> float:
 def pixel_vendi(ctx: EvaluationContext) -> float:
     """The baseline `lv_vendi` has to beat."""
     return metrics_mod.vendi_score(ctx.gen_flat, sigma=ctx.pixel_sigma)
+
+
+@register_metric(
+    "lv_novelty",
+    requires=("latent_instrument",),
+    family="latent",
+    cost="cheap",
+    higher_is_better=None,
+    description="Latent-space novelty as a fraction of the reference designs' own; 1.0 = as novel as real data.",
+)
+def lv_novelty(ctx: EvaluationContext) -> float:
+    """`novelty_ratio`, measured on the manifold instead of in pixels.
+
+    Pixel novelty counts any difference as novelty, including differences that
+    are not structural: a design shifted by one pixel is far from its neighbour
+    in pixel space and identical to it as a structure. A model whose outputs are
+    the training set plus a little noise therefore scores as novel, which is the
+    opposite of what the column is for.
+
+    Measured between latent codes, the same comparison asks whether the design
+    is somewhere new *on the manifold*. A ratio for the same reason the pixel
+    version is one -- an absolute latent distance has no units anybody can
+    interpret, and the instrument's scale is arbitrary, so the only honest
+    reading is against real held-out designs encoded by the same instrument.
+    """
+    train_codes = ctx.latent_train_codes
+    if train_codes is None:
+        return float("nan")
+
+    from scipy.spatial.distance import cdist
+
+    generated, reference = ctx.latent_codes
+    to_train_gen = float(cdist(generated, train_codes).min(axis=1).mean())
+    to_train_ref = float(cdist(reference, train_codes).min(axis=1).mean())
+    return to_train_gen / to_train_ref if to_train_ref > 0 else float("nan")

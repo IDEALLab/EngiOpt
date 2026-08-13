@@ -56,3 +56,25 @@ def params(ctx: EvaluationContext) -> float:
     iteratively -- which is why both are reported.
     """
     return float("nan") if ctx.model_params is None else float(ctx.model_params)
+
+
+@register_metric(
+    "train_minutes",
+    family="cost",
+    cost="cheap",
+    higher_is_better=False,
+    description="Wall-clock minutes to train this model, when the figure is known.",
+)
+def train_minutes(ctx: EvaluationContext) -> float:
+    """What it cost to make the model, as opposed to what it costs to run it.
+
+    The column the field argues about and never reports. Sampling time prices a
+    forward pass; this prices the decision to adopt the method at all, and it is
+    where a lookup table and a diffusion model differ by three orders of
+    magnitude rather than by a few percent of MMD.
+
+    NaN unless somebody supplied it, because no checkpoint package records it
+    yet. That gap is the point: the benchmark can tell you a model's parameter
+    count to the digit and cannot tell you what it cost to train.
+    """
+    return float("nan") if ctx.train_minutes is None else float(ctx.train_minutes)

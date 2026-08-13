@@ -26,6 +26,7 @@ from engiopt.evaluation.registry import register_metric
 if TYPE_CHECKING:
     from engiopt.evaluation.context import EvaluationContext
 
+
 def _pca_codes(ctx: EvaluationContext) -> tuple[np.ndarray, np.ndarray]:
     """Generated and reference designs in a PCA subspace matched to the instrument.
 
@@ -35,6 +36,31 @@ def _pca_codes(ctx: EvaluationContext) -> tuple[np.ndarray, np.ndarray]:
     """
     generated, reference, _ = ctx.pca_codes
     return generated, reference
+
+
+@register_metric(
+    "pca_paired_distance",
+    family="conditions",
+    cost="cheap",
+    higher_is_better=False,
+    description="PCA-subspace distance between each generated design and the optimum for its condition.",
+)
+def pca_paired_distance(ctx: EvaluationContext) -> float:
+    """The middle term `lv_paired_distance` has to beat.
+
+    `lv_paired_distance` is the strongest cheap predictor of downstream
+    optimization quality on the boards run so far, but on its own that number
+    cannot separate two explanations: that the *latent space* is the right place
+    to measure, or that *pairing each generated design against the optimum for
+    its own condition* is simply a good idea in any space. `pixel_paired_distance`
+    supplies one end of that comparison; this supplies the middle -- the same
+    pairing in a linear subspace matched to the instrument's active
+    dimensionality. Without both, a manifold claim rests on an uncontrolled
+    comparison, which is the trap the corruption battery already fell into when
+    matched-dimension PCA turned out to reproduce most of the effect.
+    """
+    generated, reference = _pca_codes(ctx)
+    return float(np.linalg.norm(generated - reference, axis=1).mean())
 
 
 @register_metric(
@@ -123,3 +149,41 @@ def pca_coverage(ctx: EvaluationContext) -> float:
     np.fill_diagonal(within_reference, np.inf)
     tau = float(np.quantile(within_reference.min(axis=1), 1.0 - COVERAGE_QUANTILE))
     return float((cdist(reference, generated).min(axis=1) <= tau).mean())
+
+
+@register_metric(
+    "novelty_ratio",
+    family="distribution",
+    cost="cheap",
+    higher_is_better=None,
+    description="Novelty as a fraction of the reference designs' own novelty; 1.0 = as novel as real data.",
+)
+def novelty_ratio(ctx: EvaluationContext) -> float:
+    """`novelty`, divided by the same measurement taken on real held-out designs.
+
+    Raw novelty is a distance in whatever units the design space happens to
+    have, and part of what it measures is how far the *evaluation conditions*
+    sit from the training conditions -- a property of the split, not of the
+    model. That makes an absolute value nearly uninterpretable: nobody can say
+    whether 0.6 is memorization or healthy variation.
+
+    The reference designs answer the same conditions, are real, and are not in
+    the training split, so their distance-to-training is exactly the scale the
+    model's should be read against:
+
+    - ~1.0: as far from the training set as genuine held-out designs are
+    - ~0.0: memorization
+    - >>1.0: further from the data than real designs, which is as likely to be
+      garbage as invention
+
+    Deliberately declared with no direction. The good answer is *near one*, and
+    a leaderboard that sorted by it would reward the models furthest from the
+    data. Read it beside `novelty`, not instead of it.
+    """
+    if ctx.train_designs is None:
+        return float("nan")
+
+    train_flat = np.asarray(ctx.train_designs).reshape(len(ctx.train_designs), -1)
+    generated = float(cdist(ctx.gen_flat, train_flat).min(axis=1).mean())
+    reference = float(cdist(ctx.ref_flat, train_flat).min(axis=1).mean())
+    return generated / reference if reference > 0 else float("nan")

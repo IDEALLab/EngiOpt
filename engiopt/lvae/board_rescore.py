@@ -37,15 +37,28 @@ CHEAP = [
     "pca_vendi",
     "pca_coverage",
     "dpp",
+    "dpp_geometric",
     "pixel_vendi",
     "novelty",
     "lv_mmd",
     "lv_coverage",
     "lv_vendi",
     "lv_residual",
+    # All three spaces for the paired distance. `lv_paired_distance` is the
+    # strongest cheap predictor on the boards so far, and scoring it without its
+    # pixel and PCA counterparts cannot separate "the latent space is the right
+    # place to measure" from "pairing against the optimum for the same condition
+    # is a good idea anywhere".
     "lv_paired_distance",
+    "pca_paired_distance",
+    "pixel_paired_distance",
 ]
-PHYSICS = ["iog", "cog", "fog"]
+PHYSICS = ["iog", "cog", "fog", "iog_median", "cog_median", "fog_median"]
+"""Mean and median optimality gaps. The per-design gap is unbounded above, so a
+mean over ~50 samples is set by its worst member -- on the beams2d board a model
+reports mean IOG 1.5e8 while finishing at FOG -2.2, which is one unrecoverable
+starting design rather than a worse model. Rank correlations are unaffected;
+any statement about magnitude needs the medians."""
 
 
 def main() -> None:

@@ -103,6 +103,7 @@ def dpp_logdet(ctx: EvaluationContext) -> float:
 
 @register_metric(
     "viol",
+    requires=("volume_condition",),
     family="feasibility",
     cost="cheap",
     higher_is_better=False,
@@ -163,3 +164,47 @@ def cog(ctx: EvaluationContext) -> float:
 def fog(ctx: EvaluationContext) -> float:
     """Mean final optimality gap."""
     return float(np.mean(ctx.optimization.fog))
+
+
+# Median counterparts. The per-design gap is unbounded above -- a single generated
+# design that the optimizer cannot rescue carries an effectively infinite
+# compliance -- so a mean over ~50 samples is set by its worst member. On the
+# beams2d board three models sit within 5% of each other on MMD and report mean
+# IOG of 818, 50 and 1.5e8 while all three finish at FOG = -2.2: the optimizer
+# converges them to the same place, and the 1.5e8 is one starting design, not a
+# worse model. Rank correlations are unaffected (Spearman only sees order), but
+# any statement about *magnitude* needs these.
+@register_metric(
+    "iog_median",
+    family="performance",
+    cost="expensive",
+    higher_is_better=False,
+    description="Median initial optimality gap; robust to a single unrecoverable design.",
+)
+def iog_median(ctx: EvaluationContext) -> float:
+    """Median initial optimality gap."""
+    return float(np.median(ctx.optimization.iog))
+
+
+@register_metric(
+    "cog_median",
+    family="performance",
+    cost="expensive",
+    higher_is_better=False,
+    description="Median cumulative optimality gap; robust to a single unrecoverable design.",
+)
+def cog_median(ctx: EvaluationContext) -> float:
+    """Median cumulative optimality gap."""
+    return float(np.median(ctx.optimization.cog))
+
+
+@register_metric(
+    "fog_median",
+    family="performance",
+    cost="expensive",
+    higher_is_better=False,
+    description="Median final optimality gap; robust to a single unrecoverable design.",
+)
+def fog_median(ctx: EvaluationContext) -> float:
+    """Median final optimality gap."""
+    return float(np.median(ctx.optimization.fog))

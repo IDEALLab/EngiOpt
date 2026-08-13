@@ -152,6 +152,29 @@ class EvaluationContext:
     """
     model_params: int | None = None
     """Parameter count of the generator that produced `gen_designs`."""
+    train_minutes: float | None = None
+    """What this model cost to train, in minutes, when that is known.
+
+    Supplied by the caller rather than read off the model, because no checkpoint
+    package records it: the figure comes from the training run's own logs. NaN
+    where nobody supplied it, which is honest -- "not recorded" and "free" are
+    different claims, and the column that prices a diffusion model against a
+    lookup table should not quietly report the second."""
+    sigma_override: float | None = None
+    """Kernel bandwidth supplied by the caller, replacing the median heuristic.
+
+    Every kernel metric otherwise calibrates its own bandwidth on the validation
+    split, in whichever space it measures -- which is the right default and the
+    only one that is comparable across a board. This exists so that a bandwidth
+    can be *interrogated* rather than trusted: sweeping sigma and watching a
+    ranking move says more about a kernel metric than any single value of it
+    does.
+
+    It applies to whichever space the metric works in, since one number cannot
+    be simultaneously right for 5000 pixel dimensions and a 12-dimensional
+    latent code. A board computed under an override is not comparable to one
+    computed without it, so it is never the default.
+    """
     sigma_designs: npt.NDArray[Any] | None = None
     """Validation-split designs used to calibrate the latent kernel bandwidth.
 
@@ -223,6 +246,22 @@ class EvaluationContext:
         )
 
     @cached_property
+    def latent_train_codes(self) -> npt.NDArray[Any] | None:
+        """Training designs in the active latent subspace, for latent novelty.
+
+        Encoded once and shared, like `latent_codes`. Returns None when the
+        problem has no training split, which leaves the metric NaN rather than
+        letting it silently measure against something else.
+        """
+        from engiopt.lvae.encode import encode_active
+
+        if self.train_designs is None:
+            return None
+        lvae = self.require_latent_lvae()
+        device = next(lvae.encoder.parameters()).device
+        return encode_active(lvae.encoder, np.asarray(self.train_designs), device)
+
+    @cached_property
     def pixel_sigma(self) -> float:
         """Kernel bandwidth for pixel-space metrics, by the median heuristic.
 
@@ -237,6 +276,8 @@ class EvaluationContext:
         reference designs when no validation split was supplied, which keeps the
         metric computable while making the weaker protocol explicit.
         """
+        if self.sigma_override is not None:
+            return self.sigma_override
         return metrics_mod.compute_median_sigma(self.sigma_basis)
 
     @cached_property
@@ -291,6 +332,8 @@ class EvaluationContext:
         controlling for. That difference is exactly the size of effect the
         comparison is trying to detect.
         """
+        if self.sigma_override is not None:
+            return self.sigma_override
         _, _, basis = self.pca_codes
         return metrics_mod.compute_median_sigma(basis)
 
@@ -304,6 +347,8 @@ class EvaluationContext:
         """
         from engiopt.lvae.encode import encode_active
 
+        if self.sigma_override is not None:
+            return self.sigma_override
         lvae = self.require_latent_lvae()
         device = next(lvae.encoder.parameters()).device
         return metrics_mod.compute_median_sigma(encode_active(lvae.encoder, self.sigma_basis, device))

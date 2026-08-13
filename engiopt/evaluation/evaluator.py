@@ -39,6 +39,7 @@ import engiopt.evaluation.metrics  # noqa: F401  # isort: skip
 
 if TYPE_CHECKING:
     from engibench.core import Problem
+    import numpy.typing as npt
     import torch as th
 
     from engiopt.core import Generator
@@ -50,6 +51,7 @@ PROVENANCE_COLUMNS = (
     "seed",
     "spec_version",
     "n_samples",
+    "kernel_sigma",
     "sample_seconds",
     "checkpoint_revision",
     "checkpoint_hash",
@@ -63,9 +65,6 @@ PROVENANCE_COLUMNS = (
 and seed, or changing the training code, yields different weights under the same
 name, so without it a row cannot be traced back to the model that earned it.
 """
-
-NOVELTY_ANCHOR_SAMPLES = 1000
-"""Training designs sampled as the novelty anchor; see `Evaluator.train_designs`."""
 
 
 def _count_parameters(generator: Generator) -> int | None:
@@ -156,8 +155,56 @@ class Evaluator:
     # Scoring
     # ------------------------------------------------------------------
 
-    def context_for(self, generator: Generator) -> EvaluationContext:
-        """Sample from a generator and wrap the result in an evaluation context."""
+    def condition_subset(
+        self,
+        n_samples: int | None,
+        *,
+        random: bool = False,
+        seed: int | None = None,
+    ) -> npt.NDArray[Any] | None:
+        """Which of the spec's conditions to score, as indices.
+
+        Returns None when every condition is in play, which keeps the ordinary
+        case on the ordinary path. Drawn once by the caller and reused for every
+        model on a board: rows that answered different questions are not
+        comparable, and that mistake is invisible in the output.
+
+        Args:
+            n_samples: How many conditions to score. None, or the spec's full
+                count, means all of them.
+            random: Draw at random rather than taking the first `n_samples`.
+            seed: Seed for that draw; defaults to `n_samples` so the same
+                request twice gives the same subset. A metric that moves between
+                two runs should be telling you about the metric, not about which
+                conditions each run happened to draw.
+
+        Returns:
+            Sorted indices, or None for the full set.
+        """
+        total = self.resolved.n_samples
+        if n_samples is None or n_samples >= total:
+            return None
+        if not random:
+            return np.arange(n_samples)
+        rng = np.random.default_rng(n_samples if seed is None else seed)
+        return np.sort(rng.choice(total, n_samples, replace=False))
+
+    def context_for(
+        self,
+        generator: Generator,
+        *,
+        sigma: float | None = None,
+        indices: npt.NDArray[Any] | list[int] | None = None,
+        n_samples: int | None = None,
+    ) -> EvaluationContext:
+        """Sample from a generator and wrap the result in an evaluation context.
+
+        Args:
+            generator: The model to sample from.
+            sigma: Kernel bandwidth override; None keeps the median heuristic.
+            indices: Score exactly these conditions.
+            n_samples: Score only the first `n_samples` conditions.
+        """
         kind = design_kind_of(self.problem)
         if kind not in generator.design_kinds:
             raise ValueError(
@@ -173,23 +220,82 @@ class Evaluator:
             n=self.resolved.n_samples,
             seed=getattr(generator, "seed", None),
         )
+        return self.context_from_designs(
+            designs,
+            sample_seconds=generator.last_sample_seconds,
+            model_params=_count_parameters(generator),
+            sigma=sigma,
+            indices=indices,
+            n_samples=n_samples,
+        )
+
+    def context_from_designs(
+        self,
+        designs: npt.NDArray[Any],
+        *,
+        sample_seconds: float | None = None,
+        model_params: int | None = None,
+        train_minutes: float | None = None,
+        n_samples: int | None = None,
+        indices: npt.NDArray[Any] | list[int] | None = None,
+        sigma: float | None = None,
+    ) -> EvaluationContext:
+        """Wrap designs that already exist in a context, without sampling anything.
+
+        Sampling and scoring are separate costs, and they are not always paid at
+        the same time: designs may come off a cache built hours earlier, or a
+        caller may want the expensive metrics on the first two of a set it has
+        already drawn. Both need the spec's reference designs and conditions
+        truncated *together*, so that sample `i` still means the same condition
+        in every array -- which is the part that is easy to get wrong by hand.
+
+        Args:
+            designs: Generated designs, in the order the spec's conditions were
+                asked in.
+            sample_seconds: Wall-clock cost of producing them, for the cost
+                metrics. None leaves `gen_seconds` NaN rather than zero, because
+                "not measured" and "free" are different claims.
+            model_params: Parameter count of whatever produced them.
+            train_minutes: What that model cost to train, when known. Nothing in
+                a checkpoint package records it, so it has to be supplied.
+            n_samples: Score only the first `n_samples`. Defaults to all of them.
+            indices: Score exactly these conditions instead, which is how a
+                random subset is taken. Chosen once by the caller and reused for
+                every model, since a board whose rows answered different
+                questions is not a board.
+            sigma: Kernel bandwidth override. None keeps the median heuristic,
+                calibrated per space on the validation split.
+
+        Returns:
+            A context ready for `score_context`.
+        """
+        if indices is not None:
+            chosen = np.asarray(indices, dtype=int)
+        else:
+            count = len(designs) if n_samples is None else min(n_samples, len(designs))
+            chosen = np.arange(count)
+
+        full = len(chosen) == self.resolved.n_samples and np.array_equal(chosen, np.arange(len(chosen)))
+        conditions = self.resolved.conditions
         return EvaluationContext(
             problem=self.problem,
             problem_id=self.problem_id,
-            gen_designs=designs,
-            ref_designs=self.resolved.ref_designs,
-            conditions=self.resolved.conditions,
+            gen_designs=np.asarray(designs)[chosen],
+            ref_designs=np.asarray(self.resolved.ref_designs)[chosen],
+            conditions=conditions if full or conditions is None else conditions.select(chosen.tolist()),
             sigma=self.spec.sigma,
+            sigma_override=sigma,
             volfrac_tol=self.spec.volfrac_tol,
             volume_condition=self.spec.volume_condition,
-            sample_seconds=generator.last_sample_seconds,
+            sample_seconds=sample_seconds,
             objective_weights=self.spec.objective_weights,
             objective_weight_condition=self.spec.objective_weight_condition,
             latent_lvae=self.latent_lvae,
             latent_recon_lvae=self.latent_recon_lvae,
             sigma_designs=self.sigma_designs,
             train_designs=self.train_designs,
-            model_params=_count_parameters(generator),
+            model_params=model_params,
+            train_minutes=train_minutes,
         )
 
     def _load_instrument(self, *, config_fingerprint: str | None, seed: int) -> Any:
@@ -256,23 +362,19 @@ class Evaluator:
 
     @functools.cached_property
     def train_designs(self) -> Any:
-        """Training designs used as the novelty anchor.
+        """The whole training split -- everything the model could have copied.
 
-        Capped: novelty is a nearest-neighbour distance, and the nearest
-        neighbour stops moving long before the whole split is searched, so the
-        full set would cost memory for precision nobody reads. Sampling is
-        seeded so the anchor is the same for every model on the board.
+        Not subsampled. A thinned anchor breaks the one case novelty exists to
+        catch: a model that returns a training design scores zero only if that
+        design is in the anchor, and at 1000 of beams2d's 3880 it usually was
+        not.
 
         Returns `None` when the problem has no training split.
         """
         dataset = getattr(self.problem, "dataset", None)
         if dataset is None or "train" not in dataset:
             return None
-        designs = np.asarray(dataset["train"]["optimal_design"])
-        if len(designs) <= NOVELTY_ANCHOR_SAMPLES:
-            return designs
-        rng = np.random.default_rng(self.spec.condition_seed)
-        return designs[rng.choice(len(designs), NOVELTY_ANCHOR_SAMPLES, replace=False)]
+        return np.asarray(dataset["train"]["optimal_design"])
 
     @functools.cached_property
     def sigma_designs(self) -> Any:
@@ -292,6 +394,9 @@ class Evaluator:
         *,
         only: list[str] | None = None,
         include_expensive: bool = False,
+        sigma: float | None = None,
+        n_samples: int | None = None,
+        indices: npt.NDArray[Any] | list[int] | None = None,
     ) -> dict[str, Any]:
         """Score one generator, returning a single leaderboard row.
 
@@ -300,11 +405,19 @@ class Evaluator:
             only: Metric names to compute; defaults to the spec's metric list.
             include_expensive: Whether to run simulator-backed metrics. Left
                 False, no metric can invoke the simulator or optimizer.
+            sigma: Kernel bandwidth for the kernel metrics, replacing the median
+                heuristic each space otherwise calibrates on the validation
+                split. Recorded on the row, because a score computed under an
+                override is not comparable to one computed without it and a
+                leaderboard cannot tell the difference by looking.
+            n_samples: Score only this many of the spec's conditions.
+            indices: Score exactly these conditions. Draw them once with
+                `condition_subset` and reuse them for every model on a board.
 
         Returns:
             A dict of provenance columns plus one entry per metric column.
         """
-        ctx = self.context_for(generator)
+        ctx = self.context_for(generator, sigma=sigma, n_samples=n_samples, indices=indices)
         row = self._provenance(generator, ctx)
         row.update(self.score_context(ctx, only=only, include_expensive=include_expensive))
         return row
@@ -392,6 +505,7 @@ class Evaluator:
             "seed": getattr(generator, "seed", None),
             "spec_version": self.spec.version,
             "n_samples": ctx.n_samples,
+            "kernel_sigma": ctx.sigma_override,
             "sample_seconds": ctx.sample_seconds,
             "checkpoint_revision": getattr(generator, "checkpoint_revision", None),
             "checkpoint_hash": getattr(generator, "checkpoint_hash", None),
@@ -410,6 +524,8 @@ class Evaluator:
         only: list[str] | None = None,
         include_expensive: bool = False,
         on_error: str = "raise",
+        sigma: float | None = None,
+        indices: npt.NDArray[Any] | list[int] | None = None,
     ) -> pd.DataFrame:
         """Score many generators into one table.
 
@@ -420,6 +536,9 @@ class Evaluator:
             on_error: `"raise"`, or `"skip"` to drop models that fail and carry
                 on -- useful for a long unattended sweep where one bad
                 checkpoint should not lose the rest of the results.
+            sigma: Kernel bandwidth override applied to every row.
+            indices: Conditions to score, shared by every row so the board
+                stays a comparison rather than a collection.
 
         Returns:
             A DataFrame with provenance columns first, then metric columns.
@@ -427,7 +546,15 @@ class Evaluator:
         rows: list[dict[str, Any]] = []
         for generator in generators:
             try:
-                rows.append(self.score(generator, only=only, include_expensive=include_expensive))
+                rows.append(
+                    self.score(
+                        generator,
+                        only=only,
+                        include_expensive=include_expensive,
+                        sigma=sigma,
+                        indices=indices,
+                    )
+                )
             # One unloadable checkpoint must not lose an entire unattended sweep.
             except Exception as exc:  # noqa: PERF203
                 if on_error != "skip":

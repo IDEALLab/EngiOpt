@@ -32,7 +32,12 @@ import pandas as pd
 
 from engiopt.evaluation import Evaluator
 
-PHYSICS = ["iog", "cog", "fog"]
+PHYSICS = ["iog", "cog", "fog", "iog_median", "cog_median", "fog_median"]
+"""Mean and median optimality gaps. The per-design gap is unbounded above, so a
+mean over ~50 samples is set by its worst member -- on the beams2d board a model
+reports mean IOG 1.5e8 while finishing at FOG -2.2, which is one unrecoverable
+starting design rather than a worse model. Rank correlations are unaffected;
+any statement about magnitude needs the medians."""
 
 
 def discover(problem_id: str, algos: list[str] | None) -> list[tuple[str, str, str | None, int]]:
