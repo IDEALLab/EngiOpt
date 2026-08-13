@@ -862,8 +862,8 @@ if __name__ == "__main__":
         if epoch % args.sample_interval == 0 or epoch == args.n_epochs - 1:
             print(
                 f"[Epoch {epoch}/{args.n_epochs}] [VAL nmse_rec: {val_nmse_rec:.4f}] "
-                f"[VAL nmse_perf: {val_nmse_perf:.4f}] [train nmse_rec: {plvae.nmse_rec:.4f}] "
-                f"[dims: {plvae.vol_active}]"
+                f"[VAL nmse_perf: {val_nmse_perf:.4f}] [last-batch nmse_rec: {plvae.nmse_rec:.4f}] "
+                f"[dims: {plvae.dim}]"
             )
 
         if args.track:
@@ -919,11 +919,21 @@ if __name__ == "__main__":
                 # the generalization diagnostic -- reporting either alone is what
                 # made the earlier threshold analysis wrong.
                 metadata={
+                    # `nmse_rec`/`nmse_perf` are whatever the last `loss()` call
+                    # stored, and validation runs after training each epoch, so
+                    # these are validation-batch values despite the `train_` name.
+                    # Kept under these keys for continuity with published packages;
+                    # `val_nmse_*` below are the authoritative split-wide figures.
                     "train_nmse_rec": float(plvae.nmse_rec),
                     "train_nmse_perf": float(plvae.nmse_perf),
                     "val_nmse_rec": float(val_nmse_rec),
                     "val_nmse_perf": float(val_nmse_perf),
-                    "n_active_dims": int(plvae.vol_active),
+                    # `plvae.dim` is the active-dimension count. `vol_active` is a
+                    # bool ("is volume the dominant term"), so the previous
+                    # `int(plvae.vol_active)` recorded 0 or 1 for every checkpoint
+                    # ever published -- never the dimensionality the spec's
+                    # `expected_n_active` and the latent metrics depend on.
+                    "n_active_dims": int(plvae.dim),
                     "w_vol": float(plvae.w_vol),
                 },
                 condition_keys=scalar_cond_keys,
