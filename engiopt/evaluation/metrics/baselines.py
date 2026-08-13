@@ -39,6 +39,26 @@ def _pca_codes(ctx: EvaluationContext) -> tuple[np.ndarray, np.ndarray]:
 
 
 @register_metric(
+    "pca_dims",
+    family="distribution",
+    cost="cheap",
+    higher_is_better=None,
+    description="Number of principal components the pca_* metrics were computed in.",
+)
+def pca_dims(ctx: EvaluationContext) -> float:
+    """The width of the linear control, recorded so the match can be checked.
+
+    `EvaluationContext.pca_codes` fits as many components as the instrument keeps
+    active, which is what makes these a matched control rather than an arbitrary
+    projection. That claim is unverifiable from a board that does not report the
+    number, and the match silently breaks whenever no instrument is loaded and
+    the default component count is used instead.
+    """
+    generated, _reference = _pca_codes(ctx)
+    return float(generated.shape[1])
+
+
+@register_metric(
     "pca_paired_distance",
     family="conditions",
     cost="cheap",
@@ -131,7 +151,7 @@ def pca_vendi(ctx: EvaluationContext) -> float:
     performance constraint specifically is what does it. Only a matched linear
     projection can tell those apart.
     """
-    generated, reference = _pca_codes(ctx)
+    generated, _reference = _pca_codes(ctx)
     return metrics_mod.vendi_score(generated, sigma=ctx.pca_sigma)
 
 

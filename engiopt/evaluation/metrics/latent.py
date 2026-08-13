@@ -33,6 +33,7 @@ import numpy as np
 
 from engiopt import metrics as metrics_mod
 from engiopt.evaluation.registry import register_metric
+from engiopt.lvae.encode import get_active_mask
 
 if TYPE_CHECKING:
     import numpy.typing as npt
@@ -113,6 +114,25 @@ def lv_dual_gap(ctx: EvaluationContext) -> float:
 # ----------------------------------------------------------------------
 # Axis 2 -- does it match the condition it was asked for?
 # ----------------------------------------------------------------------
+
+
+@register_metric(
+    "lv_active_dims",
+    requires=("latent_instrument",),
+    family="distribution",
+    cost="cheap",
+    higher_is_better=None,
+    description="Active latent width of the instrument these lv_* metrics were computed in.",
+)
+def lv_active_dims(ctx: EvaluationContext) -> float:
+    """How many latent dimensions the lv_* columns were measured in.
+
+    Not a quality measure -- it is the units. Latent MMD, coverage and Vendi are
+    all dimension-sensitive, and the PCA controls are fitted to *this* number
+    (`EvaluationContext.pca_codes`), so a board that reports the scores without
+    it cannot be compared across instruments or checked for a matched control.
+    """
+    return float(get_active_mask(ctx.require_latent_lvae().encoder).sum())
 
 
 @register_metric(

@@ -52,6 +52,10 @@ CHEAP = [
     "lv_paired_distance",
     "pca_paired_distance",
     "pixel_paired_distance",
+    # The units the lv_*/pca_* columns are in; the PCA control is fitted to the
+    # instrument's active width, so a board without these cannot be checked.
+    "lv_active_dims",
+    "pca_dims",
 ]
 PHYSICS = ["iog", "cog", "fog", "iog_median", "cog_median", "fog_median"]
 """Mean and median optimality gaps. The per-design gap is unbounded above, so a
@@ -142,6 +146,8 @@ def report(merged: pd.DataFrame) -> None:
         ("pca_vendi", "lv_vendi"),
         ("pca_mmd", "lv_mmd"),
         ("pca_coverage", "lv_coverage"),
+        ("pixel_paired_distance", "lv_paired_distance"),
+        ("pca_paired_distance", "lv_paired_distance"),
     ):
         if pixel in result.index and latent in result.index:
             a, b = abs(result.loc[pixel, "iog"]), abs(result.loc[latent, "iog"])
