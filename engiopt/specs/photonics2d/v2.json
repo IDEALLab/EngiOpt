@@ -6,13 +6,12 @@
  "engibench_version": "0.2.0+0a028c03d02b",
  "latent_instrument": {
   "algo": "constrained_plvae_2d",
-  "config_fingerprint": "0d2dd396",
-  "expected_n_active": 21,
+  "config_fingerprint": "beb199bf",
+  "expected_n_active": 32,
   "hf_entity": "IDEALLab",
   "hf_repo_prefix": "engiopt",
-  "recon_only_config_fingerprint": "28a16723",
+  "recon_only_config_fingerprint": "61f57b29",
   "recon_only_seed": 1,
-  "revision": "573b9df28f6dfb650be42db11815ae574acd76cc",
   "seed": 1
  },
  "metrics": [
