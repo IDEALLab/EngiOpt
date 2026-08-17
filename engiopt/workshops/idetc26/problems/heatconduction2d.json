@@ -1,7 +1,7 @@
 {
-  "problem_id": "beams2d",
-  "spec": "beams2d/v1",
-  "display_name": "Beams2D -- cantilever topology optimization",
+  "problem_id": "heatconduction2d",
+  "spec": "heatconduction2d/v1",
+  "display_name": "HeatConduction2D -- steady-state heat conduction layout",
   "metrics": [
     "train_minutes",
     "params",
@@ -49,8 +49,8 @@
       "algo": "vqgan",
       "seed": 1,
       "train_minutes": 89.8,
-      "summary": "Discrete latent codes plus an autoregressive transformer.",
-      "config_fingerprint": "1151406c"
+      "config_fingerprint": "a6fb3f0b",
+      "summary": "Discrete latent codes plus an autoregressive transformer."
     },
     {
       "kind": "pretrained",
@@ -89,7 +89,7 @@
       "kind": "pretrained",
       "algo": "constrained_plvae_2d",
       "seed": 1,
-      "config_fingerprint": "85a55839",
+      "config_fingerprint": "7c1f92b7",
       "train_minutes": 149.8,
       "summary": "Least-volume autoencoder, sampled from its latent space."
     }

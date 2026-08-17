@@ -1,11 +1,16 @@
 """Execute the challenge notebook end to end and fail on the first error.
 
-The fill-in cells ship with placeholders (`why = "..."`, `passphrase = "..."`)
-that a participant replaces. This substitutes plausible answers and runs every
-cell, so a broken API or a stale method name surfaces here rather than in a room
-of ninety people.
+The fill-in cells ship with placeholders (`passphrase = "..."`) that a
+participant replaces. This substitutes plausible answers and runs every cell, so
+a broken API or a stale method name surfaces here rather than in a room of
+ninety people.
 
     python workshops/idetc26/tools/verify_notebook.py --passphrase "..."
+
+This is the only check that catches a notebook whose *prose* is right and whose
+*calls* are stale, so it has to be run after every change to `build_notebook.py`
+or to the `Case` API. It samples every suspect and runs the simulator on a
+couple of designs, so it belongs on a workstation rather than in CI.
 """
 
 from __future__ import annotations
@@ -20,10 +25,7 @@ import nbformat
 NOTEBOOK = Path(__file__).resolve().parents[1] / "notebooks" / "01_find_the_best_model.ipynb"
 
 SUBSTITUTIONS = {
-    'winner = "Model A"': "winner = ch.bank.labels[0]",
-    'why = "..."': 'why = "verification run"',
     'passphrase = "..."': "passphrase = VERIFY_PASSPHRASE",
-    'TEAM = "orange"': 'TEAM = "verify"',
 }
 """Fill-in placeholders replaced before execution, as `{placeholder: answer}`."""
 

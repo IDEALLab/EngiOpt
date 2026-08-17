@@ -1,28 +1,45 @@
-"""The IDETC'26 "find the best model" challenge.
+"""The IDETC'26 "which of these is the best model?" challenge.
 
-Teams receive a bank of anonymized generators, compute the metrics they can
-actually afford, commit publicly to a winner, and then watch the ranking come
-apart -- first under a change of seed, then under the columns they were not
-given, then under the disclosure that several bank members are constructed
-frauds.
+A line-up of generative models for one engineering design problem, and a set of
+questions you are allowed to put to them. One of them is the best. Working out
+which -- and, harder, working out what you had to measure before you were
+entitled to say so -- is the session.
+
+The answer is meant to be hard: the columns disagree, they disagree differently
+depending on the space they measure in, and the ranking moves when only the
+random seed changes.
 
 The module is deliberately thin. Everything real -- loading, sampling, scoring
 -- is the ordinary `engiopt.evaluation` path, because a challenge run on a
 special code path would prove nothing about the benchmark.
 
-    from engiopt.workshops.idetc26 import Challenge
+There are four commands:
 
-    ch = Challenge.open("beams2d", team="orange")
-    ch.gallery()                       # look before you measure
-    board = ch.board()                 # the cheap metrics, anonymized
-    ch.submit(winner="Model C", why="best MMD by a wide margin")
-    ch.reveal()                        # seeds, withheld columns, identities
+    from engiopt.workshops.idetc26 import Case
+
+    case = Case.open("beams2d")
+    case.models()                   who is in the line-up
+    case.metrics()                  what you may ask, by line of questioning
+    case.evaluate("diversity")      put a question to them
+    case.show("diffusion")          look at what one of them produced
 """
 
 from engiopt.workshops.idetc26.bank import BankMember
 from engiopt.workshops.idetc26.bank import ModelBank
-from engiopt.workshops.idetc26.challenge import Challenge
-from engiopt.workshops.idetc26.challenge import Verdict
+from engiopt.workshops.idetc26.case import Case
 from engiopt.workshops.idetc26.config import WorkshopConfig
+from engiopt.workshops.idetc26.designs import DesignStore
+from engiopt.workshops.idetc26.families import FAMILIES
+from engiopt.workshops.idetc26.families import Family
+from engiopt.workshops.idetc26.families import family_of
 
-__all__ = ["BankMember", "Challenge", "ModelBank", "Verdict", "WorkshopConfig"]
+__all__ = [
+    "FAMILIES",
+    "BankMember",
+    "Case",
+    "DesignStore",
+    "Family",
+    "ModelBank",
+    "WorkshopConfig",
+    "family_of",
+]

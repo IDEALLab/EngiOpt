@@ -1,7 +1,7 @@
 {
-  "problem_id": "beams2d",
-  "spec": "beams2d/v1",
-  "display_name": "Beams2D -- cantilever topology optimization",
+  "problem_id": "photonics2d",
+  "spec": "photonics2d/v1",
+  "display_name": "Photonics2D -- dielectric layout for wavelength splitting",
   "metrics": [
     "train_minutes",
     "params",
@@ -89,7 +89,7 @@
       "kind": "pretrained",
       "algo": "constrained_plvae_2d",
       "seed": 1,
-      "config_fingerprint": "85a55839",
+      "config_fingerprint": "a9b77c27",
       "train_minutes": 149.8,
       "summary": "Least-volume autoencoder, sampled from its latent space."
     }
@@ -102,10 +102,6 @@
     {
       "kind": "reference",
       "algo": "noise_doped"
-    },
-    {
-      "kind": "reference",
-      "algo": "volume_only"
     }
   ]
 }
