@@ -1,0 +1,6 @@
+# Working design cache. The shipped one lives in the package, under
+# engiopt/workshops/idetc26/cache/, and is committed on purpose.
+cache/
+
+# Scratch dir a notebook run creates next to itself; never shipped.
+notebooks/idetc26_work/
