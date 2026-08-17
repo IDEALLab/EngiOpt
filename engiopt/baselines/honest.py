@@ -34,16 +34,20 @@ if TYPE_CHECKING:
 
 
 class KNNRetrieval(DatasetGenerator):
-    """k-nearest-neighbour retrieval over the training set, blended and rescaled.
+    """Nearest-neighbour retrieval over the training set, rescaled to the budget.
 
     The method Habibi et al. found hard to beat at small data sizes. For each
-    requested condition it averages the `k` training designs whose conditions are
-    closest, then rescales the result to the requested volume fraction -- the
-    same post-hoc feasibility step any practitioner would apply.
+    requested condition it takes the nearest training design and rescales it to
+    the requested volume fraction -- the same post-hoc feasibility step any
+    practitioner would apply.
 
-    At `k = 1` this is pure retrieval and cannot produce a design that is not
-    already in the dataset, which is a real limitation and one that only
-    `novelty` measures.
+    **`k = 1` is the default, and the only value worth defaulting to.** At k = 1
+    this is pure retrieval: it cannot produce a design that is not already in the
+    dataset, which is a real limitation and one that only the memorization
+    columns measure. Any k > 1 averages k designs and returns a blurred blend
+    that exists nowhere in the data -- so it is neither retrieval nor a
+    generative model, and a board containing it is measuring an artifact.
+    Larger k remains available via `neighbours=`, but nothing defaults to it.
     """
 
     algo_id = "knn_retrieval"
@@ -52,7 +56,7 @@ class KNNRetrieval(DatasetGenerator):
     summary = "k-nearest-neighbour retrieval from the training set, rescaled to the requested volume fraction."
     reference = "Habibi et al., J. Mech. Des. 148(6):061704 (2026)"
 
-    neighbours: ClassVar[int] = 5
+    neighbours: ClassVar[int] = 1
     volume_condition: ClassVar[str] = "volfrac"
 
     def __init__(self, neighbours: int | None = None, **kwargs: Any) -> None:
@@ -74,7 +78,11 @@ class KNNRetrieval(DatasetGenerator):
         """Average the `k` nearest training designs, then match the volume budget."""
         requested = self.requested(conditions, n)
         indices = self.bank.nearest(requested, split="train", k=self.k)
-        designs = self.bank.split("train").designs[indices].mean(axis=1)
+        picked = self.bank.split("train").designs[indices]
+        # `nearest` drops the neighbour axis at k = 1, so there is nothing to
+        # average over: the retrieved design *is* the answer. Averaging anyway
+        # collapses each design along its own rows, which is not a design.
+        designs = picked if self.k == 1 else picked.mean(axis=1)
 
         column = self.bank.column(self.volume_condition)
         if column is None:

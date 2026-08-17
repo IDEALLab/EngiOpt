@@ -104,7 +104,7 @@ class KNNRetrieval(Generator):
             conditions=payload["conditions"].numpy().astype(np.float64),
             designs=payload["designs"].numpy().astype(np.float32),
             scale=payload["scale"].numpy().astype(np.float64),
-            k=int(payload.get("k", config.get("k", 5))),
+            k=int(payload.get("k", config.get("k", 1))),
             distance_weighted=bool(payload.get("distance_weighted", False)),
             match_volume=bool(payload.get("match_volume", True)),
             problem=problem,

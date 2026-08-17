@@ -20,7 +20,7 @@ training data weighs, and putting that number next to a GAN's parameter count is
 a more honest comparison than pretending the data is free.
 
 Usage:
-    python engiopt/generators/knn_retrieval/knn_retrieval.py --problem-id beams2d --k 5 --save-model
+    python engiopt/generators/knn_retrieval/knn_retrieval.py --problem-id beams2d --save-model
 """
 
 from __future__ import annotations
@@ -59,8 +59,10 @@ class Args:
     hf_repo_prefix: str = "engiopt"
     """Prefix of the per-model-family HF repo."""
 
-    k: int = 5
-    """Neighbours averaged per query. `k = 1` is pure retrieval and can only
+    k: int = 1
+    """Neighbours averaged per query, defaulting to pure retrieval.
+
+    `k = 1` is the canonical configuration: it can only
     return designs already in the training set."""
     distance_weighted: bool = False
     """Weight neighbours by inverse distance rather than averaging them equally."""
