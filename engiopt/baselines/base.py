@@ -122,12 +122,39 @@ class DesignBank:
         Returns:
             `(n,)` indices at `k = 1`, otherwise `(n, k)`.
         """
+        indices, _ = self.neighbours(conditions, split=split, k=k)
+        return indices
+
+    def neighbours(
+        self, conditions: npt.NDArray[Any], split: str = "train", k: int = 1
+    ) -> tuple[npt.NDArray[Any], npt.NDArray[Any]]:
+        """The `k` closest designs in `split`, with how far away each one is.
+
+        `nearest` throws the distances away, which is all a retrieval model
+        needs. A model that *weights* its neighbours needs them, and recomputing
+        the distance matrix outside this class would mean a second copy of the
+        standardization -- the one thing here that must not be duplicated, since
+        two different scalings would make two models' "nearest" mean different
+        things.
+
+        Args:
+            conditions: `(n, n_conds)` requested conditions.
+            split: Which split to search.
+            k: Number of neighbours. At `k = 1` the neighbour axis is dropped
+                from the indices, matching `nearest`.
+
+        Returns:
+            `(indices, distances)`, standardized distances in the same shape as
+            the indices.
+        """
         pool = self.split(split).conditions / self._scale
         query = np.asarray(conditions, dtype=np.float64) / self._scale
         distances = np.linalg.norm(query[:, None, :] - pool[None, :, :], axis=2)
         if k == 1:
-            return np.asarray(distances.argmin(axis=1))
-        return np.argsort(distances, axis=1)[:, :k]
+            picked = np.asarray(distances.argmin(axis=1))
+            return picked, distances[np.arange(len(picked)), picked]
+        order = np.argsort(distances, axis=1)[:, :k]
+        return order, np.take_along_axis(distances, order, axis=1)
 
     def column(self, name: str) -> int | None:
         """Position of a named condition in the tensor, or None if absent."""
@@ -183,6 +210,28 @@ class DatasetGenerator(Generator):
             trained checkpoints. True for published baselines like kNN; False
             for the reference instruments, which exist to calibrate what a
             metric value means and would be dishonest as contestants.
+        tuning: Names of the attributes that change what this model outputs --
+            a blend width, a noise scale, a coarsening factor. They do two jobs.
+
+            They go into the model's **cache key**, because a checkpoint's
+            weights change its fingerprint and a dataset-fitted model has no
+            fingerprint to change. Without that, retuning a construction and
+            re-scoring it silently replays the designs the old settings
+            produced, and the board reports the measurement you thought you had
+            just replaced.
+
+            And they are **settable per instance**, from a bank entry or a
+            keyword, so one class covers a whole severity ladder: four entries
+            declaring `temperature` 0.05 / 0.08 / 0.12 / 0.15 are four rungs
+            that cache separately and score independently. That is what lets a
+            workshop draw two rungs and a distortion study sweep all of them
+            out of the same class, the same checkpoints and the same cache.
+        planted: Whether this model was built to top a column it does not
+            deserve. Planted models *are* ranked in a line-up, under a name that
+            implies a method, and are disclosed at the reveal -- which is a
+            different thing from both a baseline and a reference instrument, and
+            has to be readable off the class rather than inferred from which
+            catalogue it happens to be in.
         summary: One line describing what the model does.
         reference: Citation, where the method is one from the literature.
         wins: Metric columns this model is expected to top.
@@ -194,12 +243,21 @@ class DatasetGenerator(Generator):
     output_clip: tuple[Any, Any] | None = (1e-3, 1.0)
 
     bank_eligible: ClassVar[bool] = False
+    planted: ClassVar[bool] = False
+    tuning: ClassVar[tuple[str, ...]] = ()
     summary: ClassVar[str] = ""
     reference: ClassVar[str] = ""
     wins: ClassVar[tuple[str, ...]] = ()
     loses: ClassVar[tuple[str, ...]] = ()
 
     def __init__(self, bank: DesignBank, **kwargs: Any) -> None:
+        # Tuned knobs arrive as ordinary keywords and land on the instance,
+        # shadowing the class default. Consumed here rather than passed on
+        # because `Generator.__init__` rejects what it does not recognise --
+        # which is right for a typo and wrong for a declared severity.
+        for name in self.tuning:
+            if name in kwargs:
+                setattr(self, name, kwargs.pop(name))
         super().__init__(**kwargs)
         self.bank = bank
 
@@ -258,6 +316,55 @@ class DatasetGenerator(Generator):
             condition_keys=bank.keys,
             **kwargs,
         )
+
+    @classmethod
+    def settings(cls) -> dict[str, Any]:
+        """The declared defaults for this model's knobs, for the cache key.
+
+        Class-level rather than per-instance because the key has to be known
+        before anything is built -- a bank member loads lazily, and a member
+        whose designs are cached never constructs its model at all. Whatever a
+        bank entry declares is merged over this by the caller, so the key
+        describes the rung that will actually be sampled.
+
+        Returns:
+            `{attribute: value}` over `tuning`, empty when nothing is tunable.
+        """
+        return {name: getattr(cls, name) for name in cls.tuning}
+
+    @classmethod
+    def mechanism_digest(cls) -> str:
+        """A short hash of this model's own source, standing in for a weight file.
+
+        A trained model's cache is keyed by the fingerprint of its weights. A
+        dataset-fitted model has no weights: **its mechanism is its source**, so
+        that is what gets hashed. Without this, editing how a construction
+        samples and re-scoring it serves the designs the previous version
+        produced -- which cost two rounds of tuning here before it was noticed,
+        both times looking like "the change had no effect on the metrics".
+
+        Hashes this class and any construction base between it and
+        `DatasetGenerator`, so a shared helper like `_shift_to_budget` counts
+        too. It does **not** cover `DatasetGenerator` itself or module-level
+        helpers such as `match_volume_fraction`: changing those invalidates
+        nothing automatically, and the cache has to be cleared by hand.
+
+        Returns:
+            Eight hex characters, or `""` if the source cannot be read (a REPL,
+            a frozen build), in which case the key simply omits it.
+        """
+        import hashlib
+        import inspect
+
+        sources = []
+        for klass in cls.__mro__:
+            if klass is DatasetGenerator:
+                break
+            try:
+                sources.append(inspect.getsource(klass))
+            except (OSError, TypeError):
+                return ""
+        return hashlib.sha256("".join(sources).encode()).hexdigest()[:8]
 
     # ------------------------------------------------------------------
     # Helpers shared by the constructions

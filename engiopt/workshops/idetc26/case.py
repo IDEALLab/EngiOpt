@@ -59,6 +59,7 @@ from dataclasses import dataclass
 from dataclasses import field
 import io
 from pathlib import Path
+import textwrap
 from typing import Any, TYPE_CHECKING
 
 import numpy as np
@@ -619,13 +620,44 @@ class Case:
                 "They are shown as blank rather than dropped -- 'not measured' is a fact about the board, "
                 "not a reason to hide a model from it."
             )
+        self._disclose_constructions()
         return frame
+
+    def _disclose_constructions(self) -> None:
+        """Name the planted suspects and say what each was built to break.
+
+        Reaching the physics board is the moment this belongs: any later and it
+        is a gotcha, any earlier and there is nothing to learn from having
+        ranked them. Printed every time rather than offered behind a method,
+        because a disclosure you have to know to ask for is not one.
+        """
+        planted = [member for member in self.bank if member.kind == "planted"]
+        if not planted:
+            return
+        print(
+            f"\n  {len(planted)} of the {len(self.bank)} suspects were built for this session rather than trained.\n"
+            "  They carry no weights, they were written in an afternoon, and they were ranked beside the\n"
+            "  checkpoints on every column you asked for. What each one was built to do:\n"
+        )
+        for member in planted:
+            print(f"  {member.label}")
+            print(f"      {member.summary}")
+            for line in textwrap.wrap(member.built_to, width=96):
+                print(f"      {line}")
+            print()
+        print("  Source: engiopt/baselines/planted.py. Every one of them is fitted on the training split only.\n")
 
     def _sealed_physics(self, passphrase: str, path: str | Path | None) -> pd.DataFrame:
         """The legacy encrypted board, for a session that still uses one.
 
+        A suspect the board does not cover comes back **blank rather than
+        refused**: a line-up gains a member before the simulator has been run
+        over it, and that is a normal state rather than a corrupt file. Only a
+        board covering nobody is an error, since that means the wrong file.
+
         Raises:
-            SealError: If the board is missing, or was sealed for another line-up.
+            SealError: If the board is missing, unreadable, or covers none of
+                this line-up.
         """
         sealed = Path(path) if path else self.config.sealed_board_path()
         frame = pd.read_csv(io.StringIO(unseal(sealed, passphrase)))
@@ -633,12 +665,28 @@ class Case:
         if "key" not in frame.columns:
             raise SealError(f"{sealed} has no `key` column; it was not written by `build_sealed_board`.")
         by_key = frame.set_index("key")
-        missing = [m.key for m in self.bank if m.key not in by_key.index]
+        missing = [member for member in self.bank if member.key not in by_key.index]
+        if len(missing) == len(self.bank):
+            raise SealError(
+                f"The sealed board covers none of this line-up ({[m.key for m in self.bank]}). "
+                "It was sealed against a different problem, or a different spec."
+            )
         if missing:
-            raise SealError(f"The sealed board does not cover {missing}. It was sealed against a different line-up.")
+            # Blank rather than refuse. A suspect added after the board was
+            # sealed has no physics *yet*, and that is a normal state between a
+            # line-up change and the next simulator run -- refusing the whole
+            # board would take the eight rows that are ready down with the
+            # three that are not. Said out loud, because a blank cell a reader
+            # mistakes for a zero is worse than an error.
+            print(
+                f"  [sealed board] no physics for {[m.label for m in missing]} -- "
+                f"added to the line-up after this board was sealed, so their rows are blank. "
+                f"Rebuild with `build_sealed_board.py --problem-id {self.config.problem_id}`."
+            )
 
-        rows = by_key.loc[[m.key for m in self.bank]]
+        rows = by_key.reindex([member.key for member in self.bank])
         rows.index = pd.Index(self.bank.labels, name="suspect")
+        self._disclose_constructions()
         # `spec` and `source` are provenance for the sealed file, not results.
         return rows.drop(columns=[c for c in ("algo", "problem_id", "spec", "source") if c in rows.columns])
 

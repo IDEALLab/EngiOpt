@@ -112,6 +112,7 @@ class NoiseDoped(DatasetGenerator):
     algo_id = "noise_doped"
     conditional = True
     bank_eligible = False
+    tuning = ("severity",)
     summary = "Real optimal designs with Gaussian noise added. Tests whether a diversity metric rewards corruption."
     wins = ("dpp", "pixel_vendi", "novelty")
     loses = ("mmd", "viol", "iog")
@@ -131,6 +132,7 @@ class Checkerboard(DatasetGenerator):
     algo_id = "checkerboard"
     conditional = True
     bank_eligible = False
+    tuning = ("amplitude",)
     summary = "Real designs with an alternating solid/void artifact. Reads as broken; scores well."
     wins = ("mmd", "cond_err")
     loses = ("dpp",)

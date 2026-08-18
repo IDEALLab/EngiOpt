@@ -45,6 +45,12 @@
       "summary": "Supervised: conditions in, one design out, pixel loss."
     },
     {
+      "kind": "planted",
+      "algo": "coarse_to_fine_2d",
+      "seed": 1,
+      "train_minutes": 0.1
+    },
+    {
       "kind": "pretrained",
       "algo": "vqgan",
       "seed": 1,
@@ -69,6 +75,12 @@
       "summary": "Conditional GAN, CNN backbone, centre of the sweep."
     },
     {
+      "kind": "planted",
+      "algo": "portfolio_2d",
+      "seed": 1,
+      "train_minutes": 0.1
+    },
+    {
       "kind": "pretrained",
       "algo": "cgan_cnn_2d",
       "name": "cgan_cnn_2d_tuned",
@@ -76,6 +88,12 @@
       "config_fingerprint": "c7837a0c",
       "train_minutes": 4.0,
       "summary": "The same cGAN, different hyperparameters."
+    },
+    {
+      "kind": "planted",
+      "algo": "annealed_2d",
+      "seed": 1,
+      "train_minutes": 0.1
     },
     {
       "kind": "pretrained",

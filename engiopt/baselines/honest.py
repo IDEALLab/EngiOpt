@@ -53,6 +53,7 @@ class KNNRetrieval(DatasetGenerator):
     algo_id = "knn_retrieval"
     conditional = True
     bank_eligible = True
+    tuning = ("neighbours",)
     summary = "k-nearest-neighbour retrieval from the training set, rescaled to the requested volume fraction."
     reference = "Habibi et al., J. Mech. Des. 148(6):061704 (2026)"
 
@@ -106,6 +107,7 @@ class LinearRegression(DatasetGenerator):
     algo_id = "linear_regression"
     conditional = True
     bank_eligible = True
+    tuning = ("fit_samples", "ridge")
     summary = "Ridge regression from conditions to pixels, fitted in closed form. No latent variable."
 
     fit_samples: ClassVar[int] = 2000

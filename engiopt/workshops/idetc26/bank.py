@@ -1,11 +1,19 @@
-"""The model bank: what is available to measure, named for what it is.
+"""The model bank: what is available to measure, named for the method it implies.
 
-Every member is called what it actually is -- `diffusion_2d_cond`,
+Real members are called what they actually are -- `diffusion_2d_cond`,
 `knn_retrieval`, `vqgan#2` -- because the interesting comparisons are between
 *kinds* of model, and a reader who does not know that one entry is a lookup
 table cannot ask why it is beating the networks. The names are the ones
 `engiopt` uses elsewhere, so what a participant learns here is the real
 vocabulary rather than a workshop's private one.
+
+**A `planted` member is the exception, deliberately.** It carries a name that
+implies a method it does not implement, because its job is to be ranked first by
+a column it does not deserve, and a name that announced the construction would
+be ranked last by everybody. Its `summary` is still literally true, its cost
+columns are still real, and it is disclosed with `built_to` when the physics
+board is unsealed -- see `engiopt/baselines/planted.py` for why those three
+constraints are the whole difference between a teaching device and a trick.
 
 Members are referred to by any unambiguous fragment: `"diffusion"` reaches
 `diffusion_2d_cond`, and `"cgan"` reports that it matches three and asks which.
@@ -26,13 +34,15 @@ from dataclasses import replace
 from typing import Any, Callable, TYPE_CHECKING
 
 from engiopt.baselines import BANK_ELIGIBLE
+from engiopt.baselines import PLANTED_MODELS
 from engiopt.baselines import REFERENCE_INSTRUMENTS
 
 if TYPE_CHECKING:
-    from collections.abc import Iterator
+    from collections.abc import Iterator, Mapping
 
     from engibench.core import Problem
 
+    from engiopt.baselines.base import DatasetGenerator
     from engiopt.core import Generator
     from engiopt.workshops.idetc26.config import WorkshopConfig
 
@@ -48,8 +58,12 @@ class BankMember:
         key: Stable internal identifier (`algo#seed`), used for joins with the
             sealed board and the design cache.
         kind: How this model came to exist -- `pretrained` (a trained
-            checkpoint), `baseline` (fitted from the dataset), or `reference`
-            (a calibration instrument, never ranked beside real models).
+            checkpoint), `baseline` (fitted from the dataset), `planted` (built
+            to top a column it does not deserve, ranked with the rest and
+            disclosed at the reveal), or `reference` (a calibration instrument,
+            never ranked beside real models).
+        built_to: For a planted member, what it was built to break. Empty for
+            everything else, which is what the reveal keys off.
         identity: The algorithm and seed, spelled out.
         summary: One line saying what this model actually does.
         train_minutes: What this model cost to train, when that is known.
@@ -70,6 +84,21 @@ class BankMember:
     train_minutes: float | None = None
     wins: tuple[str, ...] = ()
     loses: tuple[str, ...] = ()
+    built_to: str = ""
+
+
+_CATALOGUES: dict[str, Mapping[str, type[DatasetGenerator]]] = {
+    "baseline": BANK_ELIGIBLE,
+    "planted": PLANTED_MODELS,
+    "reference": REFERENCE_INSTRUMENTS,
+}
+"""Which catalogue each dataset-fitted `kind` draws from.
+
+One table rather than three lookups, because the three kinds are three different
+promises about how a member will be treated -- competed with, ranked and then
+disclosed, or never ranked -- and a kind that resolves in one place but not
+another is how a construction ends up in a line-up without its disclosure.
+"""
 
 
 class ModelLoadError(RuntimeError):
@@ -218,32 +247,39 @@ def _member_from_entry(
     algo = entry["algo"]
     seed = int(entry.get("seed", 1))
 
-    if kind in {"baseline", "reference"}:
-        catalogue = BANK_ELIGIBLE if kind == "baseline" else REFERENCE_INSTRUMENTS
+    if kind in _CATALOGUES:
+        catalogue = _CATALOGUES[kind]
         if algo not in catalogue:
+            # A model filed under the wrong kind is a different mistake from a
+            # typo, and "unknown baseline" would send the reader looking for a
+            # missing class that is sitting right there under another heading.
+            _refuse_wrong_catalogue(algo, kind)
             raise ValueError(f"Unknown {kind} model {algo!r}. Known: {sorted(catalogue)}.")
         cls = catalogue[algo]
-        if kind == "baseline" and not cls.bank_eligible:
-            raise ValueError(
-                f"{algo!r} is a reference instrument, not a baseline: it exists to calibrate what a metric "
-                "reads at a known input, and ranking it against real models would be a trick rather than a "
-                'measurement. Declare it with kind="reference" to show it beside the board.'
-            )
         # A dataset-fitted baseline is configurable -- kNN's `neighbours` is the
         # difference between pure retrieval and a blend of five designs -- and
         # that setting has to be declarable in the bank JSON. Without this the
         # bank silently takes the class default, which is how a bank meant to
         # hold a lookup table ended up holding a five-way average.
         options = _baseline_options(entry)
+        # The key carries the *effective* settings and a digest of the model's
+        # own source, not just what the entry declared. A checkpoint's weights
+        # are what change its fingerprint; a dataset-fitted model has knobs on
+        # the class and a mechanism in its code, and neither is in the entry.
+        # Without both, retuning a construction and re-scoring it replays the
+        # designs the previous version produced.
+        digest = cls.mechanism_digest()
+        fingerprint = {"code": digest} if digest else {}
         return BankMember(
             label=entry.get("name", ""),
-            key=_key_for(algo, seed, options),
+            key=_key_for(algo, seed, {**cls.settings(), **fingerprint, **options}),
             kind=kind,
             identity=algo,
             summary=entry.get("summary") or cls.summary,
             train_minutes=entry.get("train_minutes"),
             wins=cls.wins,
             loses=cls.loses,
+            built_to=getattr(cls, "built_to", ""),
             load=lambda: cls.from_problem(problem, problem_id=problem_id, seed=seed, **options),
         )
 
@@ -280,7 +316,46 @@ def _member_from_entry(
             load=lazy,
         )
 
-    raise ValueError(f"Unknown bank entry kind {kind!r}; expected 'pretrained', 'baseline', or 'reference'.")
+    raise ValueError(f"Unknown bank entry kind {kind!r}; expected 'pretrained', 'baseline', 'planted', or 'reference'.")
+
+
+def _refuse_wrong_catalogue(algo: str, kind: str) -> None:
+    """Explain a model that exists but was declared under the wrong heading.
+
+    The three catalogues are three different promises to a participant -- a
+    baseline competes honestly, a planted model is ranked and disclosed at the
+    reveal, a reference instrument is never ranked at all -- so filing one under
+    another kind is not a naming slip, it changes what the session claims.
+
+    Args:
+        algo: The model named in the bank entry.
+        kind: The kind it was declared as.
+
+    Raises:
+        ValueError: If `algo` is a known model of some other kind.
+    """
+    actual = next((name for name, catalogue in _CATALOGUES.items() if algo in catalogue), None)
+    if actual is None:
+        return
+
+    named, why = {
+        "baseline": (
+            "baseline",
+            "a published method that competes honestly, and demoting it to a control would hide a result "
+            "rather than calibrate one",
+        ),
+        "planted": (
+            "planted construction",
+            'built to top a column it does not deserve. Ranked, yes -- but only under kind="planted", '
+            "which is what carries its disclosure into the reveal",
+        ),
+        "reference": (
+            "reference instrument",
+            "there to calibrate what a metric reads at a known input, and ranking it against real models "
+            "would be a trick rather than a measurement",
+        ),
+    }[actual]
+    raise ValueError(f'{algo!r} was declared kind="{kind}", but it is a {named}: {why}.')
 
 
 def _resolve_local_dir(path: str | None) -> str | None:

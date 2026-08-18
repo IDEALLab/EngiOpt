@@ -318,6 +318,38 @@ def test_a_tampered_board_is_detected(tmp_path: Path) -> None:
         unseal(destination, "phrase")
 
 
+def test_a_suspect_the_board_predates_comes_back_blank_not_refused(tmp_path: Path) -> None:
+    """A line-up gains a member before the simulator has been run over it.
+
+    That is a normal state -- the cheap board moves in minutes and the physics
+    board takes a cluster job -- so the eight rows that are ready must not be
+    taken down by the three that are not. Only a board covering nobody is an
+    error, because that means the wrong file entirely.
+    """
+    import pandas as pd
+
+    from engiopt.workshops.idetc26.seal import seal
+
+    board = "key,iog,cog\nknn_retrieval#1,1.0,2.0\n"
+    path = tmp_path / "board.csv.enc"
+    seal(board, "pass", path)
+
+    from engiopt.workshops.idetc26.bank import BankMember
+    from engiopt.workshops.idetc26.bank import ModelBank
+
+    def member(key: str, label: str) -> BankMember:
+        return BankMember(label=label, key=key, kind="pretrained", identity=label, summary="", load=lambda: None)
+
+    case = _bare(tmp_path)
+    case.bank = ModelBank(members=[member("knn_retrieval#1", "knn_retrieval"), member("planted_2d#1", "planted_2d")])
+
+    rows = case.physics("pass", path=path)
+
+    assert list(rows.index) == ["knn_retrieval", "planted_2d"]
+    assert rows.loc["knn_retrieval", "iog"] == 1.0
+    assert pd.isna(rows.loc["planted_2d", "iog"]), "an uncovered suspect must be blank, not fabricated"
+
+
 def test_a_missing_board_says_where_it_looked(tmp_path: Path) -> None:
     """A missing seal on the day must not surface as a stack trace."""
     with pytest.raises(SealError, match="No sealed board"):

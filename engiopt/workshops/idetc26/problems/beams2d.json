@@ -53,6 +53,12 @@
       "config_fingerprint": "1151406c"
     },
     {
+      "kind": "planted",
+      "algo": "coarse_to_fine_2d",
+      "seed": 1,
+      "train_minutes": 0.1
+    },
+    {
       "kind": "pretrained",
       "algo": "diffusion_2d_cond",
       "seed": 1,
@@ -78,12 +84,24 @@
       "summary": "The same cGAN, different hyperparameters."
     },
     {
+      "kind": "planted",
+      "algo": "portfolio_2d",
+      "seed": 1,
+      "train_minutes": 0.1
+    },
+    {
       "kind": "pretrained",
       "algo": "gan_cnn_2d",
       "seed": 1,
       "config_fingerprint": "6293adb3",
       "train_minutes": 3.4,
       "summary": "Unconditional GAN. It never sees the brief."
+    },
+    {
+      "kind": "planted",
+      "algo": "annealed_2d",
+      "seed": 1,
+      "train_minutes": 0.1
     },
     {
       "kind": "pretrained",
