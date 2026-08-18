@@ -186,8 +186,17 @@ def compute_median_sigma(x: np.ndarray, y: np.ndarray | None = None) -> float:
 
     A fixed bandwidth cannot serve two spaces at once: pixel space and a pruned
     latent space differ in scale by orders of magnitude, and a kernel sized for
-    one saturates in the other. The median pairwise distance adapts to whichever
-    space it is handed.
+    one saturates in the other. A bandwidth taken from the data adapts to
+    whichever space it is handed.
+
+    Precisely, this returns `sqrt(median(d^2) / 2)`, which is the **median
+    distance divided by sqrt(2)** -- the `gamma = 1 / median(d^2)` form of the
+    median heuristic. Under the kernel `exp(-d^2 / 2 sigma^2)` that puts a pair
+    at the median distance at `exp(-1)`, not `exp(-0.5)`. Both conventions are
+    called "the median heuristic"; this is the one in force, it is applied
+    identically in pixel, PCA and latent space, and every published column was
+    computed under it. Said explicitly because the previous wording read as
+    "sigma is the median distance", which it is not.
 
     Sampling is capped and seeded so the bandwidth is reproducible.
 

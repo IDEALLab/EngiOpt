@@ -41,6 +41,9 @@ WEAK_SPAN = 1.15
 """Below a 15% move across the full severity range, a metric cannot separate."""
 STRONG_RHO = 0.5
 """Spearman magnitude below this is not a reliable monotone response."""
+
+MIN_POINTS = 2
+"""Fewest finite severity points a correlation is computed over."""
 FLAT_TOLERANCE = 0.01
 """Total movement below 1% of the metric's own scale counts as no resolution."""
 ENDPOINT_TOLERANCE = 1.05
@@ -79,16 +82,22 @@ def classify(rho: float, span: float, expected: str, *, flat: bool, endpoint_rat
     return "ok" if moved else "weak"
 
 
-def main() -> None:
-    """Print the failure-response grid and the list of outright failures."""
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--csv", required=True)
-    ap.add_argument("--out", default=None)
-    args = ap.parse_args()
+def grade(df: pd.DataFrame) -> pd.DataFrame:
+    """Verdict for every (instrument, family, metric) cell in a capture.
 
-    df = pd.read_csv(args.csv)
+    Split out of `main` so the same grading feeds the printed report and the
+    paper figures. A verdict computed two different ways in two places is a
+    verdict nobody can check.
+
+    Args:
+        df: A `distortion_capture` CSV, one row per (instrument, family,
+            severity, repeat).
+
+    Returns:
+        One row per cell, carrying the Spearman against severity, the span, and
+        the verdict from `classify`.
+    """
     metrics = [m for m in METRIC_NAMES if m in df.columns]
-
     records = []
     # Grouped per family, not per kind: the five fidelity corruptions do not
     # behave alike, and pooling them lets a pathology specific to one (noise
@@ -100,11 +109,10 @@ def main() -> None:
             values = sub[metric].to_numpy(dtype=float)
             sev = sub["severity"].to_numpy(dtype=float)
             ok = np.isfinite(values)
-            rho = stats.spearmanr(sev[ok], values[ok]).statistic if ok.sum() > 2 else np.nan  # noqa: PLR2004
+            rho = stats.spearmanr(sev[ok], values[ok]).statistic if ok.sum() > MIN_POINTS else np.nan
 
             clean = np.nanmedian(values[sev == 0])
             worst = np.nanmedian(values[sev == sev.max()])
-            endpoint_ratio = np.nan
             if not np.isfinite(clean) or clean == 0:
                 span = np.inf
             else:
@@ -132,8 +140,20 @@ def main() -> None:
                     "flat": flat,
                 }
             )
+    return pd.DataFrame(records)
 
-    res = pd.DataFrame(records)
+
+def main() -> None:
+    """Print the failure-response grid and the list of outright failures."""
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--csv", required=True)
+    ap.add_argument("--out", default=None)
+    args = ap.parse_args()
+
+    captured = pd.read_csv(args.csv)
+    metrics = [m for m in METRIC_NAMES if m in captured.columns]
+
+    res = grade(captured)
     pd.set_option("display.width", 250)
 
     for instrument, sub in res.groupby("instrument", sort=False):

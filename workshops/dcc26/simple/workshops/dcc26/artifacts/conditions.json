@@ -1,0 +1,146 @@
+[
+  {
+    "volfrac": 0.26249998807907104,
+    "rmin": 3.25,
+    "forcedist": 0.8500000238418579,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.38749998807907104,
+    "rmin": 2.0,
+    "forcedist": 0.0,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.3499999940395355,
+    "rmin": 3.0,
+    "forcedist": 0.05000000074505806,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.36250001192092896,
+    "rmin": 4.0,
+    "forcedist": 0.8999999761581421,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.2874999940395355,
+    "rmin": 3.5,
+    "forcedist": 0.0,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.17499999701976776,
+    "rmin": 2.25,
+    "forcedist": 0.25,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.3499999940395355,
+    "rmin": 3.0,
+    "forcedist": 0.44999998807907104,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.2874999940395355,
+    "rmin": 3.75,
+    "forcedist": 0.30000001192092896,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.4000000059604645,
+    "rmin": 4.0,
+    "forcedist": 0.6499999761581421,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.23749999701976776,
+    "rmin": 3.75,
+    "forcedist": 0.800000011920929,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.26249998807907104,
+    "rmin": 1.5,
+    "forcedist": 0.44999998807907104,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.1875,
+    "rmin": 2.5,
+    "forcedist": 0.25,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.30000001192092896,
+    "rmin": 3.0,
+    "forcedist": 0.15000000596046448,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.20000000298023224,
+    "rmin": 2.75,
+    "forcedist": 0.0,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.1875,
+    "rmin": 1.5,
+    "forcedist": 0.10000000149011612,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.21250000596046448,
+    "rmin": 4.0,
+    "forcedist": 0.10000000149011612,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.20000000298023224,
+    "rmin": 3.25,
+    "forcedist": 0.75,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.3125,
+    "rmin": 1.75,
+    "forcedist": 0.75,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.2750000059604645,
+    "rmin": 2.75,
+    "forcedist": 0.10000000149011612,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.17499999701976776,
+    "rmin": 2.25,
+    "forcedist": 0.30000001192092896,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.30000001192092896,
+    "rmin": 4.0,
+    "forcedist": 0.8500000238418579,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.4000000059604645,
+    "rmin": 1.5,
+    "forcedist": 0.05000000074505806,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.2750000059604645,
+    "rmin": 2.5,
+    "forcedist": 0.5,
+    "overhang_constraint": 0.0
+  },
+  {
+    "volfrac": 0.20000000298023224,
+    "rmin": 2.5,
+    "forcedist": 0.949999988079071,
+    "overhang_constraint": 0.0
+  }
+]

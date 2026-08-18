@@ -216,3 +216,17 @@ ladder_checkpoints.json
 # Working notes from AI sessions. Useful locally, never part of the project.
 claude_markdowns/
 .claude/
+
+# Scratch design cache written by the workshop tools; regenerated on demand.
+idetc26_work/
+
+# These carry a plaintext WANDB_API_KEY. Ignored so no `git add -A` can publish
+# it; the key itself still needs rotating, and the scripts need it read from the
+# environment before they can be tracked.
+run_distortion_capture.sh
+run_eval_all.sh
+run_eval_cgan_sweep.sh
+run_eval_missing.sh
+run_eval_thermoelastic.sh
+run_lv_only_eval.sh
+run_lv_only_eval_sweep.sh

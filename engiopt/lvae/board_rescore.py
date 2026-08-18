@@ -24,6 +24,7 @@ Example:
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 import time
 
 import pandas as pd
@@ -52,9 +53,19 @@ CHEAP = [
     "lv_paired_distance",
     "pca_paired_distance",
     "pixel_paired_distance",
-    # The units the lv_*/pca_* columns are in; the PCA control is fitted to the
-    # instrument's active width, so a board without these cannot be checked.
+    # The rung between PCA and the instrument: a least-volume space trained
+    # without the performance constraint. Its whole purpose is to sit on the
+    # board beside its lv_ twin, so the ladder can say how much of the gain is
+    # "a learned compressed space" and how much is "performance-awareness".
+    "lvoff_mmd",
+    "lvoff_coverage",
+    "lvoff_vendi",
+    "lvoff_paired_distance",
+    # The units the lv_*/lvoff_*/pca_* columns are in; the PCA control is fitted
+    # to the instrument's active width, so a board without these cannot be
+    # checked, and the two learned rungs need not share a width either.
     "lv_active_dims",
+    "lvoff_active_dims",
     "pca_dims",
 ]
 PHYSICS = ["iog", "cog", "fog", "iog_median", "cog_median", "fog_median"]
@@ -81,8 +92,21 @@ def main() -> None:
 
     evaluator = Evaluator.for_problem(args.problem_id, spec=args.spec)
 
+    # Restartable for the same reason `physics_board` is. Rescoring resamples
+    # every generator, and on a 200-row board with 46 diffusion packages that is
+    # hours -- long enough that a job dying at the end used to cost the whole
+    # run. Rows land in a sidecar as they finish; the final CSV is written from
+    # it plus whatever this pass adds.
+    partial = Path(f"{args.out or f'board_rescored_{args.problem_id}.csv'}.partial")
+    prior = pd.read_csv(partial) if partial.exists() else pd.DataFrame(columns=["key"])
+    done = set(prior["key"])
+    if done:
+        print(f"resuming: {len(done)} rows already scored in {partial}")
+
     rows = []
     for key in board["key"]:
+        if key in done:
+            continue
         # Board keys are "{algo}/{config_fingerprint}/s{seed}"; "default" means
         # the package published at the training script's own defaults.
         algo, fingerprint, seed_part = key.split("/")
@@ -108,10 +132,12 @@ def main() -> None:
         except Exception as exc:  # noqa: BLE001 - one bad package must not end the board
             print(f"  {key}: FAILED {type(exc).__name__}: {str(exc)[:100]}")
             continue
-        rows.append({"key": key, **{m: scores.get(m) for m in CHEAP}})
+        row = {"key": key, **{m: scores.get(m) for m in CHEAP}}
+        rows.append(row)
+        pd.DataFrame([row]).to_csv(partial, mode="a", header=not partial.exists(), index=False)
         print(f"  {key:32s} {time.perf_counter() - started:5.1f}s  mmd={scores.get('mmd'):.4f}")
 
-    fresh = pd.DataFrame(rows)
+    fresh = pd.concat([prior, pd.DataFrame(rows)], ignore_index=True) if rows else prior
     merged = fresh.merge(board[["key", "algo", *PHYSICS]], on="key", how="inner")
     out = args.out or f"board_rescored_{args.problem_id}.csv"
     merged.to_csv(out, index=False)
@@ -153,6 +179,56 @@ def report(merged: pd.DataFrame) -> None:
             a, b = abs(result.loc[pixel, "iog"]), abs(result.loc[latent, "iog"])
             gain = b / a if a else float("inf")
             print(f"  {pixel:14s} {a:.3f}  ->  {latent:14s} {b:.3f}   gain {gain:.2f}x")
+
+    ladder(result)
+
+
+LADDER = {
+    "does it match the data?": ("mmd", "pca_mmd", "lvoff_mmd", "lv_mmd"),
+    "did it cover the modes?": (None, "pca_coverage", "lvoff_coverage", "lv_coverage"),
+    "how many distinct designs?": ("pixel_vendi", "pca_vendi", "lvoff_vendi", "lv_vendi"),
+    "did it answer the condition?": (
+        "pixel_paired_distance",
+        "pca_paired_distance",
+        "lvoff_paired_distance",
+        "lv_paired_distance",
+    ),
+}
+"""The four rungs, per question: pixels, a matched linear subspace, a learned
+least-volume space without the performance constraint, and the instrument.
+
+The third rung is the one that decides what the method claims. Pixels to PCA
+measures dimensionality reduction; PCA to recon-only measures nonlinearity; and
+recon-only to the instrument measures the performance constraint alone -- the
+only step no cheaper representation can reproduce."""
+
+
+def ladder(result: pd.DataFrame, target: str = "iog_median") -> None:
+    """Print the ablation ladder: the same question, climbing four spaces.
+
+    Args:
+        result: Spearman table indexed by metric, columns per physics target.
+        target: Which physics column to read the ladder against. Defaults to the
+            median, since the mean optimality gap is set by its worst design.
+    """
+    if target not in result.columns:
+        return
+    print(f"\n=== the ladder: |rho| vs {target}, same question in four spaces ===")
+    header = f"  {'question':30s} {'pixel':>8s} {'PCA':>8s} {'LV recon':>9s} {'LV perf':>8s}   {'constraint':>10s}"
+    print(header)
+    for question, rungs in LADDER.items():
+        cells = []
+        for metric in rungs:
+            value = abs(result.loc[metric, target]) if metric in result.index else float("nan")
+            cells.append(f"{value:8.3f}" if value == value else f"{'--':>8s}")  # noqa: PLR0124 - NaN check
+        off, on = cells[2].strip(), cells[3].strip()
+        try:
+            delta = f"{float(on) - float(off):+10.3f}"
+        except ValueError:
+            delta = f"{'--':>10s}"
+        print(f"  {question:30s} {cells[0]} {cells[1]} {cells[2]:>9s} {cells[3]}   {delta}")
+    print("\n  'constraint' is LV perf minus LV recon -- the gain attributable to the")
+    print("  performance constraint alone, both arms being learned, compressed and nonlinear.")
 
 
 if __name__ == "__main__":

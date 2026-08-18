@@ -1,0 +1,40 @@
+\section{Related Work}
+\label{sec:related_work}
+
+\subsection{Evaluation Metrics for Generative Models}
+\label{sec:genai_metrics}
+
+The computer vision community has invested significant effort in developing quantitative metrics for generative models.
+The Inception Score (IS)~\cite{salimans2016improved} was among the first widely adopted metrics, measuring quality and diversity through a pretrained classifier's output distributions, while the Fr\'{e}chet Inception Distance (FID)~\cite{heusel2017gans} became the de facto standard by comparing feature statistics between real and generated distributions.
+Recognizing that single-number metrics conflate sample quality with distributional coverage, subsequent work decomposed evaluation into complementary axes: precision and recall~\cite{kynkaanniemi2019improved}, density and coverage~\cite{naeem2020reliable}, and DPP-based diversity~\cite{elfeki2019gdpp}.
+Maximum Mean Discrepancy (MMD)~\cite{gretton2012kernel}, a kernel-based two-sample test, provides a distribution-free alternative that does not require a learned feature extractor.
+As surveyed by Borji~\cite{borji2022pros}, no single metric suffices for all evaluation needs even within image generation.
+Analogous domain-specific adaptations have emerged in other fields---for instance, the Fr\'{e}chet ChemNet Distance~\cite{preuer2018frechet} replaces InceptionV3 with a chemistry-specific network for molecular generation---highlighting that metric design is inseparable from the domain in which it is applied.
+
+A common thread across these metrics is that the most effective ones---FID, Fr\'{e}chet ChemNet Distance---do not compare samples directly in their raw representation, but in a \emph{learned feature space} that captures domain-relevant structure.
+FID's success, for example, stems not from measuring pixel-level similarity, but from comparing distributions in an InceptionV3 feature space trained to encode perceptually meaningful variation.
+In engineering design, however, no analogous pretrained feature extractor exists, and the raw representation (e.g., a pixel grid of material densities) conflates geometric structure with functional performance.
+Two designs may appear nearly identical in pixel space yet differ substantially in compliance or thermal conductivity, while designs that look very different may perform equivalently.
+This means that distributional similarity metrics applied in pixel space---even principled ones like MMD---cannot distinguish between performance-relevant and performance-irrelevant variation, fundamentally limiting their ability to assess generative model quality for engineering applications.
+
+\subsection{Evaluation Gaps in Generative Engineering Design}
+\label{sec:engineering_metrics}
+
+Despite growing adoption of deep generative models for engineering design problems~\cite{regenwetter2022deep}---including topology optimization~\cite{oh2019deep, nie2021topologygan}, airfoil synthesis~\cite{chen2019aerodynamic, chen2020beziergan, chen2022manifold}, and conditional inverse design~\cite{nobari2021pcdgan, nobari2021rangegan, habibi2024diffusion}---the field lacks agreed-upon standards for what constitutes a good generative model for engineering or which metrics to prioritize during training and evaluation.
+Regenwetter et al.~\cite{regenwetter2023beyond} catalogued over 25 candidate metrics spanning similarity, diversity, performance, and constraint satisfaction, while other works have proposed DPP-based diversity objectives~\cite{ahmed2018ranking, chen2021padgan, chen2021mopadgan}, constraint enforcement methods~\cite{nobari2021rangegan, regenwetter2024negative}, and conditioning accuracy scores~\cite{nobari2021pcdgan}.
+The breadth of proposed metrics underscores that evaluation in engineering design is multifaceted, but the proliferation of ad hoc evaluation protocols---each study selecting a different subset---has made cross-method comparison difficult.
+
+At the core of this problem is the relationship between geometric similarity and engineering performance.
+Habibi et al.~\cite{habibi2025mse} demonstrated this directly: models tuned to minimize pixel-level MSE between predicted and ground-truth designs systematically underperform models tuned against the true engineering objective function, despite achieving lower reconstruction error.
+This finding reveals that reconstruction fidelity---the metric most commonly used to train and select generative design models---is a poor proxy for actual design quality.
+The implication for evaluation is equally stark: if pixel-level similarity is misleading as a training objective, distributional similarity metrics computed in pixel space (e.g., MMD on raw designs) are likely to be similarly unreliable as evaluation metrics, since they inherit the same inability to distinguish performance-relevant from performance-irrelevant geometric variation.
+
+What is needed, then, is not to abandon distributional similarity metrics, but to compute them in a feature space that captures performance-relevant structure---paralleling FID's use of InceptionV3 features rather than raw pixels, or the Fr\'{e}chet ChemNet Distance's use of a chemistry-specific encoder~\cite{preuer2018frechet}.
+Chen and Fuge~\cite{chen2024compressing} introduced least-volume autoencoders that learn minimal-volume latent representations by regularizing the geometric volume of the encoding, producing compact latent spaces that capture the intrinsic dimensionality of design manifolds~\cite{chen2024isometric}.
+When augmented with performance prediction, such representations learn to encode not just geometric structure but performance-relevant variation, offering a natural feature space in which distributional metrics like MMD can meaningfully reflect engineering quality rather than pixel-level coincidence.
+
+Standardized benchmarks have begun to address the reproducibility dimension of this problem.
+Domain-specific datasets such as BIKED~\cite{regenwetter2021biked}, BikeBench~\cite{regenwetter2025bikebench}, AFBench~\cite{liu2024afbench}, and ShapeNet~\cite{chang2015shapenet} provide standardized design repositories, while EngiBench~\cite{engibench2025} offers a unified API spanning aeronautics, heat conduction, photonics, and structural mechanics, enabling fair comparison of generative algorithms across diverse engineering domains.
+Yet even with shared datasets and simulation capabilities, the question of \emph{which metrics to report and optimize} remains open, particularly regarding how to connect distributional evaluation to downstream optimization performance.
+
+This work addresses this gap by [TODO: brief statement of your contribution].

@@ -87,7 +87,10 @@ class Diffusion2DCond(Generator):
         )
         generator = cls(
             net=net,
-            sampler=DiffusionSampler(num_timesteps, betas),
+            # `.to(device)` is not decoration: the schedule is indexed five
+            # times per denoising step, and a host-resident schedule turns each
+            # of those into a pipeline stall on CUDA or MPS.
+            sampler=DiffusionSampler(num_timesteps, betas).to(device),
             num_timesteps=num_timesteps,
             problem=problem,
             device=device,

@@ -1,0 +1,79 @@
+\documentclass[11pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage{geometry}
+\geometry{margin=1in}
+\usepackage{hyperref}
+\usepackage{graphicx}
+\usepackage{mathpazo}
+\usepackage{enumitem}
+
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{0.8em}
+\tolerance=1000
+
+\title{\textbf{VISCon 2026 Talk Proposal}\\[0.4em]
+\Large When AI Designs, Who Checks the Physics?\\[0.2em]
+\normalsize Benchmarking AI for Engineering Design with EngiBench}
+
+\author{
+    \textbf{Matthew Keeler} \\
+    Lead speaker, D-MAVT, ETH Z\"urich \\
+    \texttt{mkeeler@ethz.ch}
+    \and
+    \textbf{Soheyl Massoudi} \\
+    Co-author, D-MAVT, ETH Z\"urich \\
+    \texttt{smassoudi@ethz.ch}
+    \and
+    \textbf{Mark Fuge} \\
+    Co-author, D-MAVT, ETH Z\"urich \\
+    \texttt{mafuge@ethz.ch}
+}
+
+\date{October 10, 2026 \textbar{} ETH Zurich}
+
+\begin{document}
+
+\maketitle
+
+\section*{Talk Format}
+
+30-minute standard talk + 15 minutes Q\&A. No background in engineering design required.
+
+\section*{Summary}
+
+Generative AI can now produce engineering designs---structural beams, heat sinks, photonic devices---in milliseconds. The outputs often look convincing. But in engineering, looking right and being right are different things: two designs can appear nearly identical yet behave completely differently once you simulate them. A bridge that looks plausible still has to carry load.
+
+This creates a measurement problem. Most published methods are evaluated on private datasets with incompatible metrics, making it nearly impossible to compare results across papers or tell which models genuinely work. The field publishes rapidly, but without shared evaluation, it is unclear how much of that represents real progress.
+
+This talk introduces \textbf{EngiBench}, an open-source benchmarking framework published at NeurIPS 2025, and \textbf{EngiOpt}, a companion library of baseline algorithms. Together they provide standardized datasets, physics-based simulators, and evaluation pipelines across multiple engineering domains (see Figure~\ref{fig:engibench}), so that any generative method---GAN, VAE, diffusion model, or otherwise---can be tested on the same problems under the same rules. We will walk through a concrete example end-to-end: generating a structural design from conditions, checking its constraints, simulating it, and comparing it against baselines. The audience will see firsthand how a design that ``looks right'' can fail once physics gets a vote.
+
+\begin{figure}[h]
+    \centering
+    \includegraphics[width=0.82\textwidth]{figures/engibench_problems.png}
+    \caption{Engineering domains currently supported by EngiBench. Each problem bundles a dataset, a physics-based simulator, and a standardized evaluation pipeline.}
+    \label{fig:engibench}
+\end{figure}
+
+\section*{Who Should Care}
+
+This talk is designed for a mixed audience. Different listeners will take away different things:
+
+\begin{itemize}[nosep]
+    \item \textbf{ML and CS researchers} get a new class of challenging benchmark problems. Unlike image or text generation, engineering tasks have hard physical constraints, multiple valid solutions, and objectives that can only be evaluated through simulation. Standard generative metrics (FID, SSIM) do not apply. Models that excel on vision benchmarks may fail here in surprising ways---making these problems a rigorous and underexplored testbed for generative methods.
+    \item \textbf{Engineers and domain scientists} get open-source infrastructure that was previously inaccessible without significant setup cost: curated datasets of optimal designs, wrapped simulators (finite element, electromagnetic), constraint-checking utilities, and a metric suite that measures feasibility, diversity, and performance in one pass. EngiBench eliminates the overhead of building a bespoke evaluation pipeline for every new project.
+    \item \textbf{Anyone building evaluation infrastructure} in adjacent fields---drug discovery, materials science, architecture, robotics---can take away a concrete design pattern for benchmarking AI in domains where ground truth comes from simulation rather than human judgment. The talk will make explicit the design decisions behind EngiBench (what to standardize, what to leave flexible, how to handle multi-objective evaluation) that generalize beyond engineering.
+\end{itemize}
+
+The thread connecting these perspectives is a question that extends far beyond engineering: \textbf{when AI systems generate artifacts that must work in the real world, how do we decide what counts as progress?} EngiBench is one answer to that question---but more importantly, it is a lens for examining it. The talk uses EngiBench to make visible the hidden choices that every benchmark encodes: what to measure, what to ignore, and whose definition of ``good'' gets baked into the leaderboard.
+
+\section*{Speaker Background}
+
+Matthew Keeler is a doctoral researcher in D-MAVT at ETH Z\"urich, where he develops generative machine learning methods for engineering design. He is a lead developer of EngiBench (NeurIPS 2025 Datasets and Benchmarks) and EngiOpt, and has presented this work at NeurIPS, IDETC, and other venues. Soheyl Massoudi and Mark Fuge are co-developers of the framework and co-authors of the EngiBench paper.
+
+\section*{Why This Talk Fits VISCon}
+
+The talk pairs a timely AI topic with a perspective most CS audiences have not encountered: what happens when generative models have to satisfy physics, not just human taste. It opens with a visual surprise (guess which AI-generated design actually works), grounds the technical content in a live end-to-end demo, and closes with a question that extends well beyond engineering---when AI produces artifacts with real-world consequences, what should count as evidence of progress? The style is narrative and visual, not a lecture; the tools are open source, not a product pitch.
+
+\end{document}

@@ -25,7 +25,7 @@ several hundred spreads across an array without any coordination.
 
 Example:
     python -m engiopt.evaluation.evaluate_pool --problem-id beams2d \
-        --spec beams2d/v2 --shard 0/12 --publish --out pool_beams2d.csv
+        --spec beams2d/v1 --shard 0/12 --publish --out pool_beams2d.csv
 """
 
 from __future__ import annotations

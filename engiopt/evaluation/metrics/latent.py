@@ -233,6 +233,23 @@ def lv_coverage(ctx: EvaluationContext) -> float:
     an arbitrary radius.
     """
     generated, reference = ctx.latent_codes
+    return _coverage(generated, reference)
+
+
+def _coverage(generated: npt.NDArray, reference: npt.NDArray) -> float:
+    """Fraction of reference points with a generated point inside the local radius.
+
+    Shared by `lv_coverage` and its recon-only twin so the ladder's two learned
+    rungs cannot drift apart: a difference between them has to come from the
+    space, not from one of them computing `tau` differently.
+
+    Args:
+        generated: Generated designs in some space, `(n, d)`.
+        reference: Reference optima in the same space, `(m, d)`.
+
+    Returns:
+        The covered fraction, in `[0, 1]`.
+    """
     from scipy.spatial.distance import cdist
 
     within_reference = cdist(reference, reference)
@@ -269,6 +286,110 @@ def lv_vendi(ctx: EvaluationContext) -> float:
 # ----------------------------------------------------------------------
 # Pixel-space baselines -- what the latent metrics have to beat
 # ----------------------------------------------------------------------
+
+
+# ----------------------------------------------------------------------
+# The recon-only rung -- the same questions, in a least-volume space trained
+# without the performance constraint
+# ----------------------------------------------------------------------
+#
+# `pca_*` controls for dimensionality and `lv_*` measures in the
+# performance-constrained space. Between them sits the rung that decides what
+# the method is actually claiming: a *learned, compressed, nonlinear* space that
+# simply has no performance constraint. Without it, "measure in the latent
+# space" and "measure in a performance-aware space" cannot be told apart, and
+# the honest reading of the corruption battery -- that a matched linear
+# projection recovers most of the benefit -- has no rebuttal.
+#
+# The companion is trained at the same reconstruction threshold as the
+# instrument, so the difference between these columns and their `lv_` twins is
+# attributable to the constraint. Where the spec's pair is not matched on that
+# threshold (photonics2d, see its notes), these columns inherit the same caveat.
+
+_RECON_ONLY_REQUIRES = ("latent_instrument", "latent_instrument.recon_only_config_fingerprint")
+
+
+@register_metric(
+    "lvoff_mmd",
+    requires=_RECON_ONLY_REQUIRES,
+    family="latent",
+    cost="cheap",
+    higher_is_better=False,
+    description="lv_mmd measured in the reconstruction-only companion's space, the ladder rung below it.",
+)
+def lvoff_mmd(ctx: EvaluationContext) -> float:
+    """What `lv_mmd` reads without the performance constraint."""
+    generated, reference = ctx.recon_only_codes
+    return float(metrics_mod.mmd(generated, reference, sigma=ctx.recon_only_sigma))
+
+
+@register_metric(
+    "lvoff_coverage",
+    requires=_RECON_ONLY_REQUIRES,
+    family="latent",
+    cost="cheap",
+    higher_is_better=True,
+    description="lv_coverage measured in the reconstruction-only companion's space.",
+)
+def lvoff_coverage(ctx: EvaluationContext) -> float:
+    """What `lv_coverage` reads without the performance constraint."""
+    generated, reference = ctx.recon_only_codes
+    return _coverage(generated, reference)
+
+
+@register_metric(
+    "lvoff_vendi",
+    requires=_RECON_ONLY_REQUIRES,
+    family="diversity",
+    cost="cheap",
+    higher_is_better=True,
+    description="lv_vendi measured in the reconstruction-only companion's space.",
+)
+def lvoff_vendi(ctx: EvaluationContext) -> float:
+    """What `lv_vendi` reads without the performance constraint."""
+    generated, _ = ctx.recon_only_codes
+    return metrics_mod.vendi_score(generated, sigma=ctx.recon_only_sigma)
+
+
+@register_metric(
+    "lvoff_paired_distance",
+    requires=_RECON_ONLY_REQUIRES,
+    family="conditions",
+    cost="cheap",
+    higher_is_better=False,
+    description="lv_paired_distance measured in the reconstruction-only companion's space.",
+)
+def lvoff_paired_distance(ctx: EvaluationContext) -> float:
+    """What `lv_paired_distance` reads without the performance constraint.
+
+    Uses the companion's full active width rather than a leading `perf_dim`
+    slice: an arm trained without the performance head has no performance-
+    carrying prefix, so slicing one would measure an arbitrary subset of axes
+    and read as a deficit that is really an artifact of the comparison.
+    """
+    generated, reference = ctx.recon_only_codes
+    scale = reference.std(axis=0)
+    scale[scale == 0] = 1.0
+    return float(np.linalg.norm((generated - reference) / scale, axis=1).mean())
+
+
+@register_metric(
+    "lvoff_active_dims",
+    requires=_RECON_ONLY_REQUIRES,
+    family="distribution",
+    cost="cheap",
+    higher_is_better=None,
+    description="Active latent width of the reconstruction-only companion, the units its columns are in.",
+)
+def lvoff_active_dims(ctx: EvaluationContext) -> float:
+    """The companion's width, which need not equal the instrument's.
+
+    Reported for the same reason `lv_active_dims` is: the companion's columns
+    are dimension-sensitive, and a ladder that compares them against `lv_*`
+    without both widths on the board cannot tell a constraint effect from a
+    width difference.
+    """
+    return float(get_active_mask(ctx.require_recon_only_lvae().encoder).sum())
 
 
 @register_metric(

@@ -129,9 +129,17 @@ def get_index_from_list(vals: th.Tensor, t: th.Tensor, x_shape: tuple[int, ...])
     """Returns a specific index t of a passed list of values vals.
 
     while considering the batch dimension.
+
+    The gather happens on whichever device `vals` lives on, which matters more
+    than it looks: this used to force `t.cpu()`, and `t` is on the accelerator.
+    Every call therefore drained the CUDA/MPS queue and copied back, five times
+    per denoising step -- five thousand pipeline stalls in a 1000-step sampling
+    chain, none of them doing any work. With the schedule moved to the device
+    (`DiffusionSampler.to`), both tensors are already there and neither
+    conversion below costs anything.
     """
     batch_size = t.shape[0]
-    out = vals.gather(-1, t.cpu())
+    out = vals.gather(-1, t.to(vals.device))
     return out.reshape(batch_size, *((1,) * (len(x_shape) - 1))).to(t.device)
 
 
@@ -184,6 +192,27 @@ class DiffusionSampler:
         self.posterior_variance = self.betas * (1.0 - self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
         self.posterior_mean_coef1 = self.betas * th.sqrt(self.alphas_cumprod_prev) / (1.0 - self.alphas_cumprod)
         self.posterior_mean_coef2 = (1.0 - self.alphas_cumprod_prev) * th.sqrt(self.alphas) / (1.0 - self.alphas_cumprod)
+
+    def to(self, device: th.device) -> DiffusionSampler:
+        """Move the precomputed noise schedule onto a device, once.
+
+        The schedule is a few thousand floats and never changes, so it belongs
+        wherever the sampling happens. Leaving it on the host is what made every
+        coefficient lookup a round trip; doing this once removes all of them.
+
+        The values are only *indexed* here -- every multiplication already
+        happened on the accelerator -- so sampling output is unchanged.
+
+        Args:
+            device: Where the model and the noisy designs live.
+
+        Returns:
+            This sampler, so it can be moved inline where it is constructed.
+        """
+        for name, value in vars(self).items():
+            if isinstance(value, th.Tensor):
+                setattr(self, name, value.to(device))
+        return self
 
     def _posterior_mean(self, noise_pred: th.Tensor, x_noisy: th.Tensor, t: th.Tensor) -> th.Tensor:
         sqrt_alphas_cumprod_t = get_index_from_list(self.sqrt_alphas_cumprod, t, x_noisy.shape)

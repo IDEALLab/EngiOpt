@@ -59,6 +59,22 @@ class Args:
     """Metric names; defaults to the spec's list."""
     include_expensive: bool = False
     """Run simulator-backed metrics (COG/IOG/FOG, feasibility). Slow."""
+    sigma: float | None = None
+    """Kernel bandwidth for `mmd`, `dpp` and the vendi family.
+
+    Omitted, each metric calibrates its own bandwidth by the median heuristic on
+    the validation split, in whichever space it measures -- which is the default
+    because it is the only setting comparable across a board. Set this to
+    interrogate that choice: sweep it and watch whether the ranking moves. Rows
+    scored under an override carry it in the `kernel_sigma` column."""
+    n_samples: int | None = None
+    """Score only this many of the spec's conditions, instead of all of them."""
+    random_conditions: bool = False
+    """Draw those `n_samples` conditions at random rather than taking the first.
+
+    The draw is shared by every generator in the run, so the board still
+    compares like with like, and it is seeded on `n_samples` so a rerun asks the
+    same questions."""
     output_csv: str = "leaderboard_{problem_id}.csv"
     """Where to append results locally; may include `{problem_id}`."""
     push_to: str | None = None
@@ -248,10 +264,20 @@ def main(args: Args) -> int:
         print("No generators could be loaded; nothing was evaluated.")
         return 1
 
+    subset = evaluator.condition_subset(args.n_samples, random=args.random_conditions)
+    if args.sigma is not None or subset is not None:
+        scored = evaluator.spec.n_samples if subset is None else len(subset)
+        print(
+            f"Non-default protocol: {scored} conditions"
+            + (f", kernel sigma forced to {args.sigma:g}" if args.sigma is not None else "")
+            + ". These rows are not comparable to ones scored under the spec's defaults."
+        )
     board = evaluator.leaderboard(
         generators,
         only=list(args.metrics) or None,
         include_expensive=args.include_expensive,
+        sigma=args.sigma,
+        indices=subset,
         on_error=args.on_error,
     )
     if board.empty:

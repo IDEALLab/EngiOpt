@@ -55,7 +55,7 @@ def dpp(ctx: EvaluationContext) -> float:
     """Determinantal Point Process diversity of the generated designs.
 
     Kept in its published raw-determinant form on purpose. It is already frozen
-    into `beams2d/v2` and recorded in every `metrics.json` written against it,
+    into `beams2d/v1` and recorded in every `metrics.json` written against it,
     and silently changing what a column *means* is the failure the whole spec
     mechanism exists to prevent. `dpp_geometric` is the repaired column; report
     that one and leave this where it is.

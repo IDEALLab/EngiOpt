@@ -262,6 +262,47 @@ class EvaluationContext:
         return encode_active(lvae.encoder, np.asarray(self.train_designs), device)
 
     @cached_property
+    def recon_only_codes(self) -> tuple[npt.NDArray[Any], npt.NDArray[Any]]:
+        """The same designs encoded by the reconstruction-only companion.
+
+        This is the rung the ablation ladder was missing. `pca_*` controls for
+        dimensionality and `lv_*` measures in the performance-constrained space,
+        but nothing measured in a least-volume space trained *without* the
+        performance constraint -- so "the latent space is better" could not be
+        separated from "the performance constraint is what makes it better".
+        The companion is trained at the same reconstruction threshold, so the
+        difference between these codes and `latent_codes` is the constraint.
+
+        Returns:
+            `(generated, reference)`, each `(n, n_active)` in the companion's
+            own active subspace, which need not have the instrument's width.
+        """
+        from engiopt.lvae.encode import encode_active
+
+        lvae = self.require_recon_only_lvae()
+        device = next(lvae.encoder.parameters()).device
+        return (
+            encode_active(lvae.encoder, np.asarray(self.gen_designs), device),
+            encode_active(lvae.encoder, np.asarray(self.ref_designs), device),
+        )
+
+    @cached_property
+    def recon_only_sigma(self) -> float:
+        """Kernel bandwidth for the companion's metrics, on the same rule as the rest.
+
+        Calibrated in the companion's own latent space rather than borrowed from
+        the instrument's: the two spaces have different widths and scales, and a
+        bandwidth carried across would read as a metric difference.
+        """
+        from engiopt.lvae.encode import encode_active
+
+        if self.sigma_override is not None:
+            return self.sigma_override
+        lvae = self.require_recon_only_lvae()
+        device = next(lvae.encoder.parameters()).device
+        return metrics_mod.compute_median_sigma(encode_active(lvae.encoder, self.sigma_basis, device))
+
+    @cached_property
     def pixel_sigma(self) -> float:
         """Kernel bandwidth for pixel-space metrics, by the median heuristic.
 
