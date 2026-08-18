@@ -230,3 +230,9 @@ run_eval_missing.sh
 run_eval_thermoelastic.sh
 run_lv_only_eval.sh
 run_lv_only_eval_sweep.sh
+
+# Cluster job scripts. Machine-specific -- partitions, module loads, account
+# names and paths that only mean something on Euler -- and they source secrets
+# from $HOME/.engiopt_secrets, so they are kept out of a public repo entirely.
+slurm/
+*.slurm
