@@ -1060,16 +1060,20 @@ def _package_of(key: str) -> tuple[str, str | None, int]:
     """Split a bank key back into the checkpoint package it names.
 
     Bank keys are `algo#seed[opt=value,...]`, and the Hub addresses a package by
-    `(algo, config_fingerprint, seed)`. A key carrying no `cfg` option names the
-    canonical package -- or, for a constructed model, no package at all, which is
-    why the caller must tolerate a miss.
+    `(algo, config_fingerprint, seed)`. A key carrying neither `cfg` nor `code`
+    names the canonical package -- or no package at all, which is why the caller
+    must tolerate a miss.
     """
     head, _, options = key.partition("[")
     algo, _, seed = head.partition("#")
     fingerprint = None
     for option in options.rstrip("]").split(","):
         name, _, value = option.partition("=")
-        if name == "cfg":
+        # `cfg` is a trained checkpoint's hyperparameter fingerprint. `code` is
+        # the constructed models' equivalent -- a digest of the mechanism that
+        # built them -- and it addresses a package the same way, so both map to
+        # the same `cfg_<fp>/seed_<n>/` path on the Hub.
+        if name in {"cfg", "code"}:
             fingerprint = value
     return algo, fingerprint, int(seed or 1)
 
