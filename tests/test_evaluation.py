@@ -94,9 +94,19 @@ def test_builtin_metrics_declare_their_cost() -> None:
 
     Asserted as "exactly these are expensive" rather than "exactly these are
     cheap", so adding a cheap metric does not require editing this test while
-    still catching anything that quietly gains access to the solver.
+    still catching anything that quietly gains access to the solver. Adding an
+    expensive one is meant to land here: the median gaps are the same
+    simulator runs aggregated differently, and this list is where that is
+    declared.
     """
-    assert {spec.name for spec in METRICS.select(cost="expensive")} == {"iog", "cog", "fog"}
+    assert {spec.name for spec in METRICS.select(cost="expensive")} == {
+        "iog",
+        "cog",
+        "fog",
+        "iog_median",
+        "cog_median",
+        "fog_median",
+    }
     assert {"mmd", "dpp", "viol"} <= {spec.name for spec in METRICS.select(cost="cheap")}
 
 
