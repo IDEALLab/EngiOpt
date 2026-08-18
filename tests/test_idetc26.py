@@ -112,13 +112,51 @@ def test_a_suspect_that_is_not_a_seed_variant_is_not_named_like_one() -> None:
     """`cgan_cnn_2d#1` beside `cgan_cnn_2d#42` claims a seed difference that is not there.
 
     The derived suffix is the seed, so two configurations of one algorithm come
-    out named as if the seed were what separated them. An entry that declares a
-    `name` overrides that, and the tuned cGAN does.
+    out named as if the seed were what separated them, and an entry that
+    declares a `name` overrides that. The override has to win *before* the
+    collision check: otherwise the other member keeps a `#seed` suffix that no
+    longer separates it from anything, and the fragment `"cgan_cnn_2d"` matches
+    two members and refuses to resolve.
+
+    Asserted against the naming rule rather than against whichever line-up is
+    curated today, so retiring a suspect cannot quietly retire the check.
     """
-    config = WorkshopConfig.load(PROBLEM_ID)
-    cgans = [entry for entry in config.bank if entry["algo"] == "cgan_cnn_2d"]
-    assert len(cgans) == 2
-    assert sum(1 for entry in cgans if entry.get("name")) == 1, "one of the two must rename itself"
+    from engiopt.workshops.idetc26.bank import _handles
+
+    keys = ["cgan_cnn_2d#1", "cgan_cnn_2d#42", "vqgan#1"]
+    assert _handles(keys, declared=["", "cgan_cnn_2d_tuned", ""]) == ["cgan_cnn_2d", "cgan_cnn_2d_tuned", "vqgan"]
+    assert _handles(keys) == ["cgan_cnn_2d#1", "cgan_cnn_2d#42", "vqgan"]
+
+
+def test_every_suspect_can_be_explained_at_length(case: Case) -> None:
+    """A one-line summary cannot support an argument about whether a column is wrong.
+
+    Every member needs a real description, not just the ones somebody
+    remembered to write: a table row that says "a model somebody trained" is
+    the state this command exists to replace.
+    """
+    for member in case.bank:
+        assert len(member.description.strip()) > 80, f"{member.label} has no usable description"
+
+
+def test_explaining_a_suspect_does_not_reveal_the_construction(case: Case) -> None:
+    """`explain` runs before any board does, so it must not spoil the reveal.
+
+    The planted models' descriptions are written to be literally true and
+    non-spoiling -- a careful reader can infer, which is the intended reward --
+    but `built_to` names the column each was engineered to top, and that only
+    becomes readable when the physics board is unsealed.
+    """
+    planted = [member for member in case.bank if member.kind == "planted"]
+    assert planted, "this test proves nothing without a planted member"
+
+    for member in planted:
+        assert member.built_to, f"{member.label} carries no disclosure to withhold"
+        assert member.built_to not in member.description
+        assert member.built_to not in member.summary
+        # The give-away words, rather than the exact string: a paraphrase of
+        # the disclosure would spoil it just as thoroughly.
+        assert not {"planted", "constructed for", "built to"} & set(member.description.lower().split())
 
 
 def test_a_fragment_reaches_one_model_and_says_so_when_it_does_not(case: Case) -> None:

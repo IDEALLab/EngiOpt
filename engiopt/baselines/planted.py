@@ -185,6 +185,13 @@ class Ensemble2D(PlantedModel):
     and because a construction dropped for a measured reason should record it.
     """
 
+    description = """Takes the training designs whose briefs are closest to yours, weights
+    them by how close each brief is, and averages them into one design, then
+    rescales that to your volume budget.
+
+    Averaging is a way of hedging: the result is close to every design that
+    might have been right, rather than committing to one of them."""
+
     algo_id = "ensemble_2d"
     conditional = True
     tuning = ("neighbours",)
@@ -234,6 +241,16 @@ class Portfolio2D(PlantedModel):
     design against the optimum for *its own* condition -- and the simulator can
     see the difference.
     """
+
+    description = """Returns a *portfolio* rather than a prediction: a set of training designs
+    chosen to be as different from one another as possible, each rescaled to
+    the volume budget its brief asked for.
+
+    The set is built by farthest-point selection -- start from the most
+    unusual design, then repeatedly add whichever candidate is least like
+    everything chosen so far. Every design it gives you is a real, optimal
+    structure from the dataset. Which brief each one is handed to is decided
+    by volume alone."""
 
     algo_id = "portfolio_2d"
     conditional = True
@@ -329,6 +346,16 @@ class CoarseToFine2D(PlantedModel):
     perfectly happy with it either way.
     """
 
+    description = """Retrieves the nearest training design, coarsens it by averaging blocks of
+    pixels into a lower-resolution grid, then upsamples back to full
+    resolution with a strided transposed convolution -- the same operation
+    that sits at the end of most image decoders. Volume-matched afterwards.
+
+    Solving coarse and refining upward is standard practice in topology
+    optimization. The upsampling step is the interesting part: where the
+    kernel overlaps unevenly, neighbouring pixels receive different amounts
+    of signal."""
+
     algo_id = "coarse_to_fine_2d"
     conditional = True
     tuning = ("coarsen", "artifact")
@@ -410,6 +437,15 @@ class Annealed2D(PlantedModel):
     row into the line-up so that a team ranking on diversity and novelty picks
     it.
     """
+
+    description = """Finds the training design closest to your brief and samples around it:
+    Gaussian noise at a fixed temperature, then a constant offset so the
+    volume fraction still lands exactly on budget.
+
+    Temperature controls how far each sample strays from the retrieved
+    design. The offset matters -- rescaling to fix the budget would shrink
+    the perturbation too, so the noise is shifted onto the budget rather
+    than scaled onto it."""
 
     algo_id = "annealed_2d"
     conditional = True

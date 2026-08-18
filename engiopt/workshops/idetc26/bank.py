@@ -66,6 +66,11 @@ class BankMember:
             everything else, which is what the reveal keys off.
         identity: The algorithm and seed, spelled out.
         summary: One line saying what this model actually does.
+        description: The same thing at length, in plain words, for
+            `case.explain`. A dataset-fitted model carries its own on the class
+            beside the code it describes; a checkpoint's is declared in the
+            problem config, since the adapter's docstring is written for
+            somebody reading the source rather than somebody in the room.
         train_minutes: What this model cost to train, when that is known.
             Declared rather than measured: nothing in a checkpoint package
             records it today, so the figure comes from the family's finished
@@ -82,6 +87,7 @@ class BankMember:
     summary: str
     load: Callable[[], Generator]
     train_minutes: float | None = None
+    description: str = ""
     wins: tuple[str, ...] = ()
     loses: tuple[str, ...] = ()
     built_to: str = ""
@@ -98,6 +104,60 @@ One table rather than three lookups, because the three kinds are three different
 promises about how a member will be treated -- competed with, ranked and then
 disclosed, or never ranked -- and a kind that resolves in one place but not
 another is how a construction ends up in a line-up without its disclosure.
+"""
+
+
+TRAINED_DESCRIPTIONS = {
+    "knn_retrieval": (
+        "Looks up the one training design whose brief is closest to yours and hands it back, rescaled to "
+        "your volume budget. No network, no noise input: the same brief always gives the same design, and "
+        "it can never produce anything that is not already in the dataset."
+    ),
+    "deconv_regression": (
+        "Supervised. The brief goes in, one design comes out, and it was trained by penalising the "
+        "pixel-by-pixel difference from the right answer. It shares its upsampling stack with the "
+        "conditional GANs, so what differs between them is the training objective rather than the "
+        "architecture. Habibi et al.'s deconvolutional network."
+    ),
+    "vqgan": (
+        "Compresses designs into a grid of discrete codes drawn from a learned codebook, then trains a "
+        "transformer to write out those codes one at a time, conditioned on the brief. Sampling means "
+        "generating a code sequence and decoding it back to pixels."
+    ),
+    "diffusion_2d_cond": (
+        "Starts from pure noise and removes a little of it at a time, hundreds of times over, each step "
+        "guided by the brief. The most expensive model here to sample from, and the one whose training "
+        "objective is closest to 'match the whole distribution'."
+    ),
+    "cgan_cnn_2d": (
+        "A generator network turns a random vector plus your brief into a design, trained against a "
+        "discriminator that learns to tell generated designs from real ones. The randomness means it can "
+        "offer a different answer to the same brief each time you ask."
+    ),
+    "gan_cnn_2d": (
+        "The same adversarial setup with one thing removed: it never sees the brief. It learns what "
+        "designs look like in general and samples from that, so nothing connects what you asked for to "
+        "what comes back."
+    ),
+    "constrained_plvae_2d": (
+        "An autoencoder trained to squeeze designs into as few latent dimensions as it can while still "
+        "reconstructing them, with a further constraint tying that latent space to performance. Sampling "
+        "means drawing a point in the latent space and decoding it. It is also the family the lv_ columns "
+        "measure in -- though never the exact checkpoint being scored."
+    ),
+}
+"""Plain-language descriptions of the trained families, for `case.explain`.
+
+In code rather than in `problems/<id>.json` for two reasons. The same seven
+families appear in all three problems, so a config copy is three copies to keep
+in step; and the configs are edited constantly as line-ups change, which makes
+them the worst place to park prose that almost never changes. A bank entry may
+still override with its own `description` when a particular checkpoint needs
+saying something different about it.
+
+Not taken from the adapter docstrings, which are written for whoever maintains
+the class: "Conditional denoising diffusion model over 2D designs." teaches the
+words rather than the mechanism, which is the gap `explain` exists to close.
 """
 
 
@@ -282,6 +342,7 @@ def _member_from_entry(
             kind=kind,
             identity=algo,
             summary=entry.get("summary") or cls.summary,
+            description=entry.get("description") or cls.description,
             train_minutes=entry.get("train_minutes"),
             wins=cls.wins,
             loses=cls.loses,
@@ -318,11 +379,26 @@ def _member_from_entry(
             kind="pretrained",
             identity=f"{algo} (seed {seed})",
             summary=entry.get("summary", "A model somebody trained."),
+            # An adapter docstring is the last resort rather than the default:
+            # it is written for whoever maintains the class, and a participant
+            # reading "Conditional denoising diffusion model over 2D designs."
+            # learns the words rather than the mechanism.
+            description=(
+                entry.get("description") or TRAINED_DESCRIPTIONS.get(algo) or _first_paragraph(cls_pretrained.__doc__)
+            ),
             train_minutes=entry.get("train_minutes"),
             load=lazy,
         )
 
     raise ValueError(f"Unknown bank entry kind {kind!r}; expected 'pretrained', 'baseline', 'planted', or 'reference'.")
+
+
+def _first_paragraph(text: str | None) -> str:
+    """The opening paragraph of a docstring, unwrapped, or empty."""
+    if not text:
+        return ""
+    paragraph = text.strip().split("\n\n")[0]
+    return " ".join(line.strip() for line in paragraph.splitlines())
 
 
 def _refuse_wrong_catalogue(algo: str, kind: str) -> None:

@@ -49,6 +49,10 @@ def _smooth(field: npt.NDArray[Any], passes: int = 2) -> npt.NDArray[Any]:
 class Collapsed(DatasetGenerator):
     """One design, repeated. The floor of every diversity metric."""
 
+    description = """Returns one single design -- the one nearest the middle of the dataset --
+    for every brief it is given, ignoring what was asked. Whatever a
+    diversity column reports here is that column's floor."""
+
     algo_id = "collapsed"
     conditional = False
     bank_eligible = False
@@ -68,6 +72,10 @@ class Collapsed(DatasetGenerator):
 
 class VolumeOnly(DatasetGenerator):
     """Hits the volume budget exactly with a structure that carries no load."""
+
+    description = """Generates a smooth random blob field and thresholds it so that exactly
+    the requested fraction of the domain is material. It hits the volume
+    budget perfectly. The material is not arranged to carry anything."""
 
     algo_id = "volume_only"
     conditional = True
@@ -109,6 +117,10 @@ class NoiseDoped(DatasetGenerator):
     which no amount of arguing about models can settle.
     """
 
+    description = """Real held-out optimal designs with Gaussian noise added on top, at a
+    known severity. Adding noise to an optimal design cannot make it better,
+    so any column that improves here is rewarding damage."""
+
     algo_id = "noise_doped"
     conditional = True
     bank_eligible = False
@@ -128,6 +140,10 @@ class NoiseDoped(DatasetGenerator):
 
 class Checkerboard(DatasetGenerator):
     """Real designs plus the classic topology-optimization checkerboard artifact."""
+
+    description = """Real held-out designs with an alternating solid/void pattern laid over
+    the material that is already there -- the classic topology-optimization
+    artifact. It reads as broken to a person; an unfiltered solver disagrees."""
 
     algo_id = "checkerboard"
     conditional = True

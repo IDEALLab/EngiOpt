@@ -84,6 +84,7 @@ THE CASE FILE -- four commands, and everything is optional inside them.
 
 WHO IS IN THE LINE-UP
   case.models()                          the suspects, and what each one is
+  case.explain("diffusion")              one suspect, in full: what it does, step by step
   case.metrics()                         what you may ask, grouped by line of questioning
   case.metrics("diversity")              one line of questioning, in detail
 
@@ -257,6 +258,53 @@ class Case:
         ]
         print("Name any suspect by any unambiguous part of its name: 'diffusion', 'knn', 'plvae'.")
         return pd.DataFrame(rows).set_index("suspect")
+
+    def explain(self, model: str | None = None) -> None:
+        """Everything known about one suspect, in plain words.
+
+        `models()` is a table, and a table has room for a sentence. That is
+        enough to tell a lookup table from a diffusion model and not enough to
+        argue about either -- so the question "what *is* this thing actually
+        doing" had no answer in the notebook, and a participant who cannot
+        answer it cannot say why a column is wrong about it.
+
+        What it does **not** print is anything the board has not shown you yet.
+        A model's construction is described; whether that construction is a
+        good idea is left to the evidence.
+
+        Args:
+            model: Any unambiguous part of a suspect's name. Omitted, it lists
+                who can be asked about.
+        """
+        if model is None:
+            print("Ask about any of these:\n")
+            for member in self.bank:
+                print(f"  case.explain({member.label!r})")
+            return
+
+        member = self.bank.resolve(model)
+        rule = "-" * min(len(member.label) + 4, 78)
+        print(f"\n{member.label}\n{rule}")
+        print(f"{member.summary}\n")
+
+        if member.description:
+            for line in textwrap.wrap(" ".join(member.description.split()), width=78):
+                print(line)
+            print()
+
+        cost = []
+        if member.train_minutes is not None:
+            cost.append(f"about {member.train_minutes:g} minutes to train")
+        if self.store.holds(member.key, 1):
+            cost.append("its designs are already cached, so looking at it costs nothing")
+        if cost:
+            print(f"Cost: {'; '.join(cost)}.")
+        print(f"Filed as: {member.identity}   (cache key {member.key})")
+        print(
+            f"\nLook at it:   case.show({member.label!r})"
+            f"\nAgainst real: case.show({member.label!r}, 'test')"
+            f"\nIs it copying? case.show({member.label!r}, how='copying')"
+        )
 
     def metrics(self, family: str | None = None) -> pd.DataFrame:
         """What you are allowed to ask, grouped by the line of questioning it belongs to.

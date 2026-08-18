@@ -11,6 +11,7 @@ times.
 
 from __future__ import annotations
 
+import ast
 from dataclasses import dataclass
 from functools import cached_property
 from typing import Any, ClassVar, TYPE_CHECKING
@@ -198,6 +199,46 @@ def match_volume_fraction(
     return out
 
 
+def _strip_prose(tree: ast.AST) -> None:
+    """Remove docstrings and declaration-only attributes from a parsed class.
+
+    Both kinds of string are prose about a model rather than part of it: a
+    docstring, and an attribute like `summary` or `built_to`. Attribute
+    docstrings -- the bare string that follows an assignment -- are stripped
+    too, which the usual "drop body[0]" trick misses because they sit anywhere
+    in the body.
+
+    Args:
+        tree: A parsed module, mutated in place.
+    """
+    for node in ast.walk(tree):
+        # `ast.AST` declares no `body`, and most node types genuinely have
+        # none; the ones that do are what this walks for.
+        body = getattr(node, "body", None)
+        if not isinstance(body, list):
+            continue
+        kept = [
+            item
+            for item in body
+            if not (
+                isinstance(item, ast.Expr) and isinstance(item.value, ast.Constant) and isinstance(item.value.value, str)
+            )
+        ]
+        if isinstance(node, ast.ClassDef):
+            kept = [item for item in kept if not _is_prose_assignment(item)]
+        node.body = kept or [ast.Pass()]  # type: ignore[attr-defined]
+
+
+def _is_prose_assignment(node: ast.stmt) -> bool:
+    """Whether a class-body statement assigns one of the `PROSE` attributes."""
+    targets: list[ast.expr] = []
+    if isinstance(node, ast.Assign):
+        targets = list(node.targets)
+    elif isinstance(node, ast.AnnAssign):
+        targets = [node.target]
+    return any(isinstance(t, ast.Name) and t.id in DatasetGenerator.PROSE for t in targets)
+
+
 class DatasetGenerator(Generator):
     """A generator fitted from the dataset at load time rather than from a checkpoint.
 
@@ -232,7 +273,11 @@ class DatasetGenerator(Generator):
             different thing from both a baseline and a reference instrument, and
             has to be readable off the class rather than inferred from which
             catalogue it happens to be in.
-        summary: One line describing what the model does.
+        summary: One line describing what the model does, for the line-up table.
+        description: The same thing at length, in plain words -- what it
+            actually does, step by step, for somebody who has not read the
+            code. Lives beside the `_sample` it describes so the two cannot
+            drift apart, which a config file's copy would.
         reference: Citation, where the method is one from the literature.
         wins: Metric columns this model is expected to top.
         loses: Metric columns it is expected to bottom.
@@ -246,6 +291,7 @@ class DatasetGenerator(Generator):
     planted: ClassVar[bool] = False
     tuning: ClassVar[tuple[str, ...]] = ()
     summary: ClassVar[str] = ""
+    description: ClassVar[str] = ""
     reference: ClassVar[str] = ""
     wins: ClassVar[tuple[str, ...]] = ()
     loses: ClassVar[tuple[str, ...]] = ()
@@ -363,39 +409,60 @@ class DatasetGenerator(Generator):
         knobs = sorted((settings if settings is not None else cls.settings()).items())
         return hashlib.sha256(f"{mechanism}|{knobs}".encode()).hexdigest()[:8]
 
+    PROSE: ClassVar[frozenset[str]] = frozenset({"summary", "description", "built_to", "reference", "wins", "loses"})
+    """Class attributes that say what a model *is for* rather than what it does.
+
+    Excluded from the mechanism digest along with every docstring, because the
+    digest decides whether published results still describe this model. Writing
+    a better explanation must not orphan hours of simulator time filed under
+    the old address -- which is exactly what a digest over raw source did:
+    adding these very descriptions moved all three constructions' packages and
+    made physics that was already paid for unreachable, silently.
+    """
+
     @classmethod
     def mechanism_digest(cls) -> str:
-        """A short hash of this model's own source, standing in for a weight file.
+        """A short hash of what this model *does*, standing in for a weight file.
 
-        A trained model's cache is keyed by the fingerprint of its weights. A
-        dataset-fitted model has no weights: **its mechanism is its source**, so
-        that is what gets hashed. Without this, editing how a construction
-        samples and re-scoring it serves the designs the previous version
-        produced -- which cost two rounds of tuning here before it was noticed,
-        both times looking like "the change had no effect on the metrics".
+        A trained model's cache and its published metrics are keyed by the
+        fingerprint of its weights. A dataset-fitted model has no weights, so
+        its behaviour is hashed instead: without that, editing how a
+        construction samples and re-scoring it serves the designs the previous
+        version produced, which cost two rounds of tuning here before anybody
+        noticed.
 
-        Hashes this class and any construction base between it and
-        `DatasetGenerator`, so a shared helper like `_shift_to_budget` counts
-        too. It does **not** cover `DatasetGenerator` itself or module-level
-        helpers such as `match_volume_fraction`: changing those invalidates
-        nothing automatically, and the cache has to be cleared by hand.
+        **Behaviour, not text.** The source is parsed and compared as an
+        abstract syntax tree with docstrings and the `PROSE` attributes
+        removed, so comments, formatting and rewritten explanations leave the
+        digest alone while a changed expression moves it. The first version
+        hashed raw source and could not tell those apart in either direction.
+
+        Covers this class and any construction base between it and
+        `DatasetGenerator`, so a shared helper like `_shift_to_budget` counts.
+        It does **not** cover `DatasetGenerator` itself or module-level helpers
+        such as `match_volume_fraction`; changing those invalidates nothing
+        automatically and the caches must be cleared by hand.
 
         Returns:
             Eight hex characters, or `""` if the source cannot be read (a REPL,
-            a frozen build), in which case the key simply omits it.
+            a frozen build), in which case callers omit it from the key.
         """
+        import ast
         import hashlib
         import inspect
+        import textwrap
 
-        sources = []
+        shapes = []
         for klass in cls.__mro__:
             if klass is DatasetGenerator:
                 break
             try:
-                sources.append(inspect.getsource(klass))
-            except (OSError, TypeError):
+                tree = ast.parse(textwrap.dedent(inspect.getsource(klass)))
+            except (OSError, TypeError, SyntaxError):
                 return ""
-        return hashlib.sha256("".join(sources).encode()).hexdigest()[:8]
+            _strip_prose(tree)
+            shapes.append(ast.dump(tree))
+        return hashlib.sha256("".join(shapes).encode()).hexdigest()[:8]
 
     # ------------------------------------------------------------------
     # Helpers shared by the constructions

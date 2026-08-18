@@ -495,6 +495,93 @@ def test_a_severity_declared_in_config_reaches_the_model_and_keys_its_own_cache(
     assert len(keys) == 3, f"rungs share a cache entry: {keys}"
 
 
+_MODULE = '''
+from typing import ClassVar
+from engiopt.baselines.base import DatasetGenerator
+
+
+class Probe(DatasetGenerator):
+    """{doc}"""
+
+    algo_id = "probe"
+    summary = "{summary}"
+    description = "{description}"
+    built_to = "{built_to}"
+    wins = ("{win}",)
+    tuning: ClassVar[tuple[str, ...]] = ("scale",)
+    scale: ClassVar[float] = {scale}
+
+    def _sample(self, conditions, n):
+        """{method_doc}"""
+        # {comment}
+        return [self.scale * {constant}] * n
+'''
+
+
+def _probe(tmp_path: Any, name: str, **fields: Any) -> Any:
+    """Import a throwaway generator module so `inspect.getsource` has a file to read."""
+    import importlib.util
+    import sys
+
+    defaults = {
+        "doc": "a docstring",
+        "summary": "a summary",
+        "description": "a description",
+        "built_to": "a disclosure",
+        "win": "mmd",
+        "scale": "1.0",
+        "method_doc": "samples",
+        "comment": "a comment",
+        "constant": "2",
+    }
+    path = tmp_path / f"{name}.py"
+    path.write_text(_MODULE.format(**{**defaults, **fields}))
+
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module.Probe
+
+
+def test_rewriting_prose_does_not_move_a_published_fingerprint(tmp_path: Any) -> None:
+    """The digest addresses published physics, so text must not move it.
+
+    Adding descriptions to the three constructions moved every one of their
+    package paths, which made simulator results that had already been paid for
+    unreachable -- no error, just blank rows. A digest over raw source cannot
+    tell "I changed how this samples" from "I wrote a better explanation", and
+    only the first may invalidate anything.
+    """
+    plain = _probe(tmp_path, "plain")
+    reworded = _probe(
+        tmp_path,
+        "reworded",
+        doc="a much longer and better class docstring, rewritten for participants",
+        summary="a rewritten summary",
+        description="a rewritten description, several sentences long",
+        built_to="a rewritten disclosure naming a different column",
+        win="pixel_vendi",
+        method_doc="a rewritten method docstring",
+        comment="a rewritten comment",
+    )
+
+    assert plain.mechanism_digest() == reworded.mechanism_digest()
+    assert plain.package_fingerprint() == reworded.package_fingerprint()
+
+
+def test_changing_what_a_model_computes_does_move_its_fingerprint(tmp_path: Any) -> None:
+    """The other half: a behaviour change must invalidate, or stale designs get served."""
+    plain = _probe(tmp_path, "before")
+    edited = _probe(tmp_path, "after", constant="3")
+
+    assert plain.mechanism_digest() != edited.mechanism_digest()
+
+    # ...and so must a different default for a declared knob, which reaches the
+    # fingerprint through the settings rather than through the source.
+    assert plain.package_fingerprint() != _probe(tmp_path, "scaled", scale="2.0").package_fingerprint()
+
+
 def test_two_rungs_of_one_ladder_do_not_share_a_published_package() -> None:
     """The digest addresses metrics on the Hub, so it must cover the knobs too.
 

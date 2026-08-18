@@ -50,6 +50,14 @@ class KNNRetrieval(DatasetGenerator):
     Larger k remains available via `neighbours=`, but nothing defaults to it.
     """
 
+    description = """Looks up the one training design whose brief is closest to yours, and
+    hands it back rescaled to the volume budget you asked for.
+
+    There is no network and no noise input, so the same brief always returns
+    the same design, and it can never produce anything that is not already in
+    the dataset. Whether that is a fatal limitation or an honest answer to the
+    task is the argument this model exists to start."""
+
     algo_id = "knn_retrieval"
     conditional = True
     bank_eligible = True
@@ -103,6 +111,14 @@ class LinearRegression(DatasetGenerator):
     that cannot beat it has not earned its training budget. It is the baseline
     that makes the rest of the leaderboard interpretable.
     """
+
+    description = """Fits one straight-line map from the brief to every pixel of the design,
+    solved in closed form on the training set.
+
+    The brief and its squares go in, a design comes out. There is no latent
+    variable, so it produces exactly one design per brief and cannot offer a
+    second opinion. Reported not because anyone would ship it, but because a
+    generative model that cannot beat it has not earned its training budget."""
 
     algo_id = "linear_regression"
     conditional = True
