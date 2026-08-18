@@ -39,13 +39,13 @@ contains.
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 from typing import Any
 
 import pandas as pd
 
 from engiopt.evaluation.physics_board import problem_of
+from engiopt.evaluation.physics_board import published_physics
 from engiopt.workshops.idetc26.config import WorkshopConfig
 from engiopt.workshops.idetc26.seal import seal
 
@@ -149,19 +149,15 @@ def _report_conflicts(conflicts: dict[str, list[str]], sources: dict[str, str]) 
 
 
 def from_hub(problem_id: str, algo: str, fingerprint: str | None, seed: int) -> dict[str, float] | None:
-    """Physics from a package's published `metrics.json`, or None if it has none."""
-    from huggingface_hub import hf_hub_download
+    """Physics from a package's published `metrics.json`, or None if it has none.
 
-    from engiopt.checkpoint_store import build_hf_repo_id
-
-    path = f"{problem_id}/" + (f"cfg_{fingerprint}/" if fingerprint else "") + f"seed_{seed}/metrics.json"
-    try:
-        payload = json.load(open(hf_hub_download(build_hf_repo_id("IDEALLab", "engiopt", algo), path)))  # noqa: SIM115
-    except Exception:  # noqa: BLE001 - a package with no published metrics is the normal case, not an error
-        return None
-    metrics = payload.get("metrics", {})
-    found = {m: metrics[m] for m in ALL_PHYSICS if m in metrics and metrics[m] == metrics[m]}
-    return found if all(m in found for m in PHYSICS) else None
+    Delegates to `physics_board.published_physics` rather than reading the file
+    itself. There were two readers of `metrics.json` here and they disagreed:
+    this one understood only the nested shape, so rows written by the other
+    publisher were reported MISSING despite being present and correct. One
+    reader, one place to teach about a new shape.
+    """
+    return published_physics(problem_id, algo, fingerprint, seed, required=list(PHYSICS))
 
 
 def gather(config: WorkshopConfig, boards: dict[str, dict[str, float]], *, use_hub: bool) -> pd.DataFrame:
