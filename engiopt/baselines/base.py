@@ -333,6 +333,37 @@ class DatasetGenerator(Generator):
         return {name: getattr(cls, name) for name in cls.tuning}
 
     @classmethod
+    def package_fingerprint(cls, settings: dict[str, Any] | None = None) -> str:
+        """The identifier this model's published metrics are filed under.
+
+        A trained package is addressed on the Hub by `cfg_<hyperparameter
+        fingerprint>`; this is the constructed equivalent, and it has to cover
+        **both** halves of what makes a construction what it is -- the
+        mechanism and the knobs it was run at.
+
+        Covering only the mechanism is a silent data-loss bug rather than a
+        cosmetic one: every rung of a severity ladder shares one source, so
+        `temperature` 0.05 and 0.15 would resolve to the same `cfg_<digest>/`
+        path and the second run's physics would overwrite the first's. Physics
+        is the expensive half -- hours per model -- and nothing downstream would
+        report anything wrong.
+
+        Args:
+            settings: Effective knob values. Defaults to the class declarations,
+                which is right for a model built without overrides.
+
+        Returns:
+            Eight hex characters, or `""` when the source cannot be read.
+        """
+        import hashlib
+
+        mechanism = cls.mechanism_digest()
+        if not mechanism:
+            return ""
+        knobs = sorted((settings if settings is not None else cls.settings()).items())
+        return hashlib.sha256(f"{mechanism}|{knobs}".encode()).hexdigest()[:8]
+
+    @classmethod
     def mechanism_digest(cls) -> str:
         """A short hash of this model's own source, standing in for a weight file.
 

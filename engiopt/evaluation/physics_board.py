@@ -272,6 +272,64 @@ def select(entries: list[tuple[str, str, str | None, int]], args: Any) -> list[t
     return entries
 
 
+_RUNGS: dict[str, dict[str, Any]] = {}
+"""Knob values behind each constructed fingerprint, filled in by `constructed`.
+
+A side table rather than a fifth element on the entry tuple, because that shape
+is `discover`'s and is threaded through sharding, `--only`, `--skip-published`
+and publishing. Widening it to carry settings that only one kind of entry has
+would touch all of them to serve none of them.
+"""
+
+
+def constructed(problem_id: str, requests: list[str] | None) -> list[tuple[str, str, str | None, int]]:
+    """Entries for dataset-fitted models, which no Hub walk can find.
+
+    `discover` lists what is published; a construction is never published,
+    because it has no weights -- it is fitted at load time from the same pinned
+    dataset split every checkpoint was trained on. So it has to be *named*, and
+    that is the only difference: once named it is scored, published and read
+    back exactly like a package, under the digest of its mechanism and knobs.
+
+    Args:
+        problem_id: Unused for lookup -- these exist for every problem -- but
+            taken so the signature matches `discover` and the caller reads the
+            same way.
+        requests: `algo` or `algo:knob=value,knob=value`. The second form is a
+            rung of a severity ladder, and each rung is its own package.
+
+    Returns:
+        `(key, algo, fingerprint, seed)` tuples, in `discover`'s shape.
+
+    Raises:
+        ValueError: If a name is not a dataset-fitted model, or a knob is not
+            one that model declares. Both are silent-wrong-answer mistakes: an
+            unknown name would score nothing, and an unknown knob would score
+            the default while the CSV said otherwise.
+    """
+    del problem_id
+    from engiopt.baselines import ALL_DATASET_MODELS
+
+    out: list[tuple[str, str, str | None, int]] = []
+    for request in requests or []:
+        algo, _, spec = request.partition(":")
+        if algo not in ALL_DATASET_MODELS:
+            raise ValueError(f"{algo!r} is not a dataset-fitted model. Known: {sorted(ALL_DATASET_MODELS)}.")
+        cls = ALL_DATASET_MODELS[algo]
+
+        settings = dict(cls.settings())
+        for assignment in filter(None, spec.split(",")):
+            name, _, value = assignment.partition("=")
+            if name not in cls.tuning:
+                raise ValueError(f"{algo!r} has no tunable {name!r}. It declares: {list(cls.tuning) or 'nothing'}.")
+            settings[name] = type(getattr(cls, name))(value)
+
+        fingerprint = cls.package_fingerprint(settings)
+        _RUNGS[fingerprint] = settings
+        out.append((f"{algo}/{fingerprint}/s1", algo, fingerprint, 1))
+    return out
+
+
 def build_parser() -> argparse.ArgumentParser:
     """The command line. Lifted out of `main` so the flags can grow without it."""
     ap = argparse.ArgumentParser(description=__doc__)
@@ -290,6 +348,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     ap.add_argument("--hf-entity", default="IDEALLab")
     ap.add_argument("--hf-repo-prefix", default="engiopt")
+    ap.add_argument(
+        "--constructed",
+        nargs="*",
+        default=None,
+        metavar="ALGO[:KNOB=VALUE,...]",
+        help=(
+            "Also score these dataset-fitted models, which have no Hub package to discover "
+            "(e.g. `annealed_2d` or `annealed_2d:temperature=0.05`). Each rung is its own package."
+        ),
+    )
     ap.add_argument(
         "--only",
         nargs="*",
@@ -315,24 +383,52 @@ def build_parser() -> argparse.ArgumentParser:
     return ap
 
 
+def _load(algo: str, fingerprint: str | None, seed: int, problem: Any, problem_id: str) -> Any:
+    """Build one entry's generator, from the Hub or from the dataset.
+
+    The two kinds of model are indistinguishable once built -- same contract,
+    same scoring -- and differ only in where they come from. A construction
+    carries no weights, so `from_pretrained` cannot serve it; asking the Hub
+    for one is how they got left off the board in the first place.
+
+    Its knobs are recovered from the fingerprint by matching against the rungs
+    the class can produce, so a CSV row and the model that produced it cannot
+    drift apart.
+
+    Raises:
+        ValueError: If a construction's fingerprint matches no rung it declares.
+    """
+    from engiopt.baselines import ALL_DATASET_MODELS
+
+    if algo not in ALL_DATASET_MODELS:
+        from engiopt.utils.all_generators import BUILTIN_GENERATORS
+
+        return BUILTIN_GENERATORS[algo].from_pretrained(
+            problem, problem_id=problem_id, seed=seed, model_source="hf", config_fingerprint=fingerprint
+        )
+
+    cls = ALL_DATASET_MODELS[algo]
+    if fingerprint is None or fingerprint == cls.package_fingerprint():
+        return cls.from_problem(problem, problem_id=problem_id, seed=seed)
+    if fingerprint in _RUNGS:
+        return cls.from_problem(problem, problem_id=problem_id, seed=seed, **_RUNGS[fingerprint])
+    raise ValueError(
+        f"{algo} fingerprint {fingerprint!r} names a rung this run did not ask for, so its knob values "
+        f"are unknown and scoring it would publish numbers under a description of a different model. "
+        f"Name it with `--constructed {algo}:knob=value`; the fingerprint is computed from the knobs."
+    )
+
+
 def score_all(entries: list[tuple[str, str, str | None, int]], evaluator: Any, out: Path, args: Any) -> None:
     """Score each package, appending as it goes so a killed task loses one row.
 
     Every result is written to the CSV *before* it is published, so an upload
     failure costs a push and never the hours that produced the number.
     """
-    from engiopt.utils.all_generators import BUILTIN_GENERATORS
-
     for index, (key, algo, fingerprint, seed) in enumerate(entries, start=1):
         started = time.perf_counter()
         try:
-            generator = BUILTIN_GENERATORS[algo].from_pretrained(
-                evaluator.problem,
-                problem_id=args.problem_id,
-                seed=seed,
-                model_source="hf",
-                config_fingerprint=fingerprint,
-            )
+            generator = _load(algo, fingerprint, seed, evaluator.problem, args.problem_id)
             generator.seed = args.seed
             scores = evaluator.score(generator, only=PHYSICS, include_expensive=True)
         except Exception as exc:  # noqa: BLE001 - one bad package must not end a multi-hour sweep
@@ -382,6 +478,18 @@ def main() -> None:
     entries = select(
         [e for e in discover(args.problem_id, args.algos)[args.shard :: args.num_shards] if e[0] not in done], args
     )
+    # Injected after `select`, not before. `--only` warns about any key the Hub
+    # walk did not turn up and drops it, so a constructed entry passed through
+    # that filter would be discarded as unknown -- by the one filter whose job
+    # is to let you score exactly the things that are missing. `--skip-published`
+    # is applied to them separately, since that check is a Hub read that works
+    # for these the moment their metrics exist.
+    named = [e for e in constructed(args.problem_id, args.constructed) if e[0] not in done]
+    if named and args.skip_published:
+        required = list(PHYSICS) if args.require_medians else None
+        named = [e for e in named if published_physics(args.problem_id, e[1], e[2], e[3], required=required) is None]
+    entries = entries + named
+
     if args.limit:
         entries = entries[: args.limit]
 

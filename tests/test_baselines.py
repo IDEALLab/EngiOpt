@@ -495,6 +495,33 @@ def test_a_severity_declared_in_config_reaches_the_model_and_keys_its_own_cache(
     assert len(keys) == 3, f"rungs share a cache entry: {keys}"
 
 
+def test_two_rungs_of_one_ladder_do_not_share_a_published_package() -> None:
+    """The digest addresses metrics on the Hub, so it must cover the knobs too.
+
+    Every rung of a severity ladder shares one source file. A fingerprint over
+    the mechanism alone would file `temperature` 0.05 and 0.15 under the same
+    `cfg_<digest>/seed_1/metrics.json`, and the second physics run -- hours of
+    optimizer time -- would overwrite the first with nothing reporting a
+    problem. This is the check that keeps that from being possible.
+    """
+    from engiopt.workshops.idetc26.bank import _member_from_entry
+    from engiopt.workshops.idetc26.case import _package_of
+
+    cls = PLANTED_MODELS["annealed_2d"]
+    assert cls.package_fingerprint({"temperature": 0.05}) != cls.package_fingerprint({"temperature": 0.15})
+
+    packages = {
+        _package_of(_member_from_entry({"kind": "planted", "algo": "annealed_2d", "temperature": t}, None, PROBLEM_ID).key)
+        for t in (0.05, 0.10, 0.15)
+    }
+    assert len(packages) == 3, f"rungs collide on the Hub: {packages}"
+
+    # ...and the mechanism still counts: same knobs, edited source, new package.
+    assert cls.package_fingerprint({"temperature": 0.15}) != PLANTED_MODELS["portfolio_2d"].package_fingerprint(
+        {"temperature": 0.15}
+    )
+
+
 def test_a_planted_model_cannot_be_smuggled_in_as_a_baseline() -> None:
     """Filing a construction as a baseline would rank it and never disclose it."""
     from engiopt.workshops.idetc26.bank import _member_from_entry

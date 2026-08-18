@@ -268,7 +268,13 @@ def _member_from_entry(
         # the class and a mechanism in its code, and neither is in the entry.
         # Without both, retuning a construction and re-scoring it replays the
         # designs the previous version produced.
-        digest = cls.mechanism_digest()
+        # `code` folds the mechanism *and* the knobs into one digest, because it
+        # is also what addresses this model's published metrics on the Hub. A
+        # digest over the source alone would give every rung of a severity
+        # ladder the same package path, and the second rung's physics would
+        # overwrite the first's with nothing downstream reporting a problem.
+        settings = {**cls.settings(), **{k: v for k, v in options.items() if k in cls.tuning}}
+        digest = cls.package_fingerprint(settings)
         fingerprint = {"code": digest} if digest else {}
         return BankMember(
             label=entry.get("name", ""),
