@@ -24,18 +24,17 @@ import nbformat
 
 NOTEBOOK = Path(__file__).resolve().parents[1] / "notebooks" / "01_find_the_best_model.ipynb"
 
-SUBSTITUTIONS = {
-    'passphrase = "..."': "passphrase = VERIFY_PASSPHRASE",
-}
-"""Fill-in placeholders replaced before execution, as `{placeholder: answer}`."""
+SUBSTITUTIONS: dict[str, str] = {}
+"""Fill-in placeholders replaced before execution, as `{placeholder: answer}`.
+
+Empty since the physics board moved to the Hub: there is no passphrase to
+substitute, and every cell now runs as a participant would find it.
+"""
 
 
-def prepare(passphrase: str) -> nbformat.NotebookNode:
+def prepare(_passphrase: str = "") -> nbformat.NotebookNode:
     """Load the notebook and fill in the cells a participant would."""
     notebook = nbformat.read(NOTEBOOK, as_version=4)
-
-    setup = nbformat.v4.new_code_cell(f"VERIFY_PASSPHRASE = {passphrase!r}")
-    notebook.cells.insert(0, setup)
 
     for cell in notebook.cells:
         if cell.cell_type != "code":
@@ -48,7 +47,7 @@ def prepare(passphrase: str) -> nbformat.NotebookNode:
 def main() -> None:
     """Run every cell, reporting the first failure with its traceback."""
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--passphrase", required=True)
+    parser.add_argument("--passphrase", default="", help="Unused; kept so old invocations still work.")
     parser.add_argument("--timeout", type=int, default=900)
     args = parser.parse_args()
 

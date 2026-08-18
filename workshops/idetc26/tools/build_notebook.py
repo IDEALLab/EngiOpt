@@ -60,7 +60,7 @@ CELLS = [
 
 **IDETC-CIE 2026 · EngiBench hands-on workshop**
 
-Eight suspects are in the room. Each one claims to be a good generative model
+Eleven suspects are in the room. Each one claims to be a good generative model
 for the same engineering design problem. Each was handed the **same 50 design
 briefs** and produced 50 designs. One of them is the best.
 
@@ -123,7 +123,7 @@ case.show("train")     # the designs every suspect was fitted on
     md(
         """
 That shows the designs the way the rest of this notebook will: one grey ramp,
-dark where there is material, so ten models stay comparable at a glance.
+dark where there is material, so eleven models stay comparable at a glance.
 
 **The problem itself has an opinion about what is worth showing.** `case.problem`
 is the EngiBench problem, and its own `render` draws whatever matters for *this*
@@ -147,9 +147,13 @@ case.problem.render(case.designs("test")[0])   # EngiBench's own renderer
 Name any suspect by any unambiguous part of its name — `"diffusion"`, `"knn"`,
 `"plvae"`. If a fragment matches more than one, the error tells you which.
 
-**They are named for what they are, and that is not a spoiler.** "Why is the
-lookup table beating the diffusion model" is the most useful question this
-session can produce, and it cannot be asked of *Suspect C*.
+**Names, not letters, and that is not a spoiler.** "Why is the lookup table
+beating the diffusion model" is the most useful question this session can
+produce, and it cannot be asked of *Suspect C*.
+
+**Read a name as a claim rather than a fact.** It tells you what a model says it
+is. Whether the evidence agrees is part of what you are here to decide, and one
+of the cheap columns is more informative about that than it looks.
 
 Two of them are not generative models at all, and they are here as serious
 entries rather than as jokes:
@@ -469,19 +473,18 @@ Now multiply. A hyperparameter sweep is fifty configurations, five seeds each,
 three problems. At the rate you just watched — **that is why every paper you have
 read reports `mmd` and not `cog`.**
 
-A full board over every suspect at all 50 briefs was computed ahead of time and
-sealed into the repository, with its plaintext hash published beside it, so it
-can be checked afterwards that the numbers were fixed before anyone saw them.
-Your facilitator has the passphrase.
+A full board over every suspect at all 50 briefs was computed ahead of time --
+hours of optimizer per model -- and published into each checkpoint's own
+`metrics.json` on the Hub, beside the weights it describes. So it is read, not
+recomputed, and it comes from the same place the models did.
+
+A suspect with no published run shows as blank rather than being dropped.
+"Nobody has measured this one" is a fact about the board and belongs on it.
 """
     ),
     code(
         """
-# START FILL
-passphrase = "..."
-# END FILL
-
-physics = case.physics(passphrase)
+physics = case.physics()      # read from the Hub, beside the weights
 physics.round(3)
 """
     ),
@@ -496,6 +499,33 @@ case.show(cheap, physics)        # the two boards side by side, as ranks
 **Find two suspects the cheap columns rank in the opposite order to
 `iog`/`cog`/`fog`.** If you can, then every cheap column above is, for that pair,
 actively misleading — and the cheap columns are the only ones anyone reports.
+"""
+    ),
+    md(
+        """
+### And about those names
+
+Unsealing the board also printed something else: **some of the suspects were
+built for this session rather than trained.** They carry no weights, they were
+written in an afternoon, and they were ranked beside the checkpoints on every
+column you asked for — several of them near the top.
+
+The disclosure above says what each one was built to do. Two of them are worth
+putting side by side, because they fail in opposite directions:
+
+- one is 4th of 11 on `mmd` and 8th on `lv_mmd` — it looks reasonable in pixels
+  and bad in the learned space;
+- the other is 8th on `mmd` and 4th on `pca_mmd` — it looks bad in pixels and
+  reasonable in the fitted ones.
+
+So "measure it in a better space" is not a recipe. The space is a choice, each
+one is blind to something, and **whichever you had picked before seeing this,
+one of these two would have got past you.**
+
+Every one of them is built from the training split only — the same data every
+checkpoint here was fitted on. None of them ever saw the held-out designs they
+were scored against. The source is `engiopt/baselines/planted.py`; it is short,
+and that is the point.
 """
     ),
     md(

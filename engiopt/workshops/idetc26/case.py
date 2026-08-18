@@ -571,21 +571,58 @@ class Case:
         }
         return pd.Series(fields, name="latent instrument")
 
-    def physics(self, passphrase: str, path: str | Path | None = None) -> pd.DataFrame:
-        """The precomputed board of simulator answers.
+    def physics(self, passphrase: str | None = None, path: str | Path | None = None) -> pd.DataFrame:
+        """The precomputed simulator board, read from the Hub.
 
-        Sealed and committed with its plaintext hash published beside it, so it
-        can be checked afterwards that the numbers were fixed before anybody saw
-        them. It is precomputed because asking the simulator about every suspect
-        at every condition costs hours -- `evaluate("performance", confirm=True)`
-        is the same question asked live on as few designs as you can afford.
+        `iog`/`cog`/`fog` cost hours per model, so nobody computes them during a
+        session. They are computed once and published into each checkpoint's own
+        `metrics.json`, beside the weights they describe -- so this reads the
+        same Hub the models themselves came from, and there is no local file to
+        go stale or to be forgotten when the package is installed elsewhere.
+
+        A suspect with no published physics comes back as a row of NaN rather
+        than an error. That is the honest rendering: the board is a statement
+        about which models have been measured, and a model nobody has run the
+        simulator on has not been measured. Constructed models are the usual
+        case -- they have no checkpoint package to attach metrics to.
 
         Args:
-            passphrase: The phrase announced in the room.
-            path: Sealed file; defaults to this problem's board in the package.
+            passphrase: Only for the legacy sealed board. Given one, this reads
+                the encrypted CSV instead of the Hub.
+            path: Sealed file to use with `passphrase`.
 
         Returns:
             The expensive-metric board, indexed by suspect.
+        """
+        if passphrase is not None:
+            return self._sealed_physics(passphrase, path)
+
+        from engiopt.evaluation.physics_board import published_physics
+
+        rows, absent = {}, []
+        for member in self.bank:
+            algo, fingerprint, seed = _package_of(member.key)
+            found = published_physics(self.config.problem_id, algo, fingerprint, seed)
+            if found is None:
+                absent.append(member.label)
+            rows[member.label] = found or {}
+
+        frame = pd.DataFrame(rows).T
+        frame.index.name = "suspect"
+        columns = [c for c in self.config.expensive_metrics if c in frame.columns]
+        frame = frame[columns + [c for c in frame.columns if c not in columns]]
+
+        print(f"Read from the Hub: {len(self.bank) - len(absent)}/{len(self.bank)} suspects have published physics.")
+        if absent:
+            print(
+                f"  no simulator run published for: {', '.join(absent)}. "
+                "They are shown as blank rather than dropped -- 'not measured' is a fact about the board, "
+                "not a reason to hide a model from it."
+            )
+        return frame
+
+    def _sealed_physics(self, passphrase: str, path: str | Path | None) -> pd.DataFrame:
+        """The legacy encrypted board, for a session that still uses one.
 
         Raises:
             SealError: If the board is missing, or was sealed for another line-up.
@@ -969,6 +1006,24 @@ def column_direction(column: str) -> bool | None:
         if column in spec.columns:
             return spec.higher_is_better
     return None
+
+
+def _package_of(key: str) -> tuple[str, str | None, int]:
+    """Split a bank key back into the checkpoint package it names.
+
+    Bank keys are `algo#seed[opt=value,...]`, and the Hub addresses a package by
+    `(algo, config_fingerprint, seed)`. A key carrying no `cfg` option names the
+    canonical package -- or, for a constructed model, no package at all, which is
+    why the caller must tolerate a miss.
+    """
+    head, _, options = key.partition("[")
+    algo, _, seed = head.partition("#")
+    fingerprint = None
+    for option in options.rstrip("]").split(","):
+        name, _, value = option.partition("=")
+        if name == "cfg":
+            fingerprint = value
+    return algo, fingerprint, int(seed or 1)
 
 
 def _measured_active_dims(lvae: Any) -> int | None:
