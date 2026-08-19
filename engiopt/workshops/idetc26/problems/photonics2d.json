@@ -81,15 +81,6 @@
       "train_minutes": 0.1
     },
     {
-      "kind": "pretrained",
-      "algo": "cgan_cnn_2d",
-      "name": "cgan_cnn_2d_tuned",
-      "seed": 42,
-      "config_fingerprint": "c7837a0c",
-      "train_minutes": 4.0,
-      "summary": "The same cGAN, different hyperparameters."
-    },
-    {
       "kind": "planted",
       "algo": "annealed_2d",
       "seed": 1,

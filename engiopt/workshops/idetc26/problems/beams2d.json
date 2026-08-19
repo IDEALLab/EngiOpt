@@ -69,19 +69,10 @@
     {
       "kind": "pretrained",
       "algo": "cgan_cnn_2d",
-      "seed": 1,
+      "seed": 3,
       "config_fingerprint": "825831f6",
       "train_minutes": 4.0,
       "summary": "Conditional GAN, CNN backbone, centre of the sweep."
-    },
-    {
-      "kind": "pretrained",
-      "algo": "cgan_cnn_2d",
-      "name": "cgan_cnn_2d_tuned",
-      "seed": 42,
-      "config_fingerprint": "c7837a0c",
-      "train_minutes": 4.0,
-      "summary": "The same cGAN, different hyperparameters."
     },
     {
       "kind": "planted",
@@ -92,7 +83,7 @@
     {
       "kind": "pretrained",
       "algo": "gan_cnn_2d",
-      "seed": 1,
+      "seed": 2,
       "config_fingerprint": "6293adb3",
       "train_minutes": 3.4,
       "summary": "Unconditional GAN. It never sees the brief."

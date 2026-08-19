@@ -36,9 +36,10 @@ cannot. Both sides of that paper's comparison are in the bank as **competitive
 entries**, not as jokes: `knn_retrieval` at k=1 is the retrieval method, and
 `deconv_regression` is the deconvolutional network it was measured against.
 
-On `beams2d` the kNN baseline currently beats the conditional GAN on MMD,
-feasibility *and* condition adherence, at 1/1600th of VQGAN's sampling cost. A
-leaderboard topped by retrieval is a result, not a broken leaderboard.
+On `beams2d` the kNN baseline currently beats the conditional GAN on feasibility
+*and* condition adherence, at 1/1600th of VQGAN's sampling cost, and the two are
+within 5% of each other on MMD. A leaderboard topped by retrieval is a result,
+not a broken leaderboard.
 
 ## Run it
 
@@ -52,7 +53,7 @@ does **not** speed up the physics, which is CPU-bound topology optimization.
 
 ## The notebook is a detective story in two acts
 
-Eight suspects are in the room, each claiming to be a good generative model for
+Ten suspects are in the room, each claiming to be a good generative model for
 the same problem, each handed the same 50 design briefs. One of them is the
 best. **Act 1** introduces the suspects and asks for a ranking by eye, before
 any number. **Act 2** is the interrogation: seven lines of questioning, asked one

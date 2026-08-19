@@ -60,7 +60,7 @@ CELLS = [
 
 **IDETC-CIE 2026 · EngiBench hands-on workshop**
 
-Eleven suspects are in the room. Each one claims to be a good generative model
+Ten suspects are in the room. Each one claims to be a good generative model
 for the same engineering design problem. Each was handed the **same 50 design
 briefs** and produced 50 designs. One of them is the best.
 
@@ -123,7 +123,7 @@ case.show("train")     # the designs every suspect was fitted on
     md(
         """
 That shows the designs the way the rest of this notebook will: one grey ramp,
-dark where there is material, so eleven models stay comparable at a glance.
+dark where there is material, so ten models stay comparable at a glance.
 
 **The problem itself has an opinion about what is worth showing.** `case.problem`
 is the EngiBench problem, and its own `render` draws whatever matters for *this*
@@ -253,6 +253,18 @@ a PCA subspace, and in a learned latent space:
 the *spaces*, not about the suspects. Two designs differing by a one-pixel shift
 are nearly identical structurally and far apart in pixels; whether that counts
 as a difference is a modelling choice that no results table declares.
+
+**And someone had to fit the learned space.** The `lv_*` columns are measured
+inside an autoencoder that this problem's evaluation spec pins by name — and
+`constrained_plvae_2d`, one of the suspects, is a sibling of it: same
+architecture, same training objective, a different configuration. That is
+disclosed rather than hidden, and it is not by itself disqualifying. But a
+metric fitted by one entrant and applied to the whole line-up is a conflict you
+have to declare. **Before you report an `lv_` column, ask who fitted the
+instrument, whether they were in the room, and what you would answer if a
+reviewer asked.** The same question is owed to `pca_*`, fitted on the training
+split — and to nobody at all by `mmd`, which is fitted on nothing. That is the
+one thing raw pixels have going for them.
 """
     ),
     md(
@@ -576,8 +588,8 @@ need better questions** has got the point of the session.
 Blank cell below. Some things worth trying:
 
 - Take whichever suspect tops `mmd` and run `case.show(..., how="copying")` on it.
-- Find a column where `cgan_cnn_2d` and `cgan_cnn_2d_tuned` — same architecture,
-  different hyperparameters — differ by more than two *architectures* do.
+- Score `constrained_plvae_2d` on the `lv_*` columns, then re-read who fitted
+  the space those columns are measured in.
 - Ask a question in a space you do not trust: `case.show("vqgan", "test", how="map")`.
 - Change the kernel bandwidth (`case.evaluate("mmd", sigma=0.5)`) and see how
   much of the ranking was a property of a default nobody reported.
