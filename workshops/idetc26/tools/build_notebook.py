@@ -101,6 +101,9 @@ What a real solution looks like. Every comparison later is against this.
 - `"train"` — what every model was fitted on
 - `"test"` — held-out, what they are *scored* against
 - Drag the sliders: watch the design change with the brief
+
+**Knobs on `case.show`:** `n=12` (how many), `seed=2` (which draw),
+`how=` (`"copying"`, `"conditions"`, `"map"`), `fresh=True` (resample).
 """
     ),
     code(
@@ -128,22 +131,31 @@ case.problem.render(case.designs("test")[0])
 ---
 # 2 · The suspects
 
-Ten models, named for what they are.
+Ten of them. Named for what they claim to be.
 
-- Name any one by a fragment — `"diffusion"`, `"knn"`, `"plvae"`
-- **A name is a claim, not a fact.** Whether the evidence agrees is your call
-- Two are not generative models at all, and are here as serious entries:
-  - `knn_retrieval` — hands back the nearest training design. Cannot invent
-  - `deconv_regression` — supervised, conditions in, one design out
-- Those two are the sides of Habibi et al. (*JMD* 148(6):061704, 2026): kNN beat
-  deconvolutional nets at limited data. Both are in the room — check it
-- Neither has a noise input, so neither can give a second answer to one brief
+- Reach any one by a fragment — `"diffusion"`, `"knn"`, `"plvae"`
+- **A name is a claim, not a fact**
 """
     ),
     code("""case.models()"""),
     md(
         """
-### Look at them
+### Rap sheets
+
+The table truncates. `case.explain` gives the full record for one suspect —
+what it is, how it works, what it cost, what to look at next.
+
+- `case.explain()` with no name lists who you can ask about
+"""
+    ),
+    code(
+        """
+case.explain("knn_retrieval")
+"""
+    ),
+    md(
+        """
+### Mugshots
 
 Four seconds each. The thing every practitioner does, every paper figures, and
 no paper reports as a number.
@@ -181,6 +193,10 @@ You will want to revise it in ten minutes. Whether you *should* is the session.
 You may not ask "are you the best model?" Only questions with numeric answers.
 
 Every column below belongs to one line of questioning.
+
+**Knobs on `case.evaluate`:** `models=["knn", "vqgan"]` (who to ask),
+`controls=True` (add the scale bar), `ranks=True` (order, not values),
+`sigma=0.5` (kernel bandwidth), `n_samples=10`, `fresh=True`, `confirm=True`.
 """
     ),
     code("""case.metrics()"""),
@@ -198,15 +214,13 @@ The same question can be asked in three places, and they disagree:
 | how many distinct designs? | `pixel_vendi` | `pca_vendi` | `lv_vendi` |
 | did it answer the brief? | `pixel_paired_distance` | — | `lv_paired_distance` |
 
-- The disagreement is a fact about the **spaces**, not the models
-- A one-pixel shift is far in pixels, identical structurally. Which is right?
-- **Someone fitted each space.** `lv_*` uses an autoencoder the spec pins —
-  and `constrained_plvae_2d`, one of the suspects, is its sibling
-- `pca_*` is fitted on the training split. `mmd` is fitted on nothing
+- The disagreement is about the **spaces**, not the models
+- **Someone fitted each space.** `lv_*` uses an autoencoder the spec pins, and
+  `constrained_plvae_2d` — a suspect — is its sibling. `pca_*` is fitted on the
+  training split. `mmd` is fitted on nothing
 - Before reporting an `lv_` column: who fitted it, and were they in the room?
 
-One question, three spaces. Raw values span orders of magnitude, so read ranks —
-darkest is rank 1. **Count how often the rows disagree.**
+One question, three spaces. Darkest is rank 1. **Count the disagreements.**
 """
     ),
     code(
@@ -217,7 +231,7 @@ case.show(case.evaluate(["mmd", "pca_mmd", "lv_mmd"]))
     # ---- cost ----
     md(
         """
-## Cost
+## Cost — what did it take to get in the room?
 
 - Free to measure, and it decides whether a method is worth adopting
 - A 2% win that costs 200× the compute is not a win
@@ -242,7 +256,7 @@ re-times here instead.)
     # ---- realism ----
     md(
         """
-## Realism
+## Realism — does it look like the real thing?
 
 - Does the generated set look like the real one?
 - The family almost every paper reports, because it is the one you can afford
@@ -266,13 +280,11 @@ If it is `knn_retrieval`, you have found the defect at the centre of this family
     # ---- memorization ----
     md(
         """
-## Memorization
+## Memorization — inventing, or copying the case files?
 
 - Distance from each design to the nearest thing it could have copied
-- The only cheap family separating *learned the manifold* from *memorized points on it*
-- ≈ 1 — as far from training data as a real held-out design
-- ≈ 0 — memorization. ≫ 1 — could be invention, could be garbage
-- **Nothing here tells invention from garbage.** Random pixels score enormous
+- ≈ 1 as far off as a real held-out design · ≈ 0 memorized · ≫ 1 unlike anything
+- **It cannot tell invention from garbage.** Random pixels also score enormous
 - Also here: `lv_novelty`
 """
     ),
@@ -290,7 +302,7 @@ case.show("knn_retrieval", how="copying")
     # ---- diversity ----
     md(
         """
-## Diversity
+## Diversity — one answer, or one story on repeat?
 
 - More than one answer, or one story repeated?
 - **A diversity number means nothing alone.** What does `pixel_vendi = 23` tell you?
@@ -306,17 +318,16 @@ case.evaluate("pixel_vendi", controls=True).round(3)
     md(
         """
 `controls=True` adds a scale bar, the way one belongs on a micrograph. None is a
-suspect; none is ever ranked.
+suspect; none is ranked.
 
-- `collapsed` — one design repeated
-- `noise_doped` — real optimal designs with noise added
+- `collapsed` — one design, repeated
+- `noise_doped` — real optimal designs, corrupted
 - `volume_only` — hits the budget with material carrying no load
 
-**Adding noise to an optimal design cannot make it better.** Watch what it does
-here, then compare against `lv_vendi`.
+**Noise cannot improve an optimal design.** Watch what it does here, then to
+`lv_vendi`.
 
-**A diversity metric that rewards corruption is measuring entropy, and entropy
-is free.**
+**A diversity metric that rewards corruption is measuring entropy. Entropy is free.**
 """
     ),
     md(
@@ -333,7 +344,7 @@ One look at `dpp_geometric`:
     # ---- obedience ----
     md(
         """
-## Obedience
+## Obedience — did it answer the question asked?
 
 - A model should answer *the question asked*, not just produce something plausible
 - This is where a model that ignores its conditions gives itself away
@@ -362,7 +373,7 @@ families cannot tell a model that answered your question from one that ignored i
     # ---- legality ----
     md(
         """
-## Legality
+## Legality — does it obey the rules?
 
 - Does it obey the problem's constraints and budgets?
 - A floor, not evidence of quality
@@ -385,7 +396,7 @@ arranged so it carries no load whatsoever.
     # ---- performance ----
     md(
         """
-## Performance
+## Performance — is the design actually any good?
 
 - The one that matters, and the one nobody can afford
 - How far each design is from optimal, before and after re-optimization
@@ -449,41 +460,33 @@ And the cheap columns are the only ones anyone reports.
     ),
     md(
         """
-### About those names
+### The plants
 
-Some suspects were **built for this session rather than trained**. No weights,
-written in an afternoon, ranked beside the checkpoints on every column — several
-near the top. The disclosure above says what each was built to do.
+Some suspects were **built for this session, not trained**. No weights, written
+in an afternoon, ranked beside the checkpoints — several near the top.
 
-Two fail in opposite directions:
-
-- one looks reasonable in pixels, bad in the learned space
-- the other looks bad in pixels, reasonable in the fitted ones
-
-So "measure it in a better space" is not a recipe. **Whichever you had picked,
-one of these two would have got past you.**
-
-All are built from the training split only — none ever saw the held-out designs
-they were scored against. Source: `engiopt/baselines/planted.py`. It is short,
-and that is the point.
+- One looks reasonable in pixels, bad in the learned space
+- The other looks bad in pixels, reasonable in the fitted ones
+- **Whichever space you trusted, one of them would have got past you**
+- Built from the training split only. Never saw the held-out designs
+- Source: `engiopt/baselines/planted.py`. It is short, and that is the point
 """
     ),
     md(
         """
 ---
-## What you could not ask
+## The alibi you cannot check
 
 Every number came from **one trained checkpoint each**.
 
 - A different *sampling* seed only redraws noise — the 50 briefs are frozen
 - The question with teeth needs several **training** seeds per model
-- If two training runs of one model straddle another entirely, the gap you spent
-  an hour ranking was never a property of the method
+- If two runs of one model straddle another, the gap you just ranked was never
+  a property of the method
 - Those checkpoints exist, at seeds 1–10
 
-**Say how confident you are that your answer survives a retrain — and note you
-have no evidence either way.** That is the honest position, and it is the one
-almost every results table is in, without saying so.
+**Say how confident you are it survives a retrain — and that you have no
+evidence either way.** Almost every results table is in that position silently.
 """
     ),
     md(
@@ -503,11 +506,12 @@ best one.
 
 Blank cell below. Worth trying:
 
-- Take whichever suspect tops `mmd`, run `case.show(..., how="copying")` on it
-- Score `constrained_plvae_2d` on `lv_mmd`, then re-read who fitted that space
+- `case.show(<mmd winner>, how="copying")` — is your favourite copying?
+- `case.evaluate("lv_mmd")`, then re-read who fitted that space
 - `case.show("vqgan", "test", how="map")` — a space you do not trust
 - `case.evaluate("mmd", sigma=0.5)` — how much of the ranking was a default
   nobody reported?
+- `case.explain(<your pick>)` — can you say what it actually does?
 """
     ),
     code(
