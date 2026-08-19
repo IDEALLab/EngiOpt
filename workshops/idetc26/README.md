@@ -51,20 +51,31 @@ Colab installs EngiOpt from the branch named by the single `BRANCH` constant in
 `tools/build_notebook.py`. A GPU speeds up sampling from the trained models; it
 does **not** speed up the physics, which is CPU-bound topology optimization.
 
-## The notebook is a detective story in two acts
+## The notebook runs in one direction
 
 Ten suspects are in the room, each claiming to be a good generative model for
 the same problem, each handed the same 50 design briefs. One of them is the
-best. **Act 1** introduces the suspects and asks for a ranking by eye, before
-any number. **Act 2** is the interrogation: seven lines of questioning, asked one
-at a time, several of which contradict each other. The accusation at the end is
-spoken aloud, not recorded by code.
+best. Six sections, and each is about the same objects as the one before it, so
+nothing needs re-introducing:
+
+**1 · the data** → **2 · the suspects**, looked at, and a ranking written down
+before any number → **3 · the questions**, one family at a time, several of
+which contradict each other → **4 · the same questions in a fitted space**,
+which is the pixel columns again with a projection in front of them →
+**5 · the board**, the participant's own columns against the published simulator
+run → **6 · free work**, with `case.help()` as the reference. The accusation at
+the end is spoken aloud, not recorded by code.
 
 That is a deliberate reversal of the earlier "toolbox with no order" build. A
 catalogue of independent tools is a reference manual, and nobody learns a
-subject from a reference manual in ninety minutes. The story is what gives a
+subject from a reference manual in ninety minutes. The order is what gives a
 participant a reason to run the next cell, and it gives the disagreement between
 metrics somewhere to land.
+
+**The prose is short on purpose.** Sentence fragments where a fragment says it,
+full sentences only where a method is being explained, and no justification of
+the API's design — that is what this README is for. The audience is researchers;
+a cell that argues with them about why it exists is a cell they skim.
 
 **There are two commands.** `case.evaluate` for numbers, `case.show` for
 pictures:
@@ -72,10 +83,10 @@ pictures:
 ```python
 case = Case.open("beams2d")
 
+case.help()                         # the cheat sheet: five calls, then every knob
 case.models()                       # who is in the line-up
 case.metrics()                      # what may be asked, by line of questioning
 
-case.evaluate()                     # every cheap question, every suspect
 case.evaluate("diversity")          # one whole line of questioning
 case.evaluate("mmd", models="knn")  # one question, one suspect
 case.evaluate(["cost", "similarity"], controls=True)
@@ -83,9 +94,25 @@ case.evaluate(["cost", "similarity"], controls=True)
 case.show("diffusion")              # its designs
 case.show("knn", "diffusion")       # two suspects on the same brief
 case.show(answers)                  # a table of answers, drawn as ranks
-case.show(cheap, physics)           # two boards joined and drawn as one
+case.show(answers, physics)         # two boards joined and drawn as one
 case.show("knn", how="nearest_training")   # each design beside its closest training design
+case.show("vqgan", "test", how="space_map")   # where its designs sit in a fitted space
 ```
+
+**Neither command has a blanket form.** `case.evaluate()` and `case.show()` both
+raise, and the omission is the pedagogy: a board of every cheap column against
+every suspect is read rather than argued with, and a contact sheet of all ten
+line-ups is skimmed. Which three columns a person chose is the session, so
+naming the question is the work. Both errors say which call to make instead — a
+bare `TypeError` in front of ninety people is a room full of raised hands.
+
+**`case.help()` is the cheat sheet**, run as the sixth cell and pointed at again
+in the free-work section. It opens with the five calls that matter — `models`,
+`metrics`, `explain`, `evaluate`, `show` — and everything verbose sits below
+that: the views, the latent map, the controls, every knob with its default. The
+notebook documents none of it. Markdown argument tables went stale every time an
+argument moved and made each section twice as long as the idea in it; a printed
+sheet beside the code cannot.
 
 The previous build had `compute`, `evaluate`, `board`, `score`, `run_physics`,
 `seed_stability`, `reference_row`, `rank` and `winners` — nine ways to get a
@@ -116,9 +143,9 @@ strong one. The question with teeth needs checkpoints at several **training**
 seeds. The Hub has them (seeds 1–10 for each family's replicated configuration);
 pulling them is the natural next version of the session.
 
-### Seven lines of questioning
+### Six lines of questioning, and a seventh that is not about the models
 
-Nobody arrives knowing what `pca_coverage` is. They can hold seven questions in
+Nobody arrives knowing what `pca_coverage` is. They can hold six questions in
 their head, so every column the benchmark computes is filed under one, and
 naming a family is as real a call as naming a metric:
 
@@ -130,6 +157,14 @@ naming a family is as real a call as naming a metric:
 | `diversity` | has it more than one answer, or one story it repeats? | corruption |
 | `obedience` | did it answer the question it was actually asked? | material that carries no load |
 | `performance` | are the designs actually any good? | *(needs the simulator)* |
+
+The seventh, `latent_space`, holds `lv_dual_gap`, `lv_active_dims` and
+`pca_dims` — diagnostics of the fitted space the `lv_` columns are measured in,
+never ranked, because they are not properties of a model. It was called
+`instrument` and the accessor beside it was `case.instrument()`; both are
+`latent_space` now, since "instrument" told a participant nothing about which
+part of the suite it belonged to. `case.latent_space()` names the autoencoder,
+its measured active width, and the PCA width matched to it.
 
 The right-hand column is the point: every family has a way of being satisfied by
 a model that is obviously bad, which is why no single one settles the argument.
@@ -158,6 +193,14 @@ Nobody writes plotting code. `case.show` dispatches on what it is handed — a
 suspect name, two names, a board, a board and two of its columns — with the
 specialist views behind `how=`: `designs`, `compare`, `conditions`,
 `nearest_training`, `space_map`.
+
+`space_map` is the only one that draws a *distribution* rather than designs: a
+suspect's 50 designs as 50 points in the pinned latent space or the matched PCA
+subspace, over the training set as a backdrop graded by how good each design is.
+It is the shape that `mmd` reduces to one number, and collapse, near-miss and
+missing coverage are all legible in it and none of them are legible in the
+value. Drawing the same model in `space="lv"` and `space="pca"` is the cheapest
+demonstration that a distribution metric is a claim about a space.
 
 `case.evaluate` is `python -m engiopt.evaluate` in a notebook: same evaluator,
 same frozen spec, same argument names, and it prints the CLI line that produces
