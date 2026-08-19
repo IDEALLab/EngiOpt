@@ -351,11 +351,15 @@ class EvaluationContext:
         return np.asarray(self.sigma_designs if self.sigma_designs is not None else self.ref_designs)
 
     @cached_property
-    def pca_codes(self) -> tuple[npt.NDArray[Any], npt.NDArray[Any], npt.NDArray[Any]]:
-        """Generated, reference and bandwidth-basis designs in one matched PCA subspace.
+    def pca_model(self) -> Any:
+        """The fitted PCA that `pca_codes` projects through.
 
-        Cached because three metrics need the same projection and fitting PCA
-        per metric repeated the same decomposition on every row of the board.
+        Exposed on its own because the fit does not depend on what is being
+        scored: components come from the validation split, so any set of designs
+        with this problem's shape can be projected into the same subspace. That
+        is what a plot wanting a whole training split as its backdrop needs, and
+        it is not something `context_from_designs` can express, since that pairs
+        the designs it is handed with the spec's conditions one for one.
 
         Components are fitted on the validation split, and the subspace is given
         as many components as the pinned instrument keeps active, so the linear
@@ -363,8 +367,7 @@ class EvaluationContext:
         """
         from sklearn.decomposition import PCA
 
-        basis = self.sigma_basis
-        fit_flat = basis.reshape(len(basis), -1)
+        fit_flat = self.sigma_basis.reshape(len(self.sigma_basis), -1)
 
         n_components = DEFAULT_PCA_COMPONENTS
         if self.latent_lvae is not None:
@@ -372,8 +375,17 @@ class EvaluationContext:
 
             n_components = int(get_active_mask(self.latent_lvae.encoder).sum())
         n_components = max(1, min(n_components, *fit_flat.shape))
+        return PCA(n_components=n_components).fit(fit_flat)
 
-        pca = PCA(n_components=n_components).fit(fit_flat)
+    @cached_property
+    def pca_codes(self) -> tuple[npt.NDArray[Any], npt.NDArray[Any], npt.NDArray[Any]]:
+        """Generated, reference and bandwidth-basis designs in one matched PCA subspace.
+
+        Cached because three metrics need the same projection and fitting PCA
+        per metric repeated the same decomposition on every row of the board.
+        """
+        pca = self.pca_model
+        fit_flat = self.sigma_basis.reshape(len(self.sigma_basis), -1)
         return pca.transform(self.gen_flat), pca.transform(self.ref_flat), pca.transform(fit_flat)
 
     @cached_property

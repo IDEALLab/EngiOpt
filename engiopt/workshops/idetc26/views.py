@@ -88,6 +88,7 @@ class Views:
 
     def __init__(self, case: Case) -> None:
         self.case = case
+        self._projections: dict[str, tuple[Any, str]] = {}
 
     # ------------------------------------------------------------------
     # Looking at designs
@@ -189,7 +190,7 @@ class Views:
         self._finish(figure, "Same condition down each column")
         return figure
 
-    def copying(self, model: str, n: int = 4, seed: int = 1) -> Figure:
+    def nearest_training(self, model: str, n: int = 4, seed: int = 1) -> Figure:
         """Each design beside the closest design in the training set.
 
         The memorization check, done by eye. A model that has learned the
@@ -214,7 +215,7 @@ class Views:
         if train is None:
             raise ValueError(f"{self.case.config.problem_id!r} has no training split, so there is nothing to be near.")
 
-        model = self.case.bank.resolve(model).label
+        model = self.case.resolve(model).label
         designs = self.case.designs(model, seed=seed)[:n]
         anchors = np.asarray(train).reshape(len(train), -1)
         flat = np.asarray(designs).reshape(len(designs), -1)
@@ -248,7 +249,7 @@ class Views:
         """
         import matplotlib.pyplot as plt
 
-        model = self.case.bank.resolve(model).label
+        model = self.case.resolve(model).label
         designs = self.case.designs(model, seed=seed)
         requested = self._requested_volume()
         order = np.argsort(requested) if requested is not None else np.arange(len(designs))
@@ -386,7 +387,7 @@ class Views:
         """
         if not models:
             return list(self.case.bank.labels)
-        return [self.case.bank.resolve(model).label for model in models]
+        return [self.case.resolve(model).label for model in models]
 
     def _requested_volume(self) -> np.ndarray | None:
         """The volume fraction each condition asked for, if this problem has one."""
@@ -517,7 +518,7 @@ class Views:
             return "reference", "test set"
         if name.lower() == "train":
             return "train", "train set"
-        return "model", self.case.bank.resolve(name).label
+        return "model", self.case.resolve(name).label
 
     def _design_from(self, kind: str, label: str, index: int, condition: Any, seed: int) -> Any:
         """One design for one condition, from a model or from the data itself."""
@@ -606,7 +607,7 @@ class Views:
         display(figure)
         plt.close(figure)
 
-    def map(self, *models: str, space: str = "lv", seed: int = 1) -> Figure:
+    def space_map(self, *models: str, space: str = "lv", seed: int = 1) -> Figure:
         """Generated and real designs plotted in the top two dimensions of a space.
 
         The distribution columns reduce a whole comparison to one number. This
@@ -714,11 +715,43 @@ class Views:
 
     def _codes(self, designs: Any, space: str) -> tuple[Any, str]:
         """Encode designs into the requested space, with a name for its axes."""
-        context = self.case.evaluator.context_from_designs(np.asarray(designs))
+        project, axis_name = self._projection(space)
+        return project(np.asarray(designs)), axis_name
+
+    def _projection(self, space: str) -> tuple[Any, str]:
+        """A projection into `space`, fitted once and valid for any number of designs.
+
+        Read off a context built from the *reference* designs rather than from
+        whatever is being drawn, because `context_from_designs` pairs the
+        designs it is handed with the spec's conditions one for one and so
+        cannot hold a training split of thousands. Neither fitted object depends
+        on that pairing: the PCA comes from the validation split and the encoder
+        is the instrument the spec pins, so the backdrop lands in exactly the
+        space the metrics measure in.
+        """
+        if space in self._projections:
+            return self._projections[space]
+
+        context = self.case.evaluator.context_from_designs(np.asarray(self.case.evaluator.resolved.ref_designs))
         if space == "pca":
-            generated, _, _ = context.pca_codes
-            return generated, "PCA component"
-        return context.latent_codes[0], "latent dimension"
+            pca = context.pca_model
+
+            def project_pca(designs: Any) -> Any:
+                flat = np.asarray(designs)
+                return pca.transform(flat.reshape(len(flat), -1))
+
+            self._projections[space] = (project_pca, "PCA component")
+        else:
+            from engiopt.lvae.encode import encode_active
+
+            encoder = context.require_latent_lvae().encoder
+            device = next(encoder.parameters()).device
+
+            def project_latent(designs: Any) -> Any:
+                return encode_active(encoder, np.asarray(designs), device)
+
+            self._projections[space] = (project_latent, "latent dimension")
+        return self._projections[space]
 
 
 def _panel_title(kind: str, label: str) -> str:
