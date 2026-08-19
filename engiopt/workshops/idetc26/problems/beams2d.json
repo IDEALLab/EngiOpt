@@ -25,7 +25,9 @@
     "lv_dual_gap",
     "iog",
     "cog",
-    "fog"
+    "fog",
+    "settle_calls",
+    "first_call_yield"
   ],
   "bank": [
     {

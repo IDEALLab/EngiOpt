@@ -66,6 +66,23 @@ reports mean IOG 1.5e8 while finishing at FOG -2.2, which is one unrecoverable
 starting design rather than a worse model. Rank correlations are unaffected;
 any statement about magnitude needs the medians."""
 
+CONVERGENCE = ["settle_calls", "first_call_yield"]
+"""Read off the optimizer path rather than off its endpoints.
+
+`iog`, `cog` and `fog` are three summaries of a trajectory, and neither of these
+is recoverable from them: how many calls the objective took to settle, and how
+much of the whole improvement the first call bought. They cost nothing extra --
+the path is already in the context that produced the gaps -- so a run that
+computes the gaps and drops these is paying for them and throwing them away."""
+
+BOARD = [*PHYSICS, *CONVERGENCE]
+"""Every column one scoring run computes and publishes.
+
+Separate from `PHYSICS`, which stays the definition of "has this package been
+measured at all". A package scored before the convergence columns existed is not
+unmeasured; it is missing two columns, and `--require-complete` is how a sweep
+asks for those without re-running everything else."""
+
 
 def discover(problem_id: str, algos: list[str] | None) -> list[tuple[str, str, str | None, int]]:
     """Published packages for a problem as (key, algo, config_fingerprint, seed)."""
@@ -116,7 +133,9 @@ def published_physics(
         fingerprint: Configuration, or None for the canonical package.
         seed: Training seed.
         required: Columns that must all be present for the row to count.
-            Defaults to the mean gaps; pass `PHYSICS` to demand the medians too.
+            Defaults to the mean gaps; pass `PHYSICS` to demand the medians too,
+            or `BOARD` to demand the convergence columns as well. Whatever is
+            required, every board column the package carries is returned.
 
     Returns:
         The physics columns found, or None when the package has none, is
@@ -133,7 +152,7 @@ def published_physics(
         return None
     # Both shapes are in the wild; see `publish`.
     metrics = payload["metrics"] if isinstance(payload.get("metrics"), dict) else payload
-    found = {m: metrics[m] for m in PHYSICS if m in metrics and metrics[m] == metrics[m]}
+    found = {m: metrics[m] for m in BOARD if m in metrics and metrics[m] == metrics[m]}
     return found if all(m in found for m in needed) else None
 
 
@@ -179,7 +198,7 @@ def publish(
         "expensive": True,
         "metrics": {
             **existing,
-            **{metric: row[metric] for metric in PHYSICS if row.get(metric) is not None},
+            **{metric: row[metric] for metric in BOARD if row.get(metric) is not None},
             "algo_id": algo,
             "config_fingerprint": fingerprint,
             "problem_id": problem_id,
@@ -366,11 +385,15 @@ def select(entries: list[tuple[str, str, str | None, int]], args: Any) -> list[t
         print(f"  {len(entries) - len(keep)} package(s) already carry trajectories; skipping them")
         entries = keep
     elif args.skip_published:
-        required = list(PHYSICS) if args.require_medians else None
+        required = list(BOARD) if args.require_complete else list(PHYSICS) if args.require_medians else None
         keep = [
             entry
             for entry in entries
             if published_physics(args.problem_id, entry[1], entry[2], entry[3], required=required) is None
+            # A package carrying every column but no path is still incomplete:
+            # the paths are what any future trajectory metric will be computed
+            # from, and re-deriving them means re-running the optimizer.
+            or (args.require_complete and published_trajectories(args.problem_id, entry[1], entry[2], entry[3]) is None)
         ]
         print(f"  {len(entries) - len(keep)} package(s) already published on the Hub; skipping them")
         entries = keep
@@ -481,6 +504,14 @@ def build_parser() -> argparse.ArgumentParser:
         help="With --skip-published, treat a package carrying only the means as still needing a run.",
     )
     ap.add_argument(
+        "--require-complete",
+        action="store_true",
+        help=(
+            "With --skip-published, a package needs a run unless it carries every board column "
+            "AND its trajectories. This is the filter for filling in columns added after a sweep."
+        ),
+    )
+    ap.add_argument(
         "--trajectories-only",
         action="store_true",
         help=(
@@ -549,12 +580,12 @@ def score_all(entries: list[tuple[str, str, str | None, int]], evaluator: Any, o
             # the call: `score` discards its context, and these paths cost hours
             # of optimizer time to produce and kilobytes to keep.
             ctx = evaluator.context_for(generator)
-            scores = evaluator.score_context(ctx, only=PHYSICS, include_expensive=True)
+            scores = evaluator.score_context(ctx, only=BOARD, include_expensive=True)
         except Exception as exc:  # noqa: BLE001 - one bad package must not end a multi-hour sweep
             print(f"  [{index}/{len(entries)}] {key}: FAILED {type(exc).__name__}: {str(exc)[:110]}", flush=True)
             continue
 
-        row = {"key": key, "algo": algo, "seed": seed, **{m: scores.get(m) for m in PHYSICS}}
+        row = {"key": key, "algo": algo, "seed": seed, **{m: scores.get(m) for m in BOARD}}
         pd.DataFrame([row]).to_csv(out, mode="a", header=not out.exists(), index=False)
         # Purely additive when collecting paths: `publish` merges into
         # `metrics.json`, which is what the workshop's physics board reads, and
@@ -584,7 +615,7 @@ def score_all(entries: list[tuple[str, str, str | None, int]], evaluator: Any, o
             )
         elapsed = time.perf_counter() - started
         print(
-            f"  [{index}/{len(entries)}] {key:36s} {elapsed:7.1f}s  " + "  ".join(f"{m}={scores.get(m)}" for m in PHYSICS),
+            f"  [{index}/{len(entries)}] {key:36s} {elapsed:7.1f}s  " + "  ".join(f"{m}={scores.get(m)}" for m in BOARD),
             flush=True,
         )
 
@@ -620,8 +651,13 @@ def main() -> None:
     # for these the moment their metrics exist.
     named = [e for e in constructed(args.problem_id, args.constructed) if e[0] not in done]
     if named and args.skip_published:
-        required = list(PHYSICS) if args.require_medians else None
-        named = [e for e in named if published_physics(args.problem_id, e[1], e[2], e[3], required=required) is None]
+        required = list(BOARD) if args.require_complete else list(PHYSICS) if args.require_medians else None
+        named = [
+            e
+            for e in named
+            if published_physics(args.problem_id, e[1], e[2], e[3], required=required) is None
+            or (args.require_complete and published_trajectories(args.problem_id, e[1], e[2], e[3]) is None)
+        ]
     entries = entries + named
 
     if args.limit:
