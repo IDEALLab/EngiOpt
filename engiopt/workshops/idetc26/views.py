@@ -94,7 +94,7 @@ would compete with the two series that are actually being compared."""
 
 
 class Views:
-    """Every prebuilt figure. Nobody calls these directly -- `case.show()` does.
+    """Every prebuilt figure. Nobody calls these directly -- `case.show` does.
 
     They are kept as separate methods rather than one long function because each
     is a different picture with a different default, and `case.show` is a thin
@@ -114,7 +114,7 @@ class Views:
     # ------------------------------------------------------------------
 
     def designs(self, *models: str, n: int = 4, seed: int = 1, fresh: bool = False) -> Figure:
-        """Designs from the suspects you name, or from every one of them.
+        """Designs from the suspects you name.
 
         One suspect gets `n` designs laid out in a grid, because when you have
         asked about one model you want to see a lot of it. Several get one row
@@ -123,7 +123,7 @@ class Views:
 
         Args:
             *models: Suspects to show, by name or by any unambiguous fragment.
-                Omitted means all of them.
+                At least one; there is no all-of-them default.
             n: Designs per suspect.
             seed: Sampling seed.
             fresh: Resample from the checkpoint rather than using the cache.
@@ -133,7 +133,7 @@ class Views:
         """
         import matplotlib.pyplot as plt
 
-        labels = self._labels(models)
+        labels = self._labels(models, "designs")
         if len(labels) == 1:
             drawn = self.case.designs(labels[0], seed=seed, fresh=fresh)
             count = min(n, len(drawn))
@@ -186,7 +186,8 @@ class Views:
         each model produced when asked the same question.
 
         Args:
-            *models: Labels to compare. Omitted means all of them.
+            *models: Labels to compare, at least one. The reference row is drawn
+                whatever you name, so one suspect is a legitimate ask.
             n: Conditions shown.
             seed: Sampling seed.
 
@@ -195,7 +196,7 @@ class Views:
         """
         import matplotlib.pyplot as plt
 
-        labels = self._labels(models)
+        labels = self._labels(models, "compare")
         rows: list[tuple[str, Any]] = [("reference", np.asarray(self.case.evaluator.resolved.ref_designs))]
         rows += [(label, self.case.designs(label, seed=seed)) for label in labels]
 
@@ -301,7 +302,7 @@ class Views:
         not.
 
         Args:
-            frame: Any board, e.g. what `case.evaluate()` returned.
+            frame: Any board, e.g. what `case.evaluate("diversity")` returned.
 
         Returns:
             The figure.
@@ -398,14 +399,26 @@ class Views:
     # Internals
     # ------------------------------------------------------------------
 
-    def _labels(self, models: tuple[str, ...]) -> list[str]:
-        """Resolve the models a view was asked for, defaulting to the whole bank.
+    def _labels(self, models: tuple[str, ...], how: str = "designs") -> list[str]:
+        """Resolve the models a view was asked for. At least one is required.
 
         Fragments are accepted, so `compare("knn", "diffusion")` works and the
         figure is still labelled with the models' full names.
+
+        There is no "all of them" default. A figure with ten rows in it is
+        skimmed rather than read, and the whole point of the session is that a
+        participant can say which suspects they looked at and what they were
+        looking for.
+
+        Raises:
+            TypeError: If no model was named.
         """
         if not models:
-            return list(self.case.bank.labels)
+            raise TypeError(
+                f"how={how!r} needs at least one suspect -- name them: "
+                f'case.show("diffusion", how={how!r}). `case.models()` lists the line-up. '
+                "There is deliberately no call that draws every suspect at once."
+            )
         return [self.case.resolve(model).label for model in models]
 
     def _requested_volume(self) -> np.ndarray | None:
@@ -648,10 +661,9 @@ class Views:
         model lands where the real held-out designs land.
 
         Args:
-            *models: Up to two sources: a model name, or `"test"` / `"train"`.
-                Defaults to the first two models in the bank. Two and no more --
-                past three series on one scatter the every-pair separation stops
-                holding.
+            *models: One or two sources: a model name, or `"test"` / `"train"`.
+                Two and no more -- past three series on one scatter the
+                every-pair separation stops holding.
             space: `"lv"` for the pinned autoencoder's latent space, `"pca"` for
                 the matched PCA subspace.
             seed: Sampling seed.
@@ -663,6 +675,7 @@ class Views:
             The figure.
 
         Raises:
+            TypeError: If no source was named.
             ValueError: If `space` is not one of the two, or the latent space
                 was asked for on a problem whose spec pins no autoencoder.
             KeyError: If `color` names no column the training split carries.
@@ -671,7 +684,12 @@ class Views:
 
         if space not in {"lv", "pca"}:
             raise ValueError(f"space must be 'lv' or 'pca', not {space!r}.")
-        chosen = list(models)[:2] or list(self.case.bank.labels)[:2]
+        chosen = list(models)[:2]
+        if not chosen:
+            raise TypeError(
+                'how="space_map" needs a source -- name one or two: '
+                'case.show("vqgan", "test", how="space_map"). Either may be "test" or "train".'
+            )
 
         reference, axis_names = self._codes(self.case.evaluator.resolved.ref_designs, space)
         # Ordered by spread in the real designs: the axes worth plotting are the
@@ -836,7 +854,7 @@ class Views:
         designs it is handed with the spec's conditions one for one and so
         cannot hold a training split of thousands. Neither fitted object depends
         on that pairing: the PCA comes from the validation split and the encoder
-        is the instrument the spec pins, so the backdrop lands in exactly the
+        is the autoencoder the spec pins, so the backdrop lands in exactly the
         space the metrics measure in.
         """
         if space in self._projections:

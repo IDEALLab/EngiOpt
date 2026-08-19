@@ -13,17 +13,22 @@ You get four things and no more:
     case.evaluate("diversity")        put a question to the suspects
     case.show("diffusion")            look at what a suspect actually produced
 
-**`case.evaluate` is the only way to measure anything.** It takes questions and
-suspects -- one of each, lists of each, or neither, which means all of them --
-and it does not care whether a question is one metric, a whole line of
-questioning, cheap, or backed by the simulator:
+**`case.evaluate` is the only way to measure anything.** It takes a question --
+one metric, a whole line of questioning, or a list mixing both -- and, if you
+name them, the suspects to put it to:
 
-    case.evaluate()                                  every cheap question, every suspect
     case.evaluate("mmd")                             one question, every suspect
     case.evaluate("diversity")                       one line of questioning
     case.evaluate(["cost", "memorization"])          two of them
     case.evaluate("mmd", models=["knn", "diffusion"])       two suspects
-    case.evaluate("performance", n_samples=2)         the expensive one
+    case.evaluate("cog", models="knn", n_samples=2)   the expensive one
+
+**Neither command has a blanket form.** `evaluate` will not answer every
+question at once and `show` will not draw every suspect at once, and the
+omission is the pedagogy rather than a missing feature: a board of every column
+against every suspect, or a contact sheet of all ten line-ups, is read instead
+of thought about, and the session is entirely about which three columns a person
+chose and why. Naming the question is the work.
 
 and the knobs are there when you want them -- `sigma=` to change the kernel
 bandwidth, `n_samples=` and `random_conditions=` to change which designs get
@@ -49,8 +54,8 @@ Three jobs, and it is worth knowing which:
    comparability between two rows of the same board.
 2. **It is the cache.** Drawn designs and computed columns are memoized on
    `(model, seed)`, which is why asking the same thing twice is free.
-3. **It is the menu.** `case.<tab>` is the entire toolbox, and there are four
-   entries in it.
+3. **It is the menu.** `case.<tab>` is the entire toolbox, and `case.help()` is
+   the cheat sheet for it: the five calls that matter first, every knob after.
 """
 
 from __future__ import annotations
@@ -80,84 +85,129 @@ if TYPE_CHECKING:
     from engiopt.workshops.idetc26.views import Views
 
 HELP = """
-THE CASE FILE -- four commands, and everything is optional inside them.
+THE CASE FILE -- cheat sheet. First block is all you need; the rest is reference.
 
-WHO IS IN THE LINE-UP
-  case.models()                          the suspects, and what each one is
-  case.explain("diffusion")              one suspect, in full: what it does, step by step
-  case.metrics()                         what you may ask, grouped by line of questioning
-  case.metrics("diversity")              one line of questioning, in detail
+================================================================================
+THE MINIMUM
+================================================================================
+  case.models()                    the line-up
+  case.metrics()                   what may be asked
+  case.explain("diffusion")        one suspect, in full
+  case.evaluate("mmd")             one question, every suspect
+  case.show("diffusion")           one suspect's designs
 
-ASK A QUESTION            case.evaluate(what, models=who)
-  case.evaluate()                        every cheap question, every suspect
-  case.evaluate("mmd")                   one question
-  case.evaluate("diversity")             a whole line of questioning
-  case.evaluate(["cost", "similarity"])   several of either, mixed freely
-  case.evaluate("mmd", models="knn")     one suspect
+Names are fragments: "diffusion", "knn", "plvae", as long as only one matches.
+Neither command has a blanket form -- name the question, name the suspects.
+
+================================================================================
+ASKING            case.evaluate(what, models=who)
+================================================================================
+  case.evaluate("mmd")                      one question, every suspect
+  case.evaluate("diversity")                a whole line of questioning
+  case.evaluate(["mmd", "novelty_ratio"])   a combination you picked
+  case.evaluate("mmd", models="knn")        one suspect
   case.evaluate("mmd", models=["knn", "diffusion"])
-  case.evaluate(ranks=True)              answers as ranks, 1 = best
-  case.evaluate(controls=True)           score models whose answer is already known
-  case.evaluate("performance", n_samples=2)   the simulator, on two briefs
+  case.evaluate("cog", models="knn", n_samples=2)   the simulator, kept small
 
-  ...and the knobs, all optional, all off by default:
-  ranks=True           print each column as a placing (1 = best) instead of its value
-  controls=True        add the known-answer rows under the board, as a scale bar
-  n_samples=10         score on 10 of the spec's briefs instead of all of them
-  random_conditions=True   ...and take those 10 at random rather than the first 10
-  sigma=0.5            force the kernel width used by mmd / dpp / vendi, instead of
-                       the median-distance default nobody reports
-  fresh=True           ignore the cached designs: sample from the checkpoints now.
-                       Slower, and the only way gen_seconds times *this* machine
+================================================================================
+LOOKING           case.show(who, how=which_picture)
+================================================================================
+  case.show("diffusion")           its designs
+  case.show("diffusion", n=12)     more of them
+  case.show("knn", "diffusion")    two suspects, same brief
+  case.show("cgan", "test")        a suspect against the real optimum
+  case.show("train") / ("test")    the data itself, on sliders
 
+  how=            draws
+  "designs"       [default] a grid of one suspect's designs
+  "compare"       the suspects you name on one brief, real optimum on top
+                  case.show("knn", "vqgan", how="compare")
+  "conditions"    each design captioned "asked 0.30 / got 0.41"
+                  case.show("gan_cnn_2d", how="conditions")
+  "nearest_training"  each design above its closest training design, with the
+                  distance -- the memorization check, by eye
+                  case.show("knn", how="nearest_training")
+  "space_map"     a suspect's designs as points in a fitted space -- below
+
+================================================================================
+THE LATENT MAP    case.show(who, "test", how="space_map")
+================================================================================
+Every other view draws designs; this one draws the distribution. A suspect's 50
+designs become 50 points in a fitted space, over the training set as a backdrop.
+Collapse, near-miss and missing coverage are legible here and are not
+recoverable from an MMD value.
+
+  case.show("vqgan", "test", how="space_map")                   against real designs
+  case.show("vqgan", "test", how="space_map", space="pca")      the linear control
+  case.show("vqgan", "test", how="space_map", color="volfrac")  regrade the backdrop
+  case.show("knn", "vqgan", how="space_map")                    two suspects
+
+  space="lv"    [default] the autoencoder the spec pins; case.latent_space()
+                names it, and one suspect is its sibling
+  space="pca"   a linear subspace fitted to the same width, as the control
+  color=        grades the backdrop: "performance" [default], any condition by
+                name, or "none"
+
+Axes are the two directions the *real* designs vary along most, so "lv" and
+"pca" are two different questions about the same designs.
+
+One or two sources; either may be "test" or "train". Two is the limit.
+
+================================================================================
 THE CONTROLS -- models whose answer is known before you measure
-  case.evaluate("pixel_vendi", controls=True)    put the scale bar under the board
-  case.explain("noise_doped")                    what a control is built to do
-  case.show("noise_doped")                       ...and what it looks like
+================================================================================
+  case.evaluate("pixel_vendi", controls=True)    the scale bar under the board
+  case.explain("noise_doped")                    how a control is built
+  case.show("noise_doped")                       what it looks like
 
-  collapsed     one design, repeated for every brief. A diversity column's floor.
-  noise_doped   real optimal designs plus Gaussian noise. Noise cannot improve an
-                optimal design, so a column that *rises* here is rewarding damage.
-  volume_only   blobs thresholded to hit the volume budget exactly, carrying no load.
-                Whatever feasibility reads here is what feasibility is worth alone.
+  collapsed     one design repeated for every brief -- a diversity column's floor
+  noise_doped   real optima plus Gaussian noise -- strictly worse than the data,
+                so a column that rises here is rewarding damage
+  volume_only   blobs hitting the volume budget exactly, carrying no load --
+                whatever feasibility reads here is what feasibility is worth
 
-  They are never ranked and never suspects. Read them as endpoints: a column whose
-  suspects all sit between `collapsed` and `noise_doped` has not separated anything.
+  Never ranked, never suspects. Every suspect between `collapsed` and
+  `noise_doped` means the column separated nothing.
 
-LOOK AT SOMETHING         case.show(what)
-  case.show()                            a few designs from every suspect
-  case.show("diffusion")                 one suspect's designs
-  case.show("diffusion", n=20)           more of them
-  case.show("knn", "diffusion")          two suspects, same condition, side by side
-  case.show("cgan", "test")              a suspect against the real optimum
-  case.show("train")                     the designs every suspect was fitted on
-  case.show("test")                      the held-out designs they are scored against
-  case.show(answers)                     a table of answers, drawn as ranks
-  case.show(cheap, physics)              two tables joined and drawn as one
-  case.show(answers, "mmd", "novelty_ratio")   two columns against each other
+================================================================================
+YOUR OWN BOARD
+================================================================================
+  answers = case.evaluate(["mmd", "novelty_ratio", "pixel_vendi"])
+  case.show(answers)                             your columns, as ranks
+  case.show(answers, case.physics())             joined with the simulator's
+  case.show(answers, "mmd", "novelty_ratio")     two columns against each other
 
-  ...and `how=`, which picks one of five pictures, each named for what it draws:
-  how="designs"           a grid of one suspect's designs -- the default, said out loud
-  how="compare"           one row per suspect, one brief per column, real optimum on top
-  how="conditions"        each design captioned "asked 0.30 / got 0.41": did it obey?
-  how="nearest_training"  each design with its closest training design beneath it, and
-                          the distance between them printed
-  how="space_map"         a scatter: your sources in the top two dimensions of a fitted
-                          space, the training set faded behind them
+================================================================================
+THE KNOBS -- all optional, all off by default
+================================================================================
+  case.evaluate(...)
+    models=["knn", "vqgan"]   who to ask, by fragment            [all of them]
+    ranks=True                placings, 1 = best, instead of values
+    controls=True             add the known-answer rows underneath
+    n_samples=10              score on 10 of the spec's briefs, not all
+    random_conditions=True    ...those 10 at random, not the first 10. One draw,
+                              shared by every suspect
+    sigma=0.5                 kernel width for mmd / dpp / vendi, replacing the
+                              median-distance default nobody reports
+    fresh=True                sample now instead of reading the cache. Slow, and
+                              the only way gen_seconds times *this* machine
 
-  ...and the rest of the knobs:
-  n=12               how many designs to draw (where the view draws designs)
-  seed=2             which sampling draw -- redraws the noise, never the briefs
-  space="pca"        which space how="space_map" draws in; "lv" is the default
-  color="volfrac"    what how="space_map" grades the training backdrop by:
-                     "performance" (the default), any condition, or "none"
-  fresh=True         resample from the checkpoint instead of reading the design cache
+  case.show(...)
+    n=12                      designs drawn                                [4]
+    seed=2                    sampling draw. Redraws noise, never the briefs [1]
+    space="pca"               space for how="space_map"                 ["lv"]
+    color="volfrac"           backdrop grading for how="space_map"
+                                                            ["performance"]
+    fresh=True                resample instead of reading the cache
 
+================================================================================
 THE REST OF THE FILE
-  case.designs("knn")                    the raw array, if you want to compute your own
-  case.designs("test")                   ...and the real designs it is scored against
-  case.problem.render(design)            EngiBench's own renderer for this problem
-  case.instrument()                      which autoencoder the latent columns measure in
-  case.physics(passphrase)               the precomputed simulator board
+================================================================================
+  case.designs("knn")            the raw array, to compute your own
+  case.designs("test")           the real designs it is scored against
+  case.problem.render(design)    EngiBench's renderer: the physics, not density
+  case.latent_space()            which autoencoder the lv_ columns measure in
+  case.physics()                 the published simulator board, from the Hub
 """
 
 
@@ -435,9 +485,9 @@ class Case:
         Args:
             metrics: What to ask. A metric name (`"mmd"`), a line of questioning
                 (`"diversity"`, which asks every metric in it), or a list mixing
-                both. `None` asks every cheap question this problem has.
+                both. Required: there is no call that asks everything.
             models: Which suspects, by name or by any unambiguous fragment.
-                `None` asks all of them.
+                `None` asks all of them, which is what makes a column a ranking.
             ranks: Return per-column ranks, 1 = best, instead of raw values.
             controls: Also score the models whose answer is already known, as a
                 scale bar beneath the board. They are never ranked.
@@ -458,7 +508,20 @@ class Case:
 
         Returns:
             A board indexed by suspect.
+
+        Raises:
+            TypeError: If no question was named. Asking every column of every
+                suspect produces a board to read rather than an argument to
+                make, and choosing the three columns you would report is the
+                whole exercise.
         """
+        if metrics is None:
+            raise TypeError(
+                "case.evaluate needs a question: case.evaluate('mmd'), a whole line of "
+                "questioning with case.evaluate('diversity'), or a combination you chose with "
+                "case.evaluate(['mmd', 'novelty_ratio']). There is deliberately no call that asks "
+                "every column of every suspect. `case.metrics()` lists what there is to ask."
+            )
         chosen = self._resolve_metrics(metrics)
         expensive = [name for name in chosen if METRICS[name].cost == "expensive"]
         labels = self._resolve_models(models)
@@ -517,7 +580,6 @@ class Case:
         What you hand it decides what you get, because in every case there is
         exactly one sensible picture:
 
-            case.show()                     a few designs from every suspect
             case.show("diffusion")          one suspect's designs
             case.show("knn", "diffusion")   two suspects, same condition, side by side
             case.show("cgan", "test")       a suspect against the real optimum
@@ -525,19 +587,24 @@ class Case:
             case.show(answers)              a table of answers, drawn as ranks
             case.show(answers, "mmd", "viol")   two columns of it against each other
 
+        **Somebody has to be named.** There is no contact sheet of all ten
+        line-ups, because looking at every suspect at once is how a person ends
+        up with an impression instead of a reason, and "which three did you look
+        at, and what were you looking for" is the question the session is about.
+
         Five views are specific enough to need naming, via `how=`. Each is named
         for the picture it draws rather than for the point it makes, so that a
         participant reading somebody else's cell can tell what came out of it:
 
             how="designs"           a grid of one suspect's designs -- the default
-            how="compare"           every suspect on one brief, real optimum on top
+            how="compare"           the suspects you name, real optimum on top
             how="conditions"        what was asked of it, against what came back
             how="nearest_training"  each design beside its closest training design
             how="space_map"         where its designs sit against the real ones
 
         Args:
             *what: A suspect name, two names, one or more boards, or a board and
-                two of its column names. Nothing at all means every suspect.
+                two of its column names.
             how: One of the named views above.
             n: How many designs to draw, where that applies.
             seed: Sampling seed.
@@ -553,9 +620,20 @@ class Case:
 
         Raises:
             KeyError: If `how` is not one of the named views.
-            TypeError: If the arguments are not a shape `show` can draw.
+            TypeError: If nothing was named, or if the arguments are not a shape
+                `show` can draw.
         """
         views = self._views_object()
+
+        if not what and how is None:
+            # With `how=` given, the view itself says who it needed and why,
+            # which is a better message than this general one.
+            raise TypeError(
+                "case.show needs something to look at: case.show('diffusion') for one suspect's "
+                "designs, case.show('knn', 'diffusion') for two side by side, case.show('train') "
+                "for the data itself, or case.show(answers) for a board you computed. There is "
+                "deliberately no call that draws every suspect at once."
+            )
 
         if how is not None:
             if how not in _VIEWS:
@@ -633,12 +711,12 @@ class Case:
     # The rest of the file
     # ------------------------------------------------------------------
 
-    def instrument(self) -> pd.Series:
-        """Which autoencoder the latent columns measure in.
+    def latent_space(self) -> pd.Series:
+        """Which autoencoder the `lv_` columns measure in, and how wide it is.
 
-        Printed rather than assumed. A latent metric is only comparable between
-        two rows encoded by the same instrument, and the only way a reader can
-        check that is if the row says which one it was.
+        Named for what it is. A latent metric is only comparable between two
+        rows encoded in the same space, and the only way a reader can check that
+        is if the row says which space it was.
 
         The active width is read off the loaded encoder's own pruning mask, not
         off the spec. `expected_n_active` is a declaration that nothing
@@ -647,19 +725,19 @@ class Case:
         actually computed in.
 
         Returns:
-            The instrument's identity, or an empty series when the spec pins none.
+            The space's identity, or an empty series when the spec pins none.
         """
         pinned = self.evaluator.spec.latent_instrument
         if pinned is None:
             print(f"{self.config.spec} pins no autoencoder, so this problem has no latent columns.")
-            return pd.Series(dtype=object, name="latent instrument")
+            return pd.Series(dtype=object, name="latent space")
         active = _measured_active_dims(self.evaluator.latent_lvae)
         fields: dict[str, object] = {
             "algo": pinned.algo,
             "config_fingerprint": pinned.config_fingerprint,
             "seed": pinned.seed,
             "measured_n_active": active,
-            # The linear control is fitted to the instrument's width on purpose:
+            # The linear control is fitted to the latent width on purpose:
             # a PCA subspace of some other size would answer a different
             # question, and "the latent space beat PCA" would be a statement
             # about dimensionality rather than about the manifold.
@@ -669,7 +747,7 @@ class Case:
             "recon_only_n_active": _measured_active_dims(self.evaluator.latent_recon_lvae),
             "revision": pinned.revision,
         }
-        return pd.Series(fields, name="latent instrument")
+        return pd.Series(fields, name="latent space")
 
     def physics(self, passphrase: str | None = None, path: str | Path | None = None) -> pd.DataFrame:
         """The precomputed simulator board, read from the Hub.
@@ -843,7 +921,7 @@ class Case:
         requested = [models] if isinstance(models, str) else list(models)
         return [self.bank.resolve(name).label for name in requested]
 
-    def _resolve_metrics(self, metrics: str | list[str] | tuple[str, ...] | None) -> list[str]:
+    def _resolve_metrics(self, metrics: str | list[str] | tuple[str, ...]) -> list[str]:
         """Expand whatever was asked for into a list of metric names.
 
         A name is a metric, or a whole line of questioning, and a list may mix
@@ -853,25 +931,22 @@ class Case:
         Raises:
             KeyError: If a name is neither a metric nor a line of questioning.
         """
-        if metrics is None:
-            requested = list(self.config.cheap_metrics)
-        else:
-            names = [metrics] if isinstance(metrics, str) else list(metrics)
-            requested = []
-            unknown = []
-            for name in names:
-                if name in METRICS:
-                    requested.append(name)
-                elif name in FAMILIES:
-                    requested.extend(m for m in self.config.metrics if family_of(m) == name)
-                else:
-                    unknown.append(name)
-            if unknown:
-                raise KeyError(
-                    f"Not a metric or a line of questioning: {unknown}. "
-                    f"Lines of questioning: {list(FAMILIES)}. `case.metrics()` lists the columns."
-                )
-            requested = list(dict.fromkeys(requested))
+        names = [metrics] if isinstance(metrics, str) else list(metrics)
+        requested = []
+        unknown = []
+        for name in names:
+            if name in METRICS:
+                requested.append(name)
+            elif name in FAMILIES:
+                requested.extend(m for m in self.config.metrics if family_of(m) == name)
+            else:
+                unknown.append(name)
+        if unknown:
+            raise KeyError(
+                f"Not a metric or a line of questioning: {unknown}. "
+                f"Lines of questioning: {list(FAMILIES)}. `case.metrics()` lists the columns."
+            )
+        requested = list(dict.fromkeys(requested))
 
         available = self.config.available(requested)
         unavailable = self.config.unavailable_metrics()

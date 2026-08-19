@@ -161,7 +161,7 @@ naming a family is as real a call as naming a metric:
 The seventh, `latent_space`, holds `lv_dual_gap`, `lv_active_dims` and
 `pca_dims` — diagnostics of the fitted space the `lv_` columns are measured in,
 never ranked, because they are not properties of a model. It was called
-`instrument` and the accessor beside it was `case.instrument()`; both are
+`instrument` and the accessor beside it is `case.latent_space()`; both are
 `latent_space` now, since "instrument" told a participant nothing about which
 part of the suite it belonged to. `case.latent_space()` names the autoencoder,
 its measured active width, and the PCA width matched to it.

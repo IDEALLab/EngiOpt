@@ -127,13 +127,14 @@ FAMILIES: dict[str, Family] = {
             "why every other family in this list exists."
         ),
     ),
-    "instrument": Family(
-        key="instrument",
-        question="What is the measuring device itself doing?",
+    "latent_space": Family(
+        key="latent_space",
+        question="What is the latent space itself doing?",
         detail=(
-            "Diagnostics of the latent space the other columns are measured in, not properties of a model. "
+            "Diagnostics of the fitted space the lv_ columns are measured in, not properties of a model. "
             "Never ranked, because there is no better or worse -- they are here so a reader can check the "
-            "instrument was working before trusting what it read."
+            "space was behaving before trusting what was measured in it. `case.latent_space()` names the "
+            "autoencoder they describe."
         ),
     ),
 }
@@ -176,9 +177,9 @@ _BASE_FAMILY = {
     "train_minutes": "cost",
     "gen_seconds": "cost",
     "sample_seconds": "cost",
-    "dual_gap": "instrument",
-    "active_dims": "instrument",
-    "dims": "instrument",
+    "dual_gap": "latent_space",
+    "active_dims": "latent_space",
+    "dims": "latent_space",
 }
 """Family for a metric with its space prefix stripped off.
 
@@ -232,8 +233,8 @@ def family_of(metric: str) -> str:
         return _BASE_FAMILY[stem]
     if metric in _BASE_FAMILY:
         return _BASE_FAMILY[metric]
-    registry_family = METRICS[metric].family if metric in METRICS else "instrument"
-    return registry_family if registry_family in FAMILIES else "instrument"
+    registry_family = METRICS[metric].family if metric in METRICS else "latent_space"
+    return registry_family if registry_family in FAMILIES else "latent_space"
 
 
 def space_of(metric: str) -> str:
