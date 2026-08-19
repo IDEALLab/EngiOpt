@@ -23,7 +23,7 @@ questioning, cheap, or backed by the simulator:
     case.evaluate("diversity")                       one line of questioning
     case.evaluate(["cost", "memorization"])          two of them
     case.evaluate("mmd", models=["knn", "diffusion"])       two suspects
-    case.evaluate("performance", confirm=True, n_samples=2) the expensive one
+    case.evaluate("performance", n_samples=2)         the expensive one
 
 and the knobs are there when you want them -- `sigma=` to change the kernel
 bandwidth, `n_samples=` and `random_conditions=` to change which designs get
@@ -92,18 +92,36 @@ ASK A QUESTION            case.evaluate(what, models=who)
   case.evaluate()                        every cheap question, every suspect
   case.evaluate("mmd")                   one question
   case.evaluate("diversity")             a whole line of questioning
-  case.evaluate(["cost", "realism"])     several of either, mixed freely
+  case.evaluate(["cost", "similarity"])   several of either, mixed freely
   case.evaluate("mmd", models="knn")     one suspect
   case.evaluate("mmd", models=["knn", "diffusion"])
   case.evaluate(ranks=True)              answers as ranks, 1 = best
   case.evaluate(controls=True)           score models whose answer is already known
-  case.evaluate("performance", n_samples=2, confirm=True)     the simulator
+  case.evaluate("performance", n_samples=2)   the simulator, on two briefs
 
-  ...and if you want to argue with the measurement itself:
-  sigma=0.5            the kernel bandwidth, instead of the median heuristic
-  n_samples=10         compare on fewer conditions
-  random_conditions=True   ...drawn at random rather than the first ones
-  fresh=True           resample from the checkpoints, and time them
+  ...and the knobs, all optional, all off by default:
+  ranks=True           print each column as a placing (1 = best) instead of its value
+  controls=True        add the known-answer rows under the board, as a scale bar
+  n_samples=10         score on 10 of the spec's briefs instead of all of them
+  random_conditions=True   ...and take those 10 at random rather than the first 10
+  sigma=0.5            force the kernel width used by mmd / dpp / vendi, instead of
+                       the median-distance default nobody reports
+  fresh=True           ignore the cached designs: sample from the checkpoints now.
+                       Slower, and the only way gen_seconds times *this* machine
+
+THE CONTROLS -- models whose answer is known before you measure
+  case.evaluate("pixel_vendi", controls=True)    put the scale bar under the board
+  case.explain("noise_doped")                    what a control is built to do
+  case.show("noise_doped")                       ...and what it looks like
+
+  collapsed     one design, repeated for every brief. A diversity column's floor.
+  noise_doped   real optimal designs plus Gaussian noise. Noise cannot improve an
+                optimal design, so a column that *rises* here is rewarding damage.
+  volume_only   blobs thresholded to hit the volume budget exactly, carrying no load.
+                Whatever feasibility reads here is what feasibility is worth alone.
+
+  They are never ranked and never suspects. Read them as endpoints: a column whose
+  suspects all sit between `collapsed` and `noise_doped` has not separated anything.
 
 LOOK AT SOMETHING         case.show(what)
   case.show()                            a few designs from every suspect
@@ -117,12 +135,20 @@ LOOK AT SOMETHING         case.show(what)
   case.show(cheap, physics)              two tables joined and drawn as one
   case.show(answers, "mmd", "novelty_ratio")   two columns against each other
 
-  ...and the specialist views:
-  case.show("cgan", how="conditions")    what was asked vs what came back
-  case.show("knn",  how="copying")       each design beside its nearest training design
-  case.show("cgan", how="map")           where its designs sit against the real ones
-  case.show("cgan", how="map", space="pca")
-  case.show(how="compare")               every suspect, one brief per column
+  ...and `how=`, which picks one of five pictures, each named for what it draws:
+  how="designs"           a grid of one suspect's designs -- the default, said out loud
+  how="compare"           one row per suspect, one brief per column, real optimum on top
+  how="conditions"        each design captioned "asked 0.30 / got 0.41": did it obey?
+  how="nearest_training"  each design with its closest training design beneath it, and
+                          the distance between them printed
+  how="space_map"         a scatter: your sources in the top two dimensions of a fitted
+                          space, the training set faded behind them
+
+  ...and the rest of the knobs:
+  n=12               how many designs to draw (where the view draws designs)
+  seed=2             which sampling draw -- redraws the noise, never the briefs
+  space="pca"        which space how="space_map" draws in; "lv" is the default
+  fresh=True         resample from the checkpoint instead of reading the design cache
 
 THE REST OF THE FILE
   case.designs("knn")                    the raw array, if you want to compute your own
@@ -273,18 +299,20 @@ class Case:
         good idea is left to the evidence.
 
         Args:
-            model: Any unambiguous part of a suspect's name. Omitted, it lists
-                who can be asked about.
+            model: Any unambiguous part of a suspect's name, or of a control's.
+                Omitted, it lists everyone who can be asked about.
         """
         if model is None:
-            print("Ask about any of these:\n")
-            for member in self.bank:
-                print(f"  case.explain({member.label!r})")
+            self._explain_index()
             return
 
-        member = self.bank.resolve(model)
+        member = self.resolve(model)
+        is_control = member.label in set(self.controls.labels)
         rule = "-" * min(len(member.label) + 4, 78)
         print(f"\n{member.label}\n{rule}")
+        if is_control:
+            print("A CONTROL, not a suspect: a model whose answer is already known, built to say what a")
+            print("column reads at an input you can already judge. Never ranked against the line-up.\n")
         print(f"{member.summary}\n")
 
         if member.description:
@@ -303,8 +331,18 @@ class Case:
         print(
             f"\nLook at it:   case.show({member.label!r})"
             f"\nAgainst real: case.show({member.label!r}, 'test')"
-            f"\nIs it copying? case.show({member.label!r}, how='copying')"
+            f"\nIs it copying? case.show({member.label!r}, how='nearest_training')"
         )
+
+    def _explain_index(self) -> None:
+        """List everyone `explain` can be asked about, suspects first."""
+        print("Ask about any of these:\n")
+        for member in self.bank:
+            print(f"  case.explain({member.label!r})")
+        if len(self.controls):
+            print("\n...and the controls, which are calibration standards rather than suspects:\n")
+            for member in self.controls:
+                print(f"  case.explain({member.label!r})")
 
     def metrics(self, family: str | None = None) -> pd.DataFrame:
         """What you are allowed to ask, grouped by the line of questioning it belongs to.
@@ -373,7 +411,6 @@ class Case:
         random_conditions: bool = False,
         sigma: float | None = None,
         fresh: bool = False,
-        confirm: bool = False,
         show_cli: bool = True,
     ) -> pd.DataFrame:
         """Put questions to suspects. The only way anything gets measured.
@@ -414,13 +451,10 @@ class Case:
                 comparable to one computed without it, and says so.
             fresh: Resample from the checkpoints instead of using cached
                 designs. Slower, and the only way to time the models here.
-            confirm: Required before anything starts the simulator. Without it
-                you get the price and nothing runs.
             show_cli: Print the equivalent `engiopt.evaluate` command.
 
         Returns:
-            A board indexed by suspect. Empty if a simulator run was priced but
-            not confirmed.
+            A board indexed by suspect.
         """
         chosen = self._resolve_metrics(metrics)
         expensive = [name for name in chosen if METRICS[name].cost == "expensive"]
@@ -428,10 +462,8 @@ class Case:
 
         if show_cli:
             self._print_cli(chosen, expensive=bool(expensive))
-        if expensive and not self._confirm_expensive(
-            labels, n_samples or self.evaluator.resolved.n_samples, confirm=confirm
-        ):
-            return pd.DataFrame()
+        if expensive:
+            self._price_expensive(labels, n_samples or self.evaluator.resolved.n_samples)
 
         indices = self._condition_subset(n_samples, random_conditions=random_conditions)
         if sigma is not None:
@@ -485,13 +517,15 @@ class Case:
             case.show(answers)              a table of answers, drawn as ranks
             case.show(answers, "mmd", "viol")   two columns of it against each other
 
-        Five views are specific enough to need naming, via `how=`:
+        Five views are specific enough to need naming, via `how=`. Each is named
+        for the picture it draws rather than for the point it makes, so that a
+        participant reading somebody else's cell can tell what came out of it:
 
-            how="conditions"   what was asked of it, against what came back
-            how="copying"      each design beside its nearest training design
-            how="map"          where its designs sit against the real ones
-            how="compare"      several suspects at once, one condition per column
-            how="designs"      the default for a single suspect, said explicitly
+            how="designs"           a grid of one suspect's designs -- the default
+            how="compare"           every suspect on one brief, real optimum on top
+            how="conditions"        what was asked of it, against what came back
+            how="nearest_training"  each design beside its closest training design
+            how="space_map"         where its designs sit against the real ones
 
         Args:
             *what: A suspect name, two names, one or more boards, or a board and
@@ -499,7 +533,7 @@ class Case:
             how: One of the named views above.
             n: How many designs to draw, where that applies.
             seed: Sampling seed.
-            space: For `how="map"`, which space to draw in -- `"lv"` or `"pca"`.
+            space: For `how="space_map"`, which space to draw in -- `"lv"` or `"pca"`.
             fresh: Resample rather than using cached designs.
 
         Returns:
@@ -550,7 +584,7 @@ class Case:
             # reference optimum in one call and nothing in the next.
             return np.asarray(self.evaluator.resolved.ref_designs)
 
-        member = self._member(model)
+        member = self.resolve(model)
         label = member.label
         if not fresh and (held := self._designs.get((label, seed))) is not None:
             return held
@@ -668,8 +702,30 @@ class Case:
                 "They are shown as blank rather than dropped -- 'not measured' is a fact about the board, "
                 "not a reason to hide a model from it."
             )
+        self._note_partial_physics(frame, [member.label for member in self.bank if member.label not in absent])
         self._disclose_constructions()
         return frame
+
+    def _note_partial_physics(self, frame: pd.DataFrame, published: list[str]) -> None:
+        """Name any column a *published* row is missing, and say so as a gap in the board.
+
+        The rows are the union of what each package carries, so a package
+        published before a column existed reads as NaN in that column and as a
+        number everywhere else. That is a different thing from a model nobody
+        ran the simulator on, and a bare NaN cannot tell the two apart -- which
+        is how "this model failed the physics" gets read off a board where the
+        model was simply scored by an earlier version of the scorer.
+        """
+        gaps: dict[tuple[str, ...], list[str]] = {}
+        for column in frame.columns:
+            incomplete = tuple(label for label in published if pd.isna(frame.loc[label, column]))
+            if incomplete:
+                gaps.setdefault(incomplete, []).append(column)
+        for labels, columns in gaps.items():
+            print(
+                f"  [note] {', '.join(columns)} was never published for {', '.join(labels)}, so those cells are "
+                "blank. Every other column in those rows was measured on the same run as everybody else's."
+            )
 
     def _disclose_constructions(self) -> None:
         """Name the planted suspects and say what each was built to break.
@@ -773,8 +829,15 @@ class Case:
             self._views = Views(self)
         return self._views
 
-    def _member(self, model: str) -> Any:
-        """Resolve a name against the suspects, then against the controls."""
+    def resolve(self, model: str) -> Any:
+        """Resolve a name against the suspects, then against the controls.
+
+        Controls are resolvable everywhere a suspect is -- `case.show`,
+        `case.designs`, `case.explain` -- because a calibration standard you are
+        told to read the board against but cannot look at is not a standard,
+        it is a footnote. What controls are *not* is rankable: `evaluate` still
+        resolves only suspects, and puts controls on their own rows.
+        """
         try:
             return self.bank.resolve(model)
         except KeyError:
@@ -880,7 +943,7 @@ class Case:
         Expensive columns and truncated boards are never cached, since their
         value depends on how many samples were asked for.
         """
-        member = self._member(model)
+        member = self.resolve(model)
         label = member.label
         reusable = n_samples is None and indices is None and sigma is None and not include_expensive and not fresh
         row = self._rows.setdefault((label, seed), {}) if reusable else {}
@@ -945,7 +1008,7 @@ class Case:
         if name in unavailable:
             return f"unavailable -- {unavailable[name]}"
         if METRICS[name].cost == "expensive":
-            return "needs the simulator -- add confirm=True"
+            return "needs the simulator -- minutes per design"
         return "available"
 
     def _print_cli(self, metrics: list[str], *, expensive: bool) -> None:
@@ -961,25 +1024,21 @@ class Case:
             parts.append("--include-expensive")
         print("Same numbers, outside this notebook:\n  " + " \\\n    ".join(parts) + "\n")
 
-    def _confirm_expensive(self, labels: list[str], n_samples: int, *, confirm: bool) -> bool:
-        """Price a simulator run, and refuse to start one nobody asked for twice.
+    def _price_expensive(self, labels: list[str], n_samples: int) -> None:
+        """Say what a simulator run is about to cost, then let it start.
 
-        Every sample runs one optimization and two simulations, so cost is linear
-        in `n_samples * len(labels)`. A cell that silently starts a twenty-minute
-        job in a workshop is a trap, so the estimate comes first and the run only
-        happens on `confirm=True`.
+        Every sample runs one optimization and two simulations, so the cost is
+        linear in `n_samples * len(labels)` and can reach hours. The estimate is
+        printed before anything starts, which is enough: a run that turns out to
+        be longer than somebody wanted is interrupted the way any other cell is.
         """
         per_sample = _SECONDS_PER_PHYSICS_SAMPLE.get(self.config.problem_id, 3.4)
         total = n_samples * len(labels)
         print(
             f"{len(labels)} suspects x {n_samples} designs = {total} optimizer runs, "
             f"about {total * per_sample / 60:.0f} min on this machine "
-            f"({per_sample:.0f}s per design, measured on this problem)."
+            f"({per_sample:.0f}s per design, measured on this problem). Interrupt the cell to stop it.\n"
         )
-        if confirm:
-            return True
-        print("Nothing has run. Add n_samples=<a small number> and confirm=True when you have decided to wait.")
-        return False
 
     def _note_replayed_costs(self, board: pd.DataFrame, labels: list[str]) -> None:
         """Say so when a cost column was replayed from a cache built elsewhere.
@@ -1009,8 +1068,10 @@ _VIEWS = {
     "conditions": lambda views, names, **kw: views.conditions(
         _one(names, "conditions"), n=max(kw["n"], 6), seed=kw["seed"]
     ),
-    "copying": lambda views, names, **kw: views.copying(_one(names, "copying"), n=kw["n"], seed=kw["seed"]),
-    "map": lambda views, names, **kw: views.map(*names, space=kw["space"], seed=kw["seed"]),
+    "nearest_training": lambda views, names, **kw: views.nearest_training(
+        _one(names, "nearest_training"), n=kw["n"], seed=kw["seed"]
+    ),
+    "space_map": lambda views, names, **kw: views.space_map(*names, space=kw["space"], seed=kw["seed"]),
 }
 """The named views `show(how=...)` dispatches to.
 

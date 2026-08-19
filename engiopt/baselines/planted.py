@@ -342,7 +342,7 @@ class CoarseToFine2D(PlantedModel):
     into every direction the encoder uses), that is a stronger statement than
     either row alone: the space is a choice, neither one dominates, and a team
     that moved wholesale to latent metrics would ship this design. Its
-    obedience and legality columns -- `viol` 1st, `cond_err` 2nd -- are
+    obedience columns -- `viol` 1st, `cond_err` 2nd -- are
     perfectly happy with it either way.
     """
 
@@ -363,7 +363,7 @@ class CoarseToFine2D(PlantedModel):
     built_to = (
         "Carry a visible checkerboard artifact -- the classic transposed-convolution pathology, and a real "
         "topology-optimization failure -- and find out which columns notice. Measured: the obedience and "
-        "legality columns do not (viol 1st, cond_err 2nd of 11), and the realism columns do (mmd 8th). "
+        "obedience columns do not (viol 1st, cond_err 2nd of 11), and the similarity columns do (mmd 8th). "
         "A design can be exactly on budget, exactly on brief, and still be something no one would build."
     )
     wins = ("viol", "cond_err", "lv_vendi")
@@ -473,7 +473,7 @@ class Annealed2D(PlantedModel):
         kept decides whether the construction works at all. Noise alone raises
         the mean density, because clipping at zero removes its negative half, so
         an unmatched version violates the budget on nine designs in ten and any
-        team that opens the legality column has it immediately. But rescaling
+        team that opens the feasibility column has it immediately. But rescaling
         afterwards to fix that shrinks the noise along with everything else --
         measured, it took `pixel_vendi` from 12.9 down to 9.8, below plain
         retrieval, which is the whole claim gone.

@@ -212,7 +212,7 @@ def test_the_default_evaluate_never_touches_the_simulator(case: Case, monkeypatc
     """`case.evaluate()` with no arguments is the first thing anybody runs.
 
     It must ask every *cheap* question and stop there. The expensive tier is
-    reachable only by naming it, and even then only with `confirm=True`.
+    reachable only by naming it.
     """
 
     def forbidden(*_args: object, **_kwargs: object) -> None:
@@ -228,16 +228,32 @@ def test_the_default_evaluate_never_touches_the_simulator(case: Case, monkeypatc
     assert not set(board.columns) & set(case.config.expensive_metrics)
 
 
-def test_the_expensive_tier_quotes_a_price_before_it_runs(case: Case, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A cell that silently starts a twenty-minute job in a workshop is a trap."""
+def test_the_expensive_tier_prices_itself_before_it_starts(
+    case: Case, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Interrupting the cell is the only brake, so the estimate has to arrive before the wait does.
 
-    def forbidden(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("an unconfirmed expensive request ran the simulator")
+    There is deliberately no confirmation flag: it protected nothing a Ctrl-C
+    does not, and it made the one family that matters look locked. What the
+    contract still owes a participant is the price, printed before the first
+    solver call rather than after it.
+    """
 
-    monkeypatch.setattr(case.evaluator.problem, "simulate", forbidden)
-    monkeypatch.setattr(case.evaluator.problem, "optimize", forbidden)
+    class SolverStartedError(RuntimeError):
+        """Raised in place of the first solver call, to stand for the wait."""
 
-    assert case.evaluate("performance", show_cli=False).empty
+    def stop(*_args: object, **_kwargs: object) -> None:
+        raise SolverStartedError
+
+    monkeypatch.setattr(case.evaluator.problem, "simulate", stop)
+    monkeypatch.setattr(case.evaluator.problem, "optimize", stop)
+
+    with pytest.raises(SolverStartedError):
+        case.evaluate("performance", models="knn_retrieval", n_samples=1, show_cli=False)
+
+    printed = capsys.readouterr().out
+    assert "optimizer runs" in printed
+    assert "Interrupt the cell" in printed
 
 
 def test_the_board_disagrees_with_itself(case: Case) -> None:
@@ -480,13 +496,14 @@ def test_the_catalogue_groups_metrics_by_the_question_they_ask(tmp_path: Path) -
     catalogue = _bare(tmp_path).metrics()
 
     groups = catalogue["line of questioning"].to_dict()
-    assert groups["mmd"] == groups["pca_mmd"] == groups["lv_mmd"] == "realism"
+    assert groups["mmd"] == groups["pca_mmd"] == groups["lv_mmd"] == "similarity"
     assert groups["pixel_vendi"] == groups["lv_vendi"] == "diversity"
-    assert groups["lv_paired_distance"] == groups["cond_err"] == "obedience"
+    assert groups["cond_err"] == groups["viol"] == "obedience"
+    assert groups["lv_paired_distance"] == groups["mmd"] == "similarity"
     assert groups["params"] == groups["train_minutes"] == groups["gen_seconds"] == "cost"
 
 
-def test_memorization_is_split_out_of_realism(tmp_path: Path) -> None:
+def test_memorization_is_split_out_of_similarity(tmp_path: Path) -> None:
     """The registry files `novelty_ratio` under `distribution`, beside the columns it refutes.
 
     `mmd` is *minimized* by handing back the training set, and the memorization
@@ -499,7 +516,7 @@ def test_memorization_is_split_out_of_realism(tmp_path: Path) -> None:
     groups = _bare(tmp_path).metrics()["line of questioning"].to_dict()
     assert METRICS["novelty_ratio"].family == METRICS["mmd"].family == "distribution"
     assert groups["novelty_ratio"] == groups["lv_novelty"] == "memorization"
-    assert groups["mmd"] == "realism"
+    assert groups["mmd"] == "similarity"
 
 
 def test_the_catalogue_says_which_space_each_metric_measures_in(tmp_path: Path) -> None:

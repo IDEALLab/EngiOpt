@@ -238,7 +238,7 @@ def compute_missing(frame: pd.DataFrame, problem_id: str) -> pd.DataFrame:
         return frame
 
     print(f"  computing physics for {len(labels)}: {', '.join(labels)}")
-    scored = case.evaluate(list(ALL_PHYSICS), models=labels, confirm=True, show_cli=False)
+    scored = case.evaluate(list(ALL_PHYSICS), models=labels, show_cli=False)
     label_to_key = {label: key for key, label in by_key.items()}
     for label, row in scored.iterrows():
         position = frame.index[frame["key"] == label_to_key[str(label)]]

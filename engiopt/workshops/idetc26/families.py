@@ -3,14 +3,13 @@
 Nobody walks into this session knowing what `pca_coverage` is, and a list of
 thirty metric names sorted alphabetically teaches them nothing. What they *can*
 hold in their head is a handful of **questions a detective would ask**, so every
-column the benchmark computes is filed under one of seven:
+column the benchmark computes is filed under one of six:
 
     cost           what did it take to put this model in the room?
-    realism        do its designs look like real ones?
+    similarity     do its designs look like the real ones?
     memorization   is it inventing, or copying out of the case files?
     diversity      has it got more than one answer, or one story it repeats?
     obedience      did it answer the question it was actually asked?
-    legality       does it obey the rules of the problem?
     performance    are the designs any good? (this is the one that costs)
 
 That is the whole vocabulary. `case.evaluate("diversity")` asks a line of
@@ -25,6 +24,15 @@ copying the training set and `novelty` is the column that catches you doing it
 -- and filing them together is precisely what lets a board look coherent while
 containing its own refutation. So `memorization` is split out, and the split is
 declared here rather than derived.
+
+`viol` is filed with `cond_err` for the opposite reason. The registry calls it
+feasibility, and an earlier version of this file gave it a line of questioning
+of its own -- but on a problem whose budget is a *condition*, missing the budget
+and missing the brief are one reading with a threshold between them. `cond_err`
+says by how much a design missed the volume fraction it was asked for and `viol`
+says how often it missed by more than the tolerance, which is a rate and a
+magnitude of the same measurement. Two families would have been two names for
+one question.
 
 The other regrouping: the registry files every `lv_*` column under `latent`,
 which describes what it *depends on* rather than what it asks. `lv_mmd` asks
@@ -69,13 +77,14 @@ FAMILIES: dict[str, Family] = {
             "decides whether a method is worth adopting: a 2% win that costs 200x the compute is not a win."
         ),
     ),
-    "realism": Family(
-        key="realism",
-        question="Do its designs look like real ones?",
+    "similarity": Family(
+        key="similarity",
+        question="Do its designs look like the real ones?",
         detail=(
-            "Distance between the set of generated designs and the set of real ones. Every column here is "
-            "*optimized* by handing back the training data, so a good score is not evidence of a good model "
-            "until the memorization question has been asked too."
+            "Two forms of one comparison. `mmd` and the coverage columns hold the generated *set* against the "
+            "real one; the paired distances hold each design against the reference optimum for its own brief. "
+            "Every column here is *optimized* by handing back the training data, so a good score is not "
+            "evidence of a good model until the memorization question has been asked too."
         ),
     ),
     "memorization": Family(
@@ -101,16 +110,12 @@ FAMILIES: dict[str, Family] = {
         question="Did it answer the question it was actually asked?",
         detail=(
             "Each design compared against the specific conditions requested of it, rather than against the "
-            "dataset as a whole. A model that ignores its inputs entirely can still look excellent on realism "
-            "and diversity; this is the group that notices."
-        ),
-    ),
-    "legality": Family(
-        key="legality",
-        question="Does it obey the rules of the problem?",
-        detail=(
-            "Constraint and budget violations. A floor rather than evidence of quality: hitting the volume "
-            "budget exactly with material that carries no load scores perfectly here."
+            "dataset as a whole. A model that ignores its inputs entirely can still look excellent on similarity "
+            "and diversity; this is the group that notices. `cond_err` says by how much a design missed the "
+            "volume fraction it was asked for, and `viol` says how often it missed by more than the tolerance "
+            "-- a magnitude and a rate of one reading, so report at most one of each. Passing is a floor "
+            "rather than evidence of quality: material placed to hit the budget exactly and carry no load "
+            "scores perfectly on both."
         ),
     ),
     "performance": Family(
@@ -154,19 +159,19 @@ team who finds them disagreeing knows to blame the space rather than the models.
 """
 
 _BASE_FAMILY = {
-    "mmd": "realism",
-    "coverage": "realism",
-    "residual": "realism",
+    "mmd": "similarity",
+    "coverage": "similarity",
+    "residual": "similarity",
+    "paired_distance": "similarity",
     "novelty": "memorization",
     "novelty_ratio": "memorization",
     "vendi": "diversity",
     "dpp": "diversity",
     "dpp_geometric": "diversity",
     "dpp_logdet": "diversity",
-    "paired_distance": "obedience",
     "cond_err": "obedience",
     "cond_sens": "obedience",
-    "viol": "legality",
+    "viol": "obedience",
     "params": "cost",
     "train_minutes": "cost",
     "gen_seconds": "cost",
@@ -181,6 +186,15 @@ Keyed on the *stem* rather than the full name, so a column added later in a new
 space -- `pca_novelty`, say -- is filed correctly without this table being
 touched. `performance` is absent because the registry already agrees with us
 there and `iog`/`cog`/`fog` have no space variants.
+"""
+
+
+_NO_SPACE = {"viol"}
+"""Stems that count rather than measure, so no space applies.
+
+A violation rate is counted, not measured in a space. It sits in `obedience`
+beside `cond_err`, which does measure one, so the exemption has to be per metric
+rather than per family.
 """
 
 
@@ -234,6 +248,6 @@ def space_of(metric: str) -> str:
     Returns:
         A human-readable space name, or `"--"`.
     """
-    if family_of(metric) in {"cost", "performance", "legality"}:
+    if family_of(metric) in {"cost", "performance"} or strip_space(metric)[1] in _NO_SPACE:
         return "--"
     return strip_space(metric)[0]

@@ -36,8 +36,8 @@ cannot. Both sides of that paper's comparison are in the bank as **competitive
 entries**, not as jokes: `knn_retrieval` at k=1 is the retrieval method, and
 `deconv_regression` is the deconvolutional network it was measured against.
 
-On `beams2d` the kNN baseline currently beats the conditional GAN on feasibility
-*and* condition adherence, at 1/1600th of VQGAN's sampling cost, and the two are
+On `beams2d` the kNN baseline currently beats the conditional GAN on condition
+adherence, at 1/1600th of VQGAN's sampling cost, and the two are
 within 5% of each other on MMD. A leaderboard topped by retrieval is a result,
 not a broken leaderboard.
 
@@ -78,13 +78,13 @@ case.metrics()                      # what may be asked, by line of questioning
 case.evaluate()                     # every cheap question, every suspect
 case.evaluate("diversity")          # one whole line of questioning
 case.evaluate("mmd", models="knn")  # one question, one suspect
-case.evaluate(["cost", "realism"], controls=True)
+case.evaluate(["cost", "similarity"], controls=True)
 
 case.show("diffusion")              # its designs
 case.show("knn", "diffusion")       # two suspects on the same brief
 case.show(answers)                  # a table of answers, drawn as ranks
 case.show(cheap, physics)           # two boards joined and drawn as one
-case.show("knn", how="copying")     # each design beside its nearest training design
+case.show("knn", how="nearest_training")   # each design beside its closest training design
 ```
 
 The previous build had `compute`, `evaluate`, `board`, `score`, `run_physics`,
@@ -125,11 +125,10 @@ naming a family is as real a call as naming a metric:
 | | asks | satisfied perfectly by |
 |---|---|---|
 | `cost` | what did it take to put this model in the room? | — |
-| `realism` | do its designs look like real ones? | handing back the training set |
+| `similarity` | do its designs look like the real ones? | handing back the training set |
 | `memorization` | is it inventing, or copying out of the case files? | random noise |
 | `diversity` | has it more than one answer, or one story it repeats? | corruption |
-| `obedience` | did it answer the question it was actually asked? | — |
-| `legality` | does it obey the rules of the problem? | material that carries no load |
+| `obedience` | did it answer the question it was actually asked? | material that carries no load |
 | `performance` | are the designs actually any good? | *(needs the simulator)* |
 
 The right-hand column is the point: every family has a way of being satisfied by
@@ -157,7 +156,8 @@ about the suspects.
 
 Nobody writes plotting code. `case.show` dispatches on what it is handed — a
 suspect name, two names, a board, a board and two of its columns — with the
-specialist views behind `how=`: `conditions`, `copying`, `map`, `compare`.
+specialist views behind `how=`: `designs`, `compare`, `conditions`,
+`nearest_training`, `space_map`.
 
 `case.evaluate` is `python -m engiopt.evaluate` in a notebook: same evaluator,
 same frozen spec, same argument names, and it prints the CLI line that produces
@@ -165,9 +165,10 @@ the same numbers, so the skill transfers out of the notebook. Metrics are never
 computed on a private code path.
 
 The physics is **not a separate reveal** — it is the seventh line of questioning,
-asked the same way as the other six. Ask it and you get a price quote; nothing
-runs without `confirm=True`. The sealed board (`case.physics(passphrase)`) is
-there because nobody can run the simulator on 50 designs during a session.
+asked the same way as the other six. Ask it and the estimated time is printed
+before the run starts, so a run that is longer than somebody wanted gets
+interrupted like any other cell. The published board (`case.physics()`) is there
+because nobody can run the simulator on 50 designs during a session.
 
 ## Nothing waits on sampling
 
@@ -323,7 +324,7 @@ Write `problems/<problem_id>.json`. Nothing else changes:
 ```
 
 `unavailable_metrics()` is **derived from the frozen spec**, not declared — so on
-photonics2d, whose spec sets `volume_condition` to null, the feasibility and
+photonics2d, whose spec sets `volume_condition` to null, `viol` and the other
 condition columns report themselves unavailable with a reason. A team
 discovering mid-session that the column their neighbours are arguing about does
 not exist for their problem is content, not a bug.
