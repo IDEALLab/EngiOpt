@@ -183,6 +183,7 @@ class Case:
     _rows: dict[tuple[str, int], dict[str, Any]] = field(default_factory=dict, repr=False)
     _designs: dict[tuple[str, int], np.ndarray] = field(default_factory=dict, repr=False)
     _sample_meta: dict[tuple[str, int], dict[str, Any]] = field(default_factory=dict, repr=False)
+    _published: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     _views: Views | None = field(default=None, repr=False)
 
     # ------------------------------------------------------------------
@@ -461,13 +462,17 @@ class Case:
         chosen = self._resolve_metrics(metrics)
         expensive = [name for name in chosen if METRICS[name].cost == "expensive"]
         labels = self._resolve_models(models)
+        # Drawn before pricing, because whether a subset was asked for decides
+        # whether the published physics can answer at all.
+        indices_preview = self._condition_subset(n_samples, random_conditions=random_conditions)
 
         if show_cli:
             self._print_cli(chosen, expensive=bool(expensive))
         if expensive:
-            self._price_expensive(labels, n_samples or self.evaluator.resolved.n_samples)
+            replayable = self._replayable(seed=1, n_samples=n_samples, indices=indices_preview, sigma=sigma, fresh=fresh)
+            self._price_expensive(labels, chosen, n_samples or self.evaluator.resolved.n_samples, replayable=replayable)
 
-        indices = self._condition_subset(n_samples, random_conditions=random_conditions)
+        indices = indices_preview
         if sigma is not None:
             print(
                 f"  [note] kernel bandwidth forced to sigma={sigma:g}, replacing the median heuristic "
@@ -937,6 +942,21 @@ class Case:
         if not missing:
             return row
 
+        # Hours of optimizer already paid for and published beside the weights.
+        # Recomputing them because they were asked for through `evaluate` rather
+        # than through `physics` would be the same run, twice, for the same
+        # answer.
+        if include_expensive and self._replayable(
+            seed=seed, n_samples=n_samples, indices=indices, sigma=sigma, fresh=fresh
+        ):
+            published = self._published_row(label)
+            row.update(
+                {column: published[column] for name in missing for column in METRICS[name].columns if column in published}
+            )
+            missing = [name for name in missing if any(column not in row for column in METRICS[name].columns)]
+            if not missing:
+                return row
+
         designs = self.designs(label, seed=seed, fresh=fresh)
         meta = self._sample_meta.get((label, seed), {})
         context = self.evaluator.context_from_designs(
@@ -950,6 +970,33 @@ class Case:
         )
         row.update(self.evaluator.score_context(context, only=missing, include_expensive=include_expensive))
         return row
+
+    def _published_row(self, label: str) -> dict[str, Any]:
+        """This suspect's simulator columns as published on the Hub, or `{}`.
+
+        Read once per suspect and kept, because the answer does not change
+        during a session and the alternative is a Hub round trip per board.
+        """
+        if label not in self._published:
+            from engiopt.evaluation.physics_board import published_physics
+
+            algo, fingerprint, seed = _package_of(self.resolve(label).key)
+            found = published_physics(self.config.problem_id, algo, fingerprint, seed, spec=self.config.spec)
+            self._published[label] = dict(found or {})
+        return self._published[label]
+
+    def _replayable(self, *, seed: int, n_samples: int | None, indices: Any, sigma: float | None, fresh: bool) -> bool:
+        """Whether a published number answers exactly the question being asked.
+
+        A gap is defined against the designs it was measured on. The published
+        one was computed over the whole spec at sampling seed 1, so any call
+        that changes which designs are compared -- fewer conditions, a random
+        subset, a fresh draw, another seed -- is asking a different question and
+        has to pay for it. `sigma` cannot touch a gap, but a board mixing a
+        forced bandwidth with replayed physics would still be describing two
+        different runs in one table.
+        """
+        return seed == _PUBLISHED_SAMPLING_SEED and n_samples is None and indices is None and sigma is None and not fresh
 
     def _with_controls(self, board: pd.DataFrame, metrics: list[str]) -> pd.DataFrame:
         """Append rows for models whose answer is already known.
@@ -1010,18 +1057,36 @@ class Case:
             parts.append("--include-expensive")
         print("Same numbers, outside this notebook:\n  " + " \\\n    ".join(parts) + "\n")
 
-    def _price_expensive(self, labels: list[str], n_samples: int) -> None:
-        """Say what a simulator run is about to cost, then let it start.
+    def _price_expensive(self, labels: list[str], metrics: list[str], n_samples: int, *, replayable: bool) -> None:
+        """Say what has to be run, and what is being read instead of run.
 
         Every sample runs one optimization and two simulations, so the cost is
-        linear in `n_samples * len(labels)` and can reach hours. The estimate is
-        printed before anything starts, which is enough: a run that turns out to
-        be longer than somebody wanted is interrupted the way any other cell is.
+        linear in the suspects that actually need running. Most of them do not:
+        the line-up's physics is published beside its weights, and a default
+        board replays it. Pricing the whole line-up when nine tenths of it is a
+        Hub read taught the wrong lesson about what the simulator costs.
         """
+        columns = [column for name in metrics if METRICS[name].cost == "expensive" for column in METRICS[name].columns]
+        replayed = (
+            [label for label in labels if all(column in self._published_row(label) for column in columns)]
+            if replayable
+            else []
+        )
+        if replayed:
+            print(
+                f"  [note] {len(replayed)} of {len(labels)} suspects have this published beside their weights "
+                "and are read from the Hub, not recomputed: " + ", ".join(replayed)
+            )
+
+        running = [label for label in labels if label not in replayed]
+        if not running:
+            print("  Nothing to run: every suspect asked for has already been through the simulator.\n")
+            return
+
         per_sample = _SECONDS_PER_PHYSICS_SAMPLE.get(self.config.problem_id, 3.4)
-        total = n_samples * len(labels)
+        total = n_samples * len(running)
         print(
-            f"{len(labels)} suspects x {n_samples} designs = {total} optimizer runs, "
+            f"{len(running)} suspects x {n_samples} designs = {total} optimizer runs, "
             f"about {total * per_sample / 60:.0f} min on this machine "
             f"({per_sample:.0f}s per design, measured on this problem). Interrupt the cell to stop it.\n"
         )
@@ -1119,6 +1184,12 @@ def _one(names: list[str], how: str) -> str:
         raise TypeError(f'how={how!r} is about one suspect -- name it: case.show("diffusion", how={how!r}).')
     return names[0]
 
+
+_PUBLISHED_SAMPLING_SEED = 1
+"""The sampling seed the published physics was computed at.
+
+`physics_board` defaults to it, so a board asked for at any other seed describes
+designs nobody has run the simulator on."""
 
 _SECONDS_PER_PHYSICS_SAMPLE = {"beams2d": 3.4, "heatconduction2d": 3.0, "photonics2d": 36.0}
 """Measured per-sample cost of the expensive tier, by problem.

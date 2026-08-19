@@ -118,7 +118,13 @@ def discover(problem_id: str, algos: list[str] | None) -> list[tuple[str, str, s
 
 
 def published_physics(
-    problem_id: str, algo: str, fingerprint: str | None, seed: int, *, required: list[str] | None = None
+    problem_id: str,
+    algo: str,
+    fingerprint: str | None,
+    seed: int,
+    *,
+    required: list[str] | None = None,
+    spec: str | None = None,
 ) -> dict[str, float] | None:
     """The physics already attached to a package on the Hub, or None.
 
@@ -136,6 +142,11 @@ def published_physics(
             Defaults to the mean gaps; pass `PHYSICS` to demand the medians too,
             or `BOARD` to demand the convergence columns as well. Whatever is
             required, every board column the package carries is returned.
+        spec: Refuse the row unless it was produced under this spec. A gap is
+            defined against the conditions it was measured on, so a number
+            carried over from another spec would be a different quantity
+            wearing the same column name. Rows that declare no spec are
+            accepted -- they predate the field, and there is nothing to check.
 
     Returns:
         The physics columns found, or None when the package has none, is
@@ -149,6 +160,8 @@ def published_physics(
         with open(hf_hub_download(f"IDEALLab/engiopt-{algo.replace('_', '-')}", path)) as handle:
             payload = json.load(handle)
     except Exception:  # noqa: BLE001 - no published metrics yet is the normal case, not an error
+        return None
+    if spec is not None and payload.get("spec") not in (None, "", spec):
         return None
     # Both shapes are in the wild; see `publish`.
     metrics = payload["metrics"] if isinstance(payload.get("metrics"), dict) else payload

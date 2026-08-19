@@ -11,6 +11,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
+import numpy as np
 import pytest
 
 from engiopt.workshops.idetc26 import Case
@@ -226,6 +227,34 @@ def test_the_default_evaluate_never_touches_the_simulator(case: Case, monkeypatc
         column for name in case.config.cheap_metrics for column in _columns_of(name)
     }
     assert not set(board.columns) & set(case.config.expensive_metrics)
+
+
+def test_the_expensive_tier_replays_what_is_already_published(case: Case, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A gap published beside the weights must not be paid for a second time.
+
+    `case.physics()` read the Hub and `case.evaluate("cog")` did not, so asking
+    for the same number through the other door started hours of optimizer for an
+    answer already sitting in the package.
+    """
+
+    def forbidden(*_args: object, **_kwargs: object) -> None:
+        pytest.fail("a published gap was recomputed instead of read")
+
+    monkeypatch.setattr(case.evaluator.problem, "simulate", forbidden)
+    monkeypatch.setattr(case.evaluator.problem, "optimize", forbidden)
+
+    board = case.evaluate(["mmd", "cog"], models="knn_retrieval", show_cli=False)
+    assert board.loc["knn_retrieval", "cog"] == case._published_row("knn_retrieval")["cog"]
+    assert np.isfinite(board.loc["knn_retrieval", "mmd"])
+
+
+def test_a_truncated_request_is_not_answered_from_the_published_board(case: Case) -> None:
+    """`n_samples=2` asks about two designs; the published gap is over fifty of them."""
+    assert case._replayable(seed=1, n_samples=None, indices=None, sigma=None, fresh=False)
+    assert not case._replayable(seed=1, n_samples=2, indices=None, sigma=None, fresh=False)
+    assert not case._replayable(seed=2, n_samples=None, indices=None, sigma=None, fresh=False)
+    assert not case._replayable(seed=1, n_samples=None, indices=[0, 1], sigma=None, fresh=False)
+    assert not case._replayable(seed=1, n_samples=None, indices=None, sigma=None, fresh=True)
 
 
 def test_the_expensive_tier_prices_itself_before_it_starts(
