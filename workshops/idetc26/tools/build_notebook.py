@@ -457,20 +457,32 @@ column name says which one it used:
 | the question | pixels | PCA subspace | learned latent |
 |---|---|---|---|
 | does it look real? | `mmd` | `pca_mmd` | `lv_mmd` |
-| how close to the right answer? | `pixel_paired_distance` | — | `lv_paired_distance` |
-| did it cover the data? | — | `pca_coverage` | `lv_coverage` |
-| is it copying? | `novelty_ratio` | — | `lv_novelty` |
+| how close to the right answer? | `pixel_paired_distance` | `pca_paired_distance` | `lv_paired_distance` |
+| is it copying? | `novelty_ratio` | `pca_novelty` | `lv_novelty` |
 | how many distinct designs? | `pixel_vendi` | `pca_vendi` | `lv_vendi` |
+| did it cover the data? | — | `pca_coverage` | `lv_coverage` |
 
 Same question, three answers, and they disagree. That disagreement is about the
 spaces rather than about the models.
 
-Someone had to fit the two right-hand columns. `pca_*` is fitted on the training
+**How wide is each space?** The latent one is however many dimensions the pinned
+autoencoder still uses after pruning, and the PCA control is fitted to *the same
+number* — deliberately, because a linear subspace of some other width would make
+"the latent space wins" a claim about dimensionality rather than about the
+manifold. Both widths are on the board as `lv_active_dims` and `pca_dims`, and
+`case.instrument()` names the autoencoder they came from.
+
+Someone had to fit the two right-hand columns. `pca_*` is fitted on the dataset
 split. `lv_*` uses an autoencoder that the spec pins — and `constrained_plvae_2d`,
 one of the suspects, is its sibling. So before reporting an `lv_` column, ask who
 fitted that space and whether they were in the room.
 
 Darkest is rank 1. Count how often the three rows disagree.
+"""
+    ),
+    code(
+        """
+case.instrument()      # which autoencoder, how wide, and the PCA width matched to it
 """
     ),
     code(
@@ -536,21 +548,6 @@ order to `cog`.
 
 If you can, then for that pair every cheap column above is actively misleading,
 and the cheap columns are the ones people report.
-"""
-    ),
-    md(
-        """
-### The plants
-
-Some of the suspects were built for this session rather than trained. They have
-no weights and were written in an afternoon, and several of them rank near the
-top.
-
-One looks reasonable in pixels and bad in the learned space. The other looks bad
-in pixels and reasonable in the fitted ones. Whichever space you decided to
-trust, one of the two would have got past you. Both were built from the training
-split alone and never saw the held-out designs. The source is in
-`engiopt/baselines/planted.py`, and it is short.
 """
     ),
     md(

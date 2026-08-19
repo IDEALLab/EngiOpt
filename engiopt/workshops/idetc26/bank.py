@@ -10,10 +10,12 @@ vocabulary rather than a workshop's private one.
 **A `planted` member is the exception, deliberately.** It carries a name that
 implies a method it does not implement, because its job is to be ranked first by
 a column it does not deserve, and a name that announced the construction would
-be ranked last by everybody. Its `summary` is still literally true, its cost
-columns are still real, and it is disclosed with `built_to` when the physics
-board is unsealed -- see `engiopt/baselines/planted.py` for why those three
+be ranked last by everybody. Its `summary` is still literally true and its cost
+columns are still real -- see `engiopt/baselines/planted.py` for why those
 constraints are the whole difference between a teaching device and a trick.
+`built_to` records what each was built to break, for whoever runs the session;
+nothing in the participant-facing path prints it, and the disclosure is the
+session leader's to make out loud when they judge the moment right.
 
 Members are referred to by any unambiguous fragment: `"diffusion"` reaches
 `diffusion_2d_cond`, and `"cgan"` reports that it matches three and asks which.

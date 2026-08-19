@@ -276,6 +276,9 @@ def publish_trajectories(
     with tempfile.TemporaryDirectory() as directory:
         local = Path(directory) / TRAJECTORY_FILE
         np.savez_compressed(local, meta=meta, **payload)
+        # Read inside the block: the directory is gone by the time the success
+        # line prints, which is why that line used to report every upload as 0 B.
+        written = local.stat().st_size
         try:
             HfApi().upload_file(
                 path_or_fileobj=str(local),
@@ -286,10 +289,7 @@ def publish_trajectories(
         except Exception as exc:  # noqa: BLE001 - a failed upload must not sink a multi-hour sweep
             print(f"      trajectory publish FAILED ({type(exc).__name__}: {str(exc)[:80]})", flush=True)
             return
-    print(
-        f"      published -> {package_path}/{TRAJECTORY_FILE} ({local.stat().st_size if local.exists() else 0} B)",
-        flush=True,
-    )
+    print(f"      published -> {package_path}/{TRAJECTORY_FILE} ({written} B)", flush=True)
 
 
 def published_trajectories(problem_id: str, algo: str, fingerprint: str | None, seed: int) -> dict[str, np.ndarray] | None:

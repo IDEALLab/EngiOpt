@@ -658,30 +658,61 @@ class Views:
         figure, axis = plt.subplots(figsize=(6.4, 5.2))
 
         train = self.case.evaluator.train_designs
+        performance, objective, direction = self._train_performance()
+        graded = False
         if train is not None:
             train_codes, _ = self._codes(train, space)
-            axis.scatter(
-                train_codes[:, top[0]],
-                train_codes[:, top[1]],
-                s=14,
-                color=BACKDROP,
-                alpha=0.45,
-                linewidth=0,
-                label=f"training set ({len(train_codes)})",
-                zorder=1,
-            )
+            # Only grade when the values line up one for one with the designs.
+            # A backdrop coloured by a mismatched array is not a weaker figure,
+            # it is a wrong one.
+            graded = performance is not None and len(performance) == len(train_codes)
+            if graded:
+                low, high = np.nanpercentile(performance, [2, 98])
+                drawn = axis.scatter(
+                    train_codes[:, top[0]],
+                    train_codes[:, top[1]],
+                    s=14,
+                    c=performance,
+                    cmap=_ramp(),
+                    vmin=low,
+                    vmax=high,
+                    alpha=0.65,
+                    linewidth=0,
+                    label=f"training set ({len(train_codes)})",
+                    zorder=1,
+                )
+                bar = figure.colorbar(drawn, ax=axis, pad=0.02)
+                bar.set_label(f"{objective} of the training designs ({direction}, 2-98%)", fontsize=9, color=INK_SOFT)
+                bar.ax.tick_params(colors=INK_SOFT, length=0)
+                bar.outline.set_visible(False)
+            else:
+                axis.scatter(
+                    train_codes[:, top[0]],
+                    train_codes[:, top[1]],
+                    s=14,
+                    color=BACKDROP,
+                    alpha=0.45,
+                    linewidth=0,
+                    label=f"training set ({len(train_codes)})",
+                    zorder=1,
+                )
 
+        # Blue carries magnitude the moment the backdrop is graded, so identity
+        # moves off it: the sources take the two hues the ramp cannot be
+        # confused with rather than sitting in the middle of its range.
+        hues = SERIES[1:] if graded else SERIES
+        marks = MARKERS[1:] if graded else MARKERS
         for position, name in enumerate(chosen):
             codes, label = self._source_codes(name, space, seed)
             axis.scatter(
                 codes[:, top[0]],
                 codes[:, top[1]],
                 s=68,
-                color=SERIES[position],
+                color=hues[position % len(hues)],
                 edgecolor="#ffffff",
                 linewidth=1.2,
                 label=label,
-                marker=MARKERS[position],
+                marker=marks[position % len(marks)],
                 zorder=2 + position,
             )
 
@@ -697,6 +728,40 @@ class Views:
         axis.legend(frameon=False, fontsize=9, labelcolor=INK)
         self._finish(figure, f"Where the designs sit, in the two widest {axis_names.lower()} directions")
         return figure
+
+    def _train_performance(self) -> tuple[Any, str, str]:
+        """The objective value of each training design, and how to read it.
+
+        The backdrop is every design the models were fitted on, and until now it
+        said only *where* the data lives. These are optimal designs, so each one
+        carries the objective the optimizer reached for its conditions -- which
+        turns the same cloud into a statement about where in the space the good
+        designs are. A model can then be read against the part of the manifold
+        that matters rather than against its outline.
+
+        Free: the value is a column of the dataset already in memory, no
+        simulator involved.
+
+        Returns:
+            `(values, name, direction)`, or `(None, "", "")` when the problem
+            declares no objective or the split does not carry it.
+        """
+        problem = self.case.evaluator.problem
+        objectives = tuple(getattr(problem, "objectives", ()) or ())
+        dataset = getattr(problem, "dataset", None)
+        if not objectives or dataset is None or "train" not in dataset:
+            return None, "", ""
+
+        key = str(objectives[0][0])
+        split = dataset["train"]
+        if key not in getattr(split, "column_names", []):
+            return None, "", ""
+
+        values = np.asarray(split[key], dtype=float)
+        if not np.isfinite(values).any():
+            return None, "", ""
+        minimized = "MIN" in str(getattr(objectives[0][1], "name", objectives[0][1])).upper()
+        return values, key, "lower is better" if minimized else "higher is better"
 
     def _source_codes(self, name: str, space: str, seed: int) -> tuple[Any, str]:
         """Encode one named source -- a model, or the data itself -- into a space.
@@ -752,6 +817,13 @@ class Views:
 
             self._projections[space] = (project_latent, "latent dimension")
         return self._projections[space]
+
+
+def _ramp() -> Any:
+    """`BLUE` as a continuous colormap, for the one view that grades a cloud."""
+    from matplotlib.colors import LinearSegmentedColormap
+
+    return LinearSegmentedColormap.from_list("engiopt_blue", BLUE)
 
 
 def _panel_title(kind: str, label: str) -> str:

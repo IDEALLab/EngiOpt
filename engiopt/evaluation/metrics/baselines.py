@@ -113,6 +113,38 @@ def novelty(ctx: EvaluationContext) -> float:
 
 
 @register_metric(
+    "pca_novelty",
+    family="distribution",
+    cost="cheap",
+    higher_is_better=None,
+    description="Novelty in the matched PCA subspace, as a fraction of the reference designs' own.",
+)
+def pca_novelty(ctx: EvaluationContext) -> float:
+    """`novelty_ratio` in the linear subspace, and the control `lv_novelty` needs.
+
+    `lv_novelty` exists because pixel novelty counts any difference as novelty,
+    including a one-pixel shift that changes no structure. That argument says a
+    *fitted* space is needed; it does not say the space has to be a learned one.
+    Measured here in components fitted on the validation split, at the width the
+    instrument keeps active, the same comparison answers whether the manifold is
+    doing the work or whether any rotation of the same dimensionality would do.
+
+    A ratio for the reason the other two are: an absolute distance in PCA units
+    is uninterpretable, and real held-out designs answering the same conditions
+    are the only scale worth reading it against.
+    """
+    if ctx.train_designs is None:
+        return float("nan")
+
+    generated, reference, _ = ctx.pca_codes
+    train_flat = np.asarray(ctx.train_designs).reshape(len(ctx.train_designs), -1)
+    train_codes = ctx.pca_model.transform(train_flat)
+    to_train_gen = float(cdist(generated, train_codes).min(axis=1).mean())
+    to_train_ref = float(cdist(reference, train_codes).min(axis=1).mean())
+    return to_train_gen / to_train_ref if to_train_ref > 0 else float("nan")
+
+
+@register_metric(
     "pca_mmd",
     family="distribution",
     cost="cheap",

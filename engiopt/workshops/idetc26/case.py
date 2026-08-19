@@ -642,11 +642,17 @@ class Case:
         if pinned is None:
             print(f"{self.config.spec} pins no autoencoder, so this problem has no latent columns.")
             return pd.Series(dtype=object, name="latent instrument")
+        active = _measured_active_dims(self.evaluator.latent_lvae)
         fields: dict[str, object] = {
             "algo": pinned.algo,
             "config_fingerprint": pinned.config_fingerprint,
             "seed": pinned.seed,
-            "measured_n_active": _measured_active_dims(self.evaluator.latent_lvae),
+            "measured_n_active": active,
+            # The linear control is fitted to the instrument's width on purpose:
+            # a PCA subspace of some other size would answer a different
+            # question, and "the latent space beat PCA" would be a statement
+            # about dimensionality rather than about the manifold.
+            "pca_components": active,
             "declared_n_active": pinned.expected_n_active,
             "recon_only_config_fingerprint": pinned.recon_only_config_fingerprint,
             "recon_only_n_active": _measured_active_dims(self.evaluator.latent_recon_lvae),
@@ -703,7 +709,6 @@ class Case:
                 "not a reason to hide a model from it."
             )
         self._note_partial_physics(frame, [member.label for member in self.bank if member.label not in absent])
-        self._disclose_constructions()
         return frame
 
     def _note_partial_physics(self, frame: pd.DataFrame, published: list[str]) -> None:
@@ -726,30 +731,6 @@ class Case:
                 f"  [note] {', '.join(columns)} was never published for {', '.join(labels)}, so those cells are "
                 "blank. Every other column in those rows was measured on the same run as everybody else's."
             )
-
-    def _disclose_constructions(self) -> None:
-        """Name the planted suspects and say what each was built to break.
-
-        Reaching the physics board is the moment this belongs: any later and it
-        is a gotcha, any earlier and there is nothing to learn from having
-        ranked them. Printed every time rather than offered behind a method,
-        because a disclosure you have to know to ask for is not one.
-        """
-        planted = [member for member in self.bank if member.kind == "planted"]
-        if not planted:
-            return
-        print(
-            f"\n  {len(planted)} of the {len(self.bank)} suspects were built for this session rather than trained.\n"
-            "  They carry no weights, they were written in an afternoon, and they were ranked beside the\n"
-            "  checkpoints on every column you asked for. What each one was built to do:\n"
-        )
-        for member in planted:
-            print(f"  {member.label}")
-            print(f"      {member.summary}")
-            for line in textwrap.wrap(member.built_to, width=96):
-                print(f"      {line}")
-            print()
-        print("  Source: engiopt/baselines/planted.py. Every one of them is fitted on the training split only.\n")
 
     def _sealed_physics(self, passphrase: str, path: str | Path | None) -> pd.DataFrame:
         """The legacy encrypted board, for a session that still uses one.
@@ -790,7 +771,6 @@ class Case:
 
         rows = by_key.reindex([member.key for member in self.bank])
         rows.index = pd.Index(self.bank.labels, name="suspect")
-        self._disclose_constructions()
         # `spec` and `source` are provenance for the sealed file, not results.
         return rows.drop(columns=[c for c in ("algo", "problem_id", "spec", "source") if c in rows.columns])
 
