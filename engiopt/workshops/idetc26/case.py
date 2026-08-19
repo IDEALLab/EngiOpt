@@ -148,6 +148,8 @@ LOOK AT SOMETHING         case.show(what)
   n=12               how many designs to draw (where the view draws designs)
   seed=2             which sampling draw -- redraws the noise, never the briefs
   space="pca"        which space how="space_map" draws in; "lv" is the default
+  color="volfrac"    what how="space_map" grades the training backdrop by:
+                     "performance" (the default), any condition, or "none"
   fresh=True         resample from the checkpoint instead of reading the design cache
 
 THE REST OF THE FILE
@@ -502,6 +504,7 @@ class Case:
         n: int = 4,
         seed: int = 1,
         space: str = "lv",
+        color: str = "performance",
         fresh: bool = False,
     ) -> Any:
         """Look at something. The only way anything gets drawn.
@@ -534,6 +537,9 @@ class Case:
             n: How many designs to draw, where that applies.
             seed: Sampling seed.
             space: For `how="space_map"`, which space to draw in -- `"lv"` or `"pca"`.
+            color: For `how="space_map"`, what to grade the training backdrop by:
+                `"performance"` (the problem's objective, the default), any
+                condition by name, or `"none"` for a flat backdrop.
             fresh: Resample rather than using cached designs.
 
         Returns:
@@ -549,7 +555,7 @@ class Case:
         if how is not None:
             if how not in _VIEWS:
                 raise KeyError(f"No such view: {how!r}. Try one of {sorted(_VIEWS)}.")
-            return _VIEWS[how](views, [str(item) for item in what], n=n, seed=seed, space=space)
+            return _VIEWS[how](views, [str(item) for item in what], n=n, seed=seed, space=space, color=color)
 
         if what and isinstance(what[0], pd.DataFrame):
             return _show_board(views, what)
@@ -1051,7 +1057,7 @@ _VIEWS = {
     "nearest_training": lambda views, names, **kw: views.nearest_training(
         _one(names, "nearest_training"), n=kw["n"], seed=kw["seed"]
     ),
-    "space_map": lambda views, names, **kw: views.space_map(*names, space=kw["space"], seed=kw["seed"]),
+    "space_map": lambda views, names, **kw: views.space_map(*names, space=kw["space"], seed=kw["seed"], color=kw["color"]),
 }
 """The named views `show(how=...)` dispatches to.
 

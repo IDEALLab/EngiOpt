@@ -607,7 +607,7 @@ class Views:
         display(figure)
         plt.close(figure)
 
-    def space_map(self, *models: str, space: str = "lv", seed: int = 1) -> Figure:
+    def space_map(self, *models: str, space: str = "lv", seed: int = 1, color: str = "performance") -> Figure:
         """Generated and real designs plotted in the top two dimensions of a space.
 
         The distribution columns reduce a whole comparison to one number. This
@@ -636,6 +636,9 @@ class Views:
             space: `"lv"` for the pinned autoencoder's latent space, `"pca"` for
                 the matched PCA subspace.
             seed: Sampling seed.
+            color: What to grade the training backdrop by -- `"performance"`
+                (the problem's objective), a condition column by name, or
+                `"none"` for a flat backdrop.
 
         Returns:
             The figure.
@@ -643,6 +646,7 @@ class Views:
         Raises:
             ValueError: If `space` is not one of the two, or the latent space
                 was asked for on a problem whose spec pins no autoencoder.
+            KeyError: If `color` names no column the training split carries.
         """
         import matplotlib.pyplot as plt
 
@@ -658,7 +662,7 @@ class Views:
         figure, axis = plt.subplots(figsize=(6.4, 5.2))
 
         train = self.case.evaluator.train_designs
-        performance, objective, direction = self._train_performance()
+        performance, grading_label = self._train_grading(color)
         graded = False
         if train is not None:
             train_codes, _ = self._codes(train, space)
@@ -682,7 +686,7 @@ class Views:
                     zorder=1,
                 )
                 bar = figure.colorbar(drawn, ax=axis, pad=0.02)
-                bar.set_label(f"{objective} of the training designs ({direction}, 2-98%)", fontsize=9, color=INK_SOFT)
+                bar.set_label(grading_label, fontsize=9, color=INK_SOFT)
                 bar.ax.tick_params(colors=INK_SOFT, length=0)
                 bar.outline.set_visible(False)
             else:
@@ -729,39 +733,58 @@ class Views:
         self._finish(figure, f"Where the designs sit, in the two widest {axis_names.lower()} directions")
         return figure
 
-    def _train_performance(self) -> tuple[Any, str, str]:
-        """The objective value of each training design, and how to read it.
+    def _train_grading(self, color: str) -> tuple[Any, str]:
+        """What to grade the backdrop by, and the label that says so.
 
-        The backdrop is every design the models were fitted on, and until now it
+        The backdrop is every design the models were fitted on, and by default it
         said only *where* the data lives. These are optimal designs, so each one
         carries the objective the optimizer reached for its conditions -- which
         turns the same cloud into a statement about where in the space the good
-        designs are. A model can then be read against the part of the manifold
-        that matters rather than against its outline.
+        designs are, and a model can be read against the part of the manifold
+        that matters rather than against its outline. Any condition works the
+        same way and answers a different question: whether the space organizes
+        itself by the brief, or by something the brief does not name.
 
-        Free: the value is a column of the dataset already in memory, no
-        simulator involved.
+        Free either way -- both are columns of the dataset already in memory,
+        and no simulator is involved.
+
+        Args:
+            color: `"performance"` for the problem's own objective, `"none"` for
+                the flat grey backdrop, or any condition column by name.
 
         Returns:
-            `(values, name, direction)`, or `(None, "", "")` when the problem
-            declares no objective or the split does not carry it.
-        """
-        problem = self.case.evaluator.problem
-        objectives = tuple(getattr(problem, "objectives", ()) or ())
-        dataset = getattr(problem, "dataset", None)
-        if not objectives or dataset is None or "train" not in dataset:
-            return None, "", ""
+            `(values, label)`, or `(None, "")` when nothing can be graded.
 
-        key = str(objectives[0][0])
+        Raises:
+            KeyError: If `color` names no column the training split carries.
+                Silently falling back to grey would hide a typo in a figure that
+                still looks finished.
+        """
+        dataset = getattr(self.case.evaluator.problem, "dataset", None)
+        if color in {"none", ""} or dataset is None or "train" not in dataset:
+            return None, ""
         split = dataset["train"]
-        if key not in getattr(split, "column_names", []):
-            return None, "", ""
+        columns = list(getattr(split, "column_names", []))
+
+        if color == "performance":
+            objectives = tuple(getattr(self.case.evaluator.problem, "objectives", ()) or ())
+            if not objectives or str(objectives[0][0]) not in columns:
+                return None, ""
+            key = str(objectives[0][0])
+            minimized = "MIN" in str(getattr(objectives[0][1], "name", objectives[0][1])).upper()
+            note = "lower is better" if minimized else "higher is better"
+        elif color in columns:
+            key, note = color, "a condition, not a score"
+        else:
+            gradable = [name for name in columns if name != "optimal_design"]
+            raise KeyError(
+                f"Nothing called {color!r} in the training split. Try 'performance', 'none', or one of {gradable}."
+            )
 
         values = np.asarray(split[key], dtype=float)
-        if not np.isfinite(values).any():
-            return None, "", ""
-        minimized = "MIN" in str(getattr(objectives[0][1], "name", objectives[0][1])).upper()
-        return values, key, "lower is better" if minimized else "higher is better"
+        if values.ndim != 1 or not np.isfinite(values).any():
+            return None, ""
+        return values, f"{key} of the training designs ({note}, 2-98%)"
 
     def _source_codes(self, name: str, space: str, seed: int) -> tuple[Any, str]:
         """Encode one named source -- a model, or the data itself -- into a space.

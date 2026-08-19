@@ -190,7 +190,7 @@ case.show("cgan_cnn_2d", "test")
 | `"compare"` | one row per suspect, one brief per column, with the real optimum on the top row | who answered this particular brief better |
 | `"conditions"` | each design captioned `asked 0.30 / got 0.41`, sorted by what was asked | a model that ignores the brief it was given |
 | `"nearest_training"` | each design with its closest training design beneath it, and the distance between them | memorization: copying rather than generating |
-| `"space_map"` | a scatter of two sources in the top two dimensions of a fitted space, with the training set faded behind (`space="lv"` [default] or `"pca"`) | coverage and collapse, the shape a single number throws away |
+| `"space_map"` | a scatter of two sources in the top two dimensions of a fitted space, over the training set graded by how good its designs are (`space="lv"` [default] or `"pca"`) | coverage and collapse, and where in the space the good designs sit |
 
 ```python
 case.show("diffusion", how="designs", n=12)
@@ -198,6 +198,7 @@ case.show(how="compare", n=3)                  # every suspect, three briefs
 case.show("gan_cnn_2d", how="conditions")
 case.show("knn_retrieval", how="nearest_training")
 case.show("vqgan", "test", how="space_map")
+case.show("vqgan", "test", how="space_map", color="volfrac")
 ```
 
 The last four all come up again later, at the point where a number needs
@@ -210,6 +211,7 @@ checking by eye.
 | `n=12` [4] | how many designs to draw |
 | `seed=2` [1] | which sampling draw. It redraws the model's noise, never the 50 briefs |
 | `space="pca"` [`"lv"`] | which fitted space `how="space_map"` draws in |
+| `color="volfrac"` [`"performance"`] | what `how="space_map"` grades the training backdrop by: the problem's objective, any condition by name, or `"none"` |
 | `fresh=True` [off] | ignore the cache and sample from the checkpoint now. Slow |
 
 The 50 designs from each model are already computed and cached, which is why
