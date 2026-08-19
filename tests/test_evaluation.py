@@ -106,6 +106,11 @@ def test_builtin_metrics_declare_their_cost() -> None:
         "iog_median",
         "cog_median",
         "fog_median",
+        # Read the trajectory the same optimizer run already produced, so they
+        # cost nothing beyond it -- but they are unreachable without it, which
+        # is what `expensive` declares.
+        "settle_calls",
+        "first_call_yield",
     }
     assert {"mmd", "dpp", "viol"} <= {spec.name for spec in METRICS.select(cost="cheap")}
 

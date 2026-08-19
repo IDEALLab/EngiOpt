@@ -96,6 +96,19 @@ class OptimizationResults:
     """Sum of the optimality gaps over each design's re-optimization history."""
     fog: list[float] = field(default_factory=list)
     """Final optimality gap at the end of re-optimization."""
+    trajectories: list[np.ndarray] = field(default_factory=list)
+    """Scalarized optimality gap at every optimizer step, one ragged array per design.
+
+    Kept because `iog`, `cog` and `fog` are three summaries of *this*, and no
+    summary of them recovers it. `cog` in particular is a sum over a
+    variable-length path, so it confounds how good the trajectory was with how
+    long it ran -- and since a gap may be negative, extra iterations can make it
+    *better*. Any question about convergence speed has to read the path.
+
+    Scalarized rather than raw, so a step here is on the same lower-is-better
+    scale as the three gap columns. Raw multi-objective vectors are not
+    retained; recovering those would mean re-running the optimizer.
+    """
 
 
 @dataclass
@@ -518,9 +531,20 @@ class EvaluationContext:
             self.problem.reset()
             generated_objective = self.problem.simulate(design, config=conditions)
 
+            # Scalarize once and keep the path: `cog` and `fog` are a sum and a
+            # last element of exactly this, so computing them from it costs
+            # nothing and the trajectory metrics get the thing they need.
+            #
+            # Summed at full precision, stored at half. Gaps reach 1e9 here and
+            # a float32 accumulation over ~100 of them would move `cog` in its
+            # leading digits -- silently disagreeing with every value already
+            # published. Storage rounds; arithmetic must not.
+            path = [self.scalarize_gap(step_gap, i) for step_gap in gaps]
+
             results.iog.append(self.scalarize_gap(np.asarray(generated_objective) - np.asarray(reference_optimum), i))
-            results.cog.append(sum(self.scalarize_gap(step_gap, i) for step_gap in gaps))
-            results.fog.append(self.scalarize_gap(gaps[-1], i))
+            results.cog.append(sum(path))
+            results.fog.append(path[-1])
+            results.trajectories.append(np.asarray(path, dtype=np.float32))
         return results
 
     @cached_property

@@ -208,3 +208,103 @@ def cog_median(ctx: EvaluationContext) -> float:
 def fog_median(ctx: EvaluationContext) -> float:
     """Median final optimality gap."""
     return float(np.median(ctx.optimization.fog))
+
+
+# ----------------------------------------------------------------------
+# Convergence: what did the warm start cost the optimizer?
+# ----------------------------------------------------------------------
+#
+# `iog`, `cog` and `fog` are three summaries of one trajectory, and none of them
+# answers "how many function calls did this design save me" -- the question the
+# warm-start literature is actually about. `cog` looks like it should: it is the
+# only one that sees the whole path. But it is an unnormalized *sum* of gaps
+# that may be negative, so every extra iteration spent below the reference makes
+# it better. A design that lingers at gap -37 for 200 calls scores -7400; one
+# that converges in three calls to -3 scores -9. It rewards slowness precisely
+# where the design is already good.
+#
+# Nor does the raw iteration count answer it. beams2d stops on
+# ``norm(x_new - x, inf) < 0.025`` -- a test on the *design variables*, not the
+# objective -- so one pixel still drifting keeps the loop alive long after the
+# compliance has settled. Counting iterations would punish a design that landed
+# near-optimal on call one and then jittered.
+#
+# Both metrics below therefore read the objective path and ignore the stopping
+# rule, which is also what makes them portable: photonics2d runs a fixed 200-step
+# schedule with no early exit, and there `settle_calls` is the only way to see
+# that a design was finished at call 40.
+
+SETTLE_BAND = 0.05
+"""Fraction of a design's own achievable improvement that counts as "settled".
+
+Relative to the design, not absolute, because gaps span 1e-3 to 1e10 across this
+pool and no single tolerance is meaningful over that range.
+"""
+
+
+def _settle_calls(path: np.ndarray, band_fraction: float = SETTLE_BAND) -> float:
+    """Calls after which `path` stays within a band of its converged value.
+
+    Last-exit rather than first-touch: a trajectory that dips into the band and
+    leaves again has not converged, and first-touch would credit it for a lucky
+    excursion. This is settling time in the control-theory sense.
+
+    Returns 0.0 when the design starts already inside the band -- the warm start
+    needed no calls at all, which is the best possible answer and has to be
+    representable.
+    """
+    if path.size < 2:  # noqa: PLR2004 - a one-step path has no convergence to measure
+        return 0.0
+    final = float(path[-1])
+    # Floored on |final| so a design that starts at its converged value gets a
+    # band of sensible width rather than one of width zero, which nothing clears.
+    reach = max(abs(float(path[0]) - final), abs(final), 1e-12)
+    outside = np.flatnonzero(np.abs(path - final) > band_fraction * reach)
+    return float(outside[-1] + 1) if outside.size else 0.0
+
+
+@register_metric(
+    "settle_calls",
+    family="performance",
+    cost="expensive",
+    higher_is_better=False,
+    description="Mean optimizer calls after which the objective stays within 5% of its converged value.",
+)
+def settle_calls(ctx: EvaluationContext) -> float:
+    """Mean settling time over the generated designs, in optimizer calls.
+
+    Each call is one simulate plus one sensitivity evaluation, so this is the
+    quantity an engineer pays in. Unlike the raw iteration count it is unmoved
+    by a design that has effectively converged and is still being nudged.
+    """
+    paths = ctx.optimization.trajectories
+    return float(np.mean([_settle_calls(path) for path in paths])) if paths else float("nan")
+
+
+@register_metric(
+    "first_call_yield",
+    family="performance",
+    cost="expensive",
+    higher_is_better=True,
+    description="Fraction of the achievable improvement the optimizer's first call delivers.",
+)
+def first_call_yield(ctx: EvaluationContext) -> float:
+    """How much of the whole re-optimization one call buys, averaged over designs.
+
+    Near 1 means the design's defects clean up immediately -- a checkerboard or a
+    floating member that a single step resolves -- and the remaining calls are
+    refinement. Near 0 means the warm start bought nothing.
+
+    Designs with nothing to gain (the path starts where it ends) are skipped
+    rather than scored: the fraction is undefined there, and calling it 0 would
+    read as failure when it is the opposite.
+    """
+    yields = []
+    for path in ctx.optimization.trajectories:
+        if path.size < 2:  # noqa: PLR2004 - needs a first step to have a first-step yield
+            continue
+        achievable = float(path[0]) - float(path[-1])
+        if abs(achievable) < 1e-12:  # noqa: PLR2004 - nothing to improve, so no fraction of it exists
+            continue
+        yields.append((float(path[0]) - float(path[1])) / achievable)
+    return float(np.mean(yields)) if yields else float("nan")

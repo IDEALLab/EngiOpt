@@ -30,6 +30,7 @@ from pathlib import Path
 import time
 from typing import Any
 
+import numpy as np
 import pandas as pd
 
 from engiopt.evaluation import Evaluator
@@ -192,6 +193,103 @@ def publish(
         print(f"      published -> {package_path}/metrics.json", flush=True)
 
 
+TRAJECTORY_FILE = "trajectories.npz"
+"""Where a package's optimizer paths live, beside `metrics.json` rather than in it.
+
+A separate file on purpose. `hf_hub_download` fetches per file, so the workshop's
+physics-board read stays exactly as cheap as it is today and nobody pays for
+trajectories unless a trajectory metric asks for them. Embedding them in
+`metrics.json` would also cost 5x the bytes, as JSON stores floats as text, and
+would make a file people read by eye unreadable.
+"""
+
+
+def pack_trajectories(trajectories: list[np.ndarray], iog: list[float]) -> dict[str, np.ndarray]:
+    """Ragged optimizer paths as one padded array plus true lengths.
+
+    Padded with NaN rather than zero: zero is a perfectly ordinary gap value and
+    a reader who forgot to slice by `lengths` would silently average padding
+    into the answer. NaN makes that mistake loud.
+
+    Stored at float32 -- a tenth of a percent of the weights it sits beside, and
+    the gaps carry nothing like seven significant digits of meaning. The *sums*
+    that produce `cog` are taken at full precision before this rounds anything.
+    """
+    lengths = np.array([path.size for path in trajectories], dtype=np.int32)
+    width = int(lengths.max()) if lengths.size else 0
+    padded = np.full((len(trajectories), width), np.nan, dtype=np.float32)
+    for index, path in enumerate(trajectories):
+        padded[index, : path.size] = path
+    return {"gaps": padded, "lengths": lengths, "iog": np.asarray(iog, dtype=np.float32)}
+
+
+def publish_trajectories(
+    ctx: Any,
+    *,
+    problem_id: str,
+    algo: str,
+    fingerprint: str | None,
+    seed: int,
+    spec: str | None,
+    hf_entity: str,
+    hf_repo_prefix: str,
+) -> None:
+    """Attach one package's optimizer paths to it on the Hub.
+
+    `iog`, `cog` and `fog` are three summaries of these paths, and the paths
+    answer questions no summary of them can -- how many calls the objective took
+    to settle, how much of the improvement the first call bought. Keeping them
+    costs ~13 KB on beams2d and ~32 KB on photonics2d per package, against the
+    hours of optimizer time that produced them; discarding them means every
+    future trajectory metric needs the whole sweep run again.
+    """
+    import tempfile
+
+    from huggingface_hub import HfApi
+
+    results = ctx.optimization
+    if not results.trajectories:
+        return
+    payload = pack_trajectories(results.trajectories, results.iog)
+    package_path = f"{problem_id}/" + (f"cfg_{fingerprint}/" if fingerprint else "") + f"seed_{seed}"
+    meta = json.dumps({"problem_id": problem_id, "spec": spec or "", "seed": seed, "n_samples": len(results.trajectories)})
+
+    with tempfile.TemporaryDirectory() as directory:
+        local = Path(directory) / TRAJECTORY_FILE
+        np.savez_compressed(local, meta=meta, **payload)
+        try:
+            HfApi().upload_file(
+                path_or_fileobj=str(local),
+                path_in_repo=f"{package_path}/{TRAJECTORY_FILE}",
+                repo_id=f"{hf_entity}/{hf_repo_prefix}-{algo.replace('_', '-')}",
+                commit_message=f"Optimizer trajectories for {package_path}",
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed upload must not sink a multi-hour sweep
+            print(f"      trajectory publish FAILED ({type(exc).__name__}: {str(exc)[:80]})", flush=True)
+            return
+    print(
+        f"      published -> {package_path}/{TRAJECTORY_FILE} ({local.stat().st_size if local.exists() else 0} B)",
+        flush=True,
+    )
+
+
+def published_trajectories(problem_id: str, algo: str, fingerprint: str | None, seed: int) -> dict[str, np.ndarray] | None:
+    """One package's stored paths as `{gaps, lengths, iog}`, or None if it has none.
+
+    Returned padded, exactly as stored; slice each row by its `lengths` entry
+    before doing arithmetic on it.
+    """
+    from huggingface_hub import hf_hub_download
+
+    path = f"{problem_id}/" + (f"cfg_{fingerprint}/" if fingerprint else "") + f"seed_{seed}/{TRAJECTORY_FILE}"
+    try:
+        local = hf_hub_download(f"IDEALLab/engiopt-{algo.replace('_', '-')}", path)
+    except Exception:  # noqa: BLE001 - a package published before trajectories existed is the normal case
+        return None
+    with np.load(local, allow_pickle=False) as payload:
+        return {key: payload[key] for key in ("gaps", "lengths", "iog")}
+
+
 def _existing_metrics(repo: str, package_path: str) -> dict[str, Any]:
     """Columns already published for a package, from either file shape.
 
@@ -259,7 +357,15 @@ def select(entries: list[tuple[str, str, str | None, int]], args: Any) -> list[t
         if unknown:
             print(f"  [warning] --only names {sorted(unknown)}, not in this shard's slice of the pool")
 
-    if args.skip_published:
+    if args.trajectories_only:
+        # Keyed on the trajectory file, not on the physics columns. Every
+        # package worth collecting paths from already *has* iog/cog/fog -- that
+        # is why it is in the pool -- so reusing the physics check here would
+        # skip the entire pool and collect nothing.
+        keep = [entry for entry in entries if published_trajectories(args.problem_id, entry[1], entry[2], entry[3]) is None]
+        print(f"  {len(entries) - len(keep)} package(s) already carry trajectories; skipping them")
+        entries = keep
+    elif args.skip_published:
         required = list(PHYSICS) if args.require_medians else None
         keep = [
             entry
@@ -375,6 +481,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="With --skip-published, treat a package carrying only the means as still needing a run.",
     )
     ap.add_argument(
+        "--trajectories-only",
+        action="store_true",
+        help=(
+            "Collect optimizer trajectories without republishing any metric. Skips packages that already "
+            "carry trajectories, and never writes metrics.json -- so it cannot disturb a physics board that "
+            "is already built, or race a sweep that is still building one."
+        ),
+    )
+    ap.add_argument(
         "--publish-from",
         type=Path,
         default=None,
@@ -430,16 +545,35 @@ def score_all(entries: list[tuple[str, str, str | None, int]], evaluator: Any, o
         try:
             generator = _load(algo, fingerprint, seed, evaluator.problem, args.problem_id)
             generator.seed = args.seed
-            scores = evaluator.score(generator, only=PHYSICS, include_expensive=True)
+            # Built here rather than inside `score` so the trajectories survive
+            # the call: `score` discards its context, and these paths cost hours
+            # of optimizer time to produce and kilobytes to keep.
+            ctx = evaluator.context_for(generator)
+            scores = evaluator.score_context(ctx, only=PHYSICS, include_expensive=True)
         except Exception as exc:  # noqa: BLE001 - one bad package must not end a multi-hour sweep
             print(f"  [{index}/{len(entries)}] {key}: FAILED {type(exc).__name__}: {str(exc)[:110]}", flush=True)
             continue
 
         row = {"key": key, "algo": algo, "seed": seed, **{m: scores.get(m) for m in PHYSICS}}
         pd.DataFrame([row]).to_csv(out, mode="a", header=not out.exists(), index=False)
-        if args.publish:
+        # Purely additive when collecting paths: `publish` merges into
+        # `metrics.json`, which is what the workshop's physics board reads, and
+        # a re-scored gap would silently move a board built over hours. A
+        # trajectory run only ever creates a file that did not exist.
+        if args.publish and not args.trajectories_only:
             publish(
                 row,
+                problem_id=args.problem_id,
+                algo=algo,
+                fingerprint=fingerprint,
+                seed=seed,
+                spec=evaluator.spec.qualified_name if hasattr(evaluator.spec, "qualified_name") else args.spec,
+                hf_entity=args.hf_entity,
+                hf_repo_prefix=args.hf_repo_prefix,
+            )
+        if args.publish:
+            publish_trajectories(
+                ctx,
                 problem_id=args.problem_id,
                 algo=algo,
                 fingerprint=fingerprint,
