@@ -209,20 +209,19 @@ def test_the_cheap_board_never_touches_the_simulator(case: Case, monkeypatch: py
     assert board.notna().to_numpy().all()
 
 
-def test_the_default_evaluate_never_touches_the_simulator(case: Case, monkeypatch: pytest.MonkeyPatch) -> None:
-    """`case.evaluate()` with no arguments is the first thing anybody runs.
+def test_the_cheap_tier_never_touches_the_simulator(case: Case, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Every cheap question, asked together, must stay off the solver.
 
-    It must ask every *cheap* question and stop there. The expensive tier is
-    reachable only by naming it.
+    The expensive tier is reachable only by naming it.
     """
 
     def forbidden(*_args: object, **_kwargs: object) -> None:
-        pytest.fail("the default board invoked the simulator")
+        pytest.fail("the cheap board invoked the simulator")
 
     monkeypatch.setattr(case.evaluator.problem, "simulate", forbidden)
     monkeypatch.setattr(case.evaluator.problem, "optimize", forbidden)
 
-    board = case.evaluate(show_cli=False)
+    board = case.evaluate(list(case.config.cheap_metrics), show_cli=False)
     assert set(board.columns) <= set(case.config.cheap_metrics) | {
         column for name in case.config.cheap_metrics for column in _columns_of(name)
     }
@@ -287,7 +286,7 @@ def test_the_expensive_tier_prices_itself_before_it_starts(
 
 def test_the_board_disagrees_with_itself(case: Case) -> None:
     """The premise of the whole session: no single suspect tops every column."""
-    board = case.evaluate(show_cli=False)
+    board = case.evaluate(list(case.config.cheap_metrics), show_cli=False)
     ranked = case.rank(board)
     winners = {column: set(ranked.index[ranked[column] == 1]) for column in ranked.columns}
     distinct = {frozenset(names) for names in winners.values()}
@@ -334,6 +333,32 @@ def test_a_typo_names_both_vocabularies(case: Case) -> None:
     """The most likely error in the room, and the message has to cover both kinds of name."""
     with pytest.raises(KeyError, match="Lines of questioning"):
         case.evaluate("mdd", show_cli=False)
+
+
+def test_there_is_no_blanket_board(case: Case) -> None:
+    """`case.evaluate()` must not answer everything at once.
+
+    A board of every column against every suspect is read rather than argued
+    with, and choosing the three columns you would report is the exercise. The
+    message has to say which call to make instead, because a bare TypeError in
+    front of ninety people is a room full of raised hands.
+    """
+    with pytest.raises(TypeError, match="needs a question"):
+        case.evaluate(show_cli=False)
+
+
+def test_there_is_no_blanket_contact_sheet(case: Case) -> None:
+    """`case.show()` must not draw every suspect at once, and nor must `how=`.
+
+    Ten grids on one screen get skimmed. Every drawing call names who it is
+    about, so a participant can say what they looked at.
+    """
+    with pytest.raises(TypeError, match="needs something to look at"):
+        case.show()
+    with pytest.raises(TypeError, match="at least one suspect"):
+        case.show(how="compare")
+    with pytest.raises(TypeError, match="needs a source"):
+        case.show(how="space_map")
 
 
 def test_controls_are_appended_and_never_ranked(case: Case) -> None:

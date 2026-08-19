@@ -54,7 +54,8 @@
       "kind": "planted",
       "algo": "coarse_to_fine_2d",
       "seed": 1,
-      "train_minutes": 0.1
+      "train_minutes": 0.1,
+      "config_fingerprint": "c2d82fa3"
     },
     {
       "kind": "pretrained",
@@ -84,13 +85,15 @@
       "kind": "planted",
       "algo": "portfolio_2d",
       "seed": 1,
-      "train_minutes": 0.1
+      "train_minutes": 0.1,
+      "config_fingerprint": "bb6c80e2"
     },
     {
       "kind": "planted",
       "algo": "annealed_2d",
       "seed": 1,
-      "train_minutes": 0.1
+      "train_minutes": 0.1,
+      "config_fingerprint": "1ba52cd1"
     },
     {
       "kind": "pretrained",

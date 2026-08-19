@@ -336,7 +336,14 @@ def _member_from_entry(
         # ladder the same package path, and the second rung's physics would
         # overwrite the first's with nothing downstream reporting a problem.
         settings = {**cls.settings(), **{k: v for k, v in options.items() if k in cls.tuning}}
-        digest = cls.package_fingerprint(settings)
+        # A declared fingerprint wins over the computed one. `mechanism_digest`
+        # unparses an AST, and `ast.unparse` formats differently between Python
+        # versions -- so the same source produced `9c22e74d` on 3.12 and
+        # `c2d82fa3` on 3.11, and a board published from the cluster was
+        # unreadable from a notebook on another interpreter. Pinning the digest
+        # in the config makes the package address data rather than a property of
+        # whoever is looking.
+        digest = entry.get("config_fingerprint") or cls.package_fingerprint(settings)
         fingerprint = {"code": digest} if digest else {}
         return BankMember(
             label=entry.get("name", ""),
