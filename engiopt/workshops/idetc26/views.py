@@ -66,6 +66,25 @@ would need a fourth caps instead of inventing a hue."""
 MARKERS = ["o", "^", "s"]
 """Paired with SERIES, so identity survives being printed in greyscale."""
 
+GRADED = "viridis"
+"""The ramp for a graded cloud: thousands of small dots carrying a magnitude.
+
+Not the house `BLUE`. That ramp is built for filled cells with their number
+written on them, where the palest steps can recede into the page; here the
+colour *is* the reading and it has to survive at 14 points of area against
+white. Viridis is perceptually uniform end to end, so equal steps of objective
+look like equal steps of colour, and it stays legible in greyscale and to a
+colourblind reader."""
+
+OVER_GRADED = ["#f0347b", "#eb6834"]
+"""Series hues for a graded map: magenta and the house orange, in fixed order.
+
+`SERIES` cannot be used over viridis. Measured as CIE Lab distance to the
+nearest step of the ramp, its green is 2.0 away -- the same colour, so a model
+would read as a patch of backdrop -- and its blue is 25. These two sit 64 and 74
+from the ramp and 53 from each other, which is the separation the pair needs
+against a cloud and against one another."""
+
 BACKDROP = "#b9b8b1"
 """The training set behind a latent map: present, faded, never the subject.
 
@@ -677,10 +696,10 @@ class Views:
                     train_codes[:, top[1]],
                     s=14,
                     c=performance,
-                    cmap=_ramp(),
+                    cmap=GRADED,
                     vmin=low,
                     vmax=high,
-                    alpha=0.65,
+                    alpha=0.8,
                     linewidth=0,
                     label=f"training set ({len(train_codes)})",
                     zorder=1,
@@ -701,10 +720,10 @@ class Views:
                     zorder=1,
                 )
 
-        # Blue carries magnitude the moment the backdrop is graded, so identity
-        # moves off it: the sources take the two hues the ramp cannot be
-        # confused with rather than sitting in the middle of its range.
-        hues = SERIES[1:] if graded else SERIES
+        # A graded backdrop spends most of the spectrum on magnitude, so identity
+        # moves off it entirely: the sources take the two hues viridis never
+        # reaches rather than sitting somewhere in the middle of its range.
+        hues = OVER_GRADED if graded else SERIES
         marks = MARKERS[1:] if graded else MARKERS
         for position, name in enumerate(chosen):
             codes, label = self._source_codes(name, space, seed)
@@ -840,13 +859,6 @@ class Views:
 
             self._projections[space] = (project_latent, "latent dimension")
         return self._projections[space]
-
-
-def _ramp() -> Any:
-    """`BLUE` as a continuous colormap, for the one view that grades a cloud."""
-    from matplotlib.colors import LinearSegmentedColormap
-
-    return LinearSegmentedColormap.from_list("engiopt_blue", BLUE)
 
 
 def _panel_title(kind: str, label: str) -> str:
