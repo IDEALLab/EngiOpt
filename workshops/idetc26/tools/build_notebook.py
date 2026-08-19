@@ -60,24 +60,16 @@ CELLS = [
 
 **IDETC-CIE 2026 · EngiBench hands-on workshop**
 
-Ten suspects are in the room. Each one claims to be a good generative model
-for the same engineering design problem. Each was handed the **same 50 design
-briefs** and produced 50 designs. One of them is the best.
+Ten models. The same 50 design briefs. One of them is best.
 
-Your job is to find out which — and, much harder, to be able to say **what you
-had to measure before you were entitled to claim it.**
+Your job: find which — and say **what you had to measure to be entitled to it.**
 
-You cannot simply look at the answer. What you *can* do is put questions to the
-suspects. There are seven kinds of question, none of them conclusive on its own,
-several of which contradict each other, and one of which is expensive enough
-that most published papers never ask it.
-
-There are two commands. That is the whole interface:
+Two commands, and that is the whole interface:
 
 | | |
 |---|---|
-| `case.evaluate(...)` | put a question to the suspects |
-| `case.show(...)` | look at what a suspect actually produced |
+| `case.show(...)` | look at what a model produced |
+| `case.evaluate(...)` | put a question to the models |
 """
     ),
     md("**Before you edit anything:** File → Save a copy in Drive. This notebook opens read-only from GitHub."),
@@ -98,91 +90,63 @@ from engiopt.workshops.idetc26 import Case
 case = Case.open("beams2d")     # <- the problem you are working on
 """
     ),
+    # ------------------------------------------------------------------
     md(
         """
 ---
-# ACT 1 · The suspects
+# 1 · The scene of the crime
 
-### First, the scene of the crime
+What a real solution looks like. Every comparison later is against this.
 
-**Before you meet any suspect, look at what a real solution to this problem
-looks like.** Drag the sliders and watch the nearest real design change with the
-brief. Every comparison you make for the rest of the session is against this, so
-it is worth a minute.
-
-`"train"` is what every suspect was fitted on; `"test"` is the held-out set they
-are *scored* against. Look at both — whether a model can tell them apart is the
-question underneath half of Act 2.
+- `"train"` — what every model was fitted on
+- `"test"` — held-out, what they are *scored* against
+- Drag the sliders: watch the design change with the brief
 """
     ),
     code(
         """
-case.show("train")     # the designs every suspect was fitted on
+case.show("train")
 """
     ),
     md(
         """
-That shows the designs the way the rest of this notebook will: one grey ramp,
-dark where there is material, so ten models stay comparable at a glance.
+That is the view the whole notebook uses: one grey ramp, dark where there is material.
 
-**The problem itself has an opinion about what is worth showing.** `case.problem`
-is the EngiBench problem, and its own `render` draws whatever matters for *this*
-problem — for a photonics problem, the field magnitudes at each wavelength beside
-the structure. That is the physics the objective is about, and no density plot
-shows it.
-
-For some problems this solves the fields in order to draw them, so give it a few
-seconds.
+**The problem has its own opinion about what matters.** `case.problem.render`
+draws the physics the objective is about — for photonics, the fields. No density
+plot shows that. It solves to draw, so give it a few seconds.
 """
     ),
     code(
         """
-case.problem.render(case.designs("test")[0])   # EngiBench's own renderer
+case.problem.render(case.designs("test")[0])
 """
     ),
-    md("### The line-up"),
+    # ------------------------------------------------------------------
+    md(
+        """
+---
+# 2 · The suspects
+
+Ten models, named for what they are.
+
+- Name any one by a fragment — `"diffusion"`, `"knn"`, `"plvae"`
+- **A name is a claim, not a fact.** Whether the evidence agrees is your call
+- Two are not generative models at all, and are here as serious entries:
+  - `knn_retrieval` — hands back the nearest training design. Cannot invent
+  - `deconv_regression` — supervised, conditions in, one design out
+- Those two are the sides of Habibi et al. (*JMD* 148(6):061704, 2026): kNN beat
+  deconvolutional nets at limited data. Both are in the room — check it
+- Neither has a noise input, so neither can give a second answer to one brief
+"""
+    ),
     code("""case.models()"""),
-    md(
-        """
-Name any suspect by any unambiguous part of its name — `"diffusion"`, `"knn"`,
-`"plvae"`. If a fragment matches more than one, the error tells you which.
-
-**Names, not letters, and that is not a spoiler.** "Why is the lookup table
-beating the diffusion model" is the most useful question this session can
-produce, and it cannot be asked of *Suspect C*.
-
-**Read a name as a claim rather than a fact.** It tells you what a model says it
-is. Whether the evidence agrees is part of what you are here to decide, and one
-of the cheap columns is more informative about that than it looks.
-
-Two of them are not generative models at all, and they are here as serious
-entries rather than as jokes:
-
-- **`knn_retrieval`** hands back *the single nearest training design*, rescaled
-  to the requested budget. It cannot produce anything that is not already in the
-  dataset — which is exactly what makes it interesting when it wins.
-- **`deconv_regression`** is supervised: conditions in, one design out, trained
-  with a pixel loss. It shares its upsampling stack with the conditional GANs,
-  so what differs between them is the *training objective*, not the
-  architecture.
-
-Those two are the two sides of Habibi et al. (*J. Mech. Des.* 148(6):061704,
-2026), who found on this exact task that k-nearest-neighbours beats
-deconvolutional networks at limited data, once you count the cost of generating
-that data. Both are in the room, so you can check that rather than cite it.
-
-Neither has a noise input, so neither can offer a second answer to the same
-brief. Watch what that does to the diversity questions — and whether it costs
-them anything on the questions you actually care about.
-"""
-    ),
     md(
         """
 ### Look at them
 
-Before any number, spend four seconds per suspect on the thing every
-practitioner actually does, every paper includes as a figure, and no paper
-reports as a number.
+Four seconds each. The thing every practitioner does, every paper figures, and
+no paper reports as a number.
 """
     ),
     code(
@@ -197,9 +161,7 @@ case.show("diffusion", n=12)     # one suspect, as many as you like
     ),
     code(
         """
-# Two suspects answering the *same* brief. Drag the sliders.
-# Either side can be a suspect, or "test" (the real optimum for that brief),
-# or "train" (the nearest training design).
+# Two suspects, same brief. Either side can be a model, "test", or "train".
 case.show("cgan_cnn_2d", "test")
 """
     ),
@@ -207,219 +169,180 @@ case.show("cgan_cnn_2d", "test")
         """
 **Write down your ranking now, before any metric.** Best to worst, on paper.
 
-You will be tempted to revise it in ten minutes. Whether you *should* is the
-question the rest of the session is about: visual inspection is unreproducible,
-unaggregatable and trivially cherry-picked, and it also catches, instantly,
-things no column below catches. Hold both of those at once.
+You will want to revise it in ten minutes. Whether you *should* is the session.
 """
     ),
+    # ------------------------------------------------------------------
     md(
         """
 ---
-# ACT 2 · The interrogation
+# 3 · The question briefings
 
-You may not ask "are you the best model?" You may only ask questions that have
-numeric answers. There are seven **lines of questioning**, and every column the
-benchmark computes belongs to one of them.
+You may not ask "are you the best model?" Only questions with numeric answers.
+
+Every column below belongs to one line of questioning.
 """
     ),
     code("""case.metrics()"""),
     md(
         """
-Read that table by its **line of questioning** column, not top to bottom.
+### Read the `space` column
 
-Ask a whole line of questioning at once by naming it, or one specific question
-by naming the metric:
+The same question can be asked in three places, and they disagree:
 
-```python
-case.evaluate("diversity")          # every question in that line
-case.evaluate("mmd")                # one specific question
-case.evaluate(["cost", "realism"])  # several, mixed freely
-```
-
-And notice the **space** column. Several questions are asked in more than one
-space — `mmd`, `pca_mmd` and `lv_mmd` are *one question* asked in raw pixels, in
-a PCA subspace, and in a learned latent space:
-
-| the question | in pixels | in a PCA subspace | in a learned latent space |
+| question | pixels | PCA | learned latent |
 |---|---|---|---|
-| does this look like real data? | `mmd` | `pca_mmd` | `lv_mmd` |
-| is it copying the training set? | `novelty_ratio` | — | `lv_novelty` |
-| did it cover the real modes? | — | `pca_coverage` | `lv_coverage` |
-| how many distinct designs? | `pixel_vendi`, `dpp_geometric` | `pca_vendi` | `lv_vendi` |
+| does it look real? | `mmd` | `pca_mmd` | `lv_mmd` |
+| is it copying? | `novelty_ratio` | — | `lv_novelty` |
+| did it cover the modes? | — | `pca_coverage` | `lv_coverage` |
+| how many distinct designs? | `pixel_vendi` | `pca_vendi` | `lv_vendi` |
 | did it answer the brief? | `pixel_paired_distance` | — | `lv_paired_distance` |
 
-**Those rows disagree with each other**, and the disagreement is a fact about
-the *spaces*, not about the suspects. Two designs differing by a one-pixel shift
-are nearly identical structurally and far apart in pixels; whether that counts
-as a difference is a modelling choice that no results table declares.
+- The disagreement is a fact about the **spaces**, not the models
+- A one-pixel shift is far in pixels, identical structurally. Which is right?
+- **Someone fitted each space.** `lv_*` uses an autoencoder the spec pins —
+  and `constrained_plvae_2d`, one of the suspects, is its sibling
+- `pca_*` is fitted on the training split. `mmd` is fitted on nothing
+- Before reporting an `lv_` column: who fitted it, and were they in the room?
 
-**And someone had to fit the learned space.** The `lv_*` columns are measured
-inside an autoencoder that this problem's evaluation spec pins by name — and
-`constrained_plvae_2d`, one of the suspects, is a sibling of it: same
-architecture, same training objective, a different configuration. That is
-disclosed rather than hidden, and it is not by itself disqualifying. But a
-metric fitted by one entrant and applied to the whole line-up is a conflict you
-have to declare. **Before you report an `lv_` column, ask who fitted the
-instrument, whether they were in the room, and what you would answer if a
-reviewer asked.** The same question is owed to `pca_*`, fitted on the training
-split — and to nobody at all by `mmd`, which is fitted on nothing. That is the
-one thing raw pixels have going for them.
-"""
-    ),
-    md(
-        """
-### Line of questioning 1 — cost
-
-Start here, because it is free, and because putting it last is how it gets
-skipped.
+One question, three spaces. Raw values span orders of magnitude, so read ranks —
+darkest is rank 1. **Count how often the rows disagree.**
 """
     ),
     code(
         """
-case.evaluate("cost").round(2)
+case.show(case.evaluate(["mmd", "pca_mmd", "lv_mmd"]))
 """
     ),
+    # ---- cost ----
     md(
         """
-Three minutes for a GAN, two and a half hours for the autoencoder, six seconds
-for the lookup table. Hold that number in mind for the rest of the session: any
-win you find later has to be worth **this** much compute, and no leaderboard has
-a column for it.
+## Cost
 
-(`gen_seconds` is sampling time, replayed from the machine that built the design
-cache — the notebook says so when it does that. `fresh=True` re-times the
-suspects here instead.)
-"""
-    ),
-    md(
-        """
-### Line of questioning 2 — realism
-
-Do the designs look like real ones? This is the family almost every generative
-paper reports, because it is the family you can afford.
+- Free to measure, and it decides whether a method is worth adopting
+- A 2% win that costs 200× the compute is not a win
+- Put last in every results table, which is how it gets skipped
+- Also here: `train_minutes`, `params`
 """
     ),
     code(
         """
-answers = case.evaluate("realism")
-answers.round(4)
+case.evaluate("gen_seconds").round(3)
+"""
+    ),
+    md(
+        """
+Seconds per design, across four orders of magnitude. Hold it: every win below
+has to be worth **this**.
+
+(Replayed from the machine that built the design cache — it says so. `fresh=True`
+re-times here instead.)
+"""
+    ),
+    # ---- realism ----
+    md(
+        """
+## Realism
+
+- Does the generated set look like the real one?
+- The family almost every paper reports, because it is the one you can afford
+- **Every column here is optimized by handing back the training data**
+- Also here: `pca_mmd`, `lv_mmd`, `pca_coverage`, `lv_coverage`, `lv_residual`
 """
     ),
     code(
         """
-# A table of raw values is hard to read: the columns span orders of magnitude.
-case.show(answers)
+case.evaluate("mmd").round(4)
 """
     ),
     md(
         """
-Darkest is rank 1. **Look at how often the rows disagree** — and remember that
-`mmd`, `pca_mmd` and `lv_mmd` are the same question in three spaces.
+Who is on top?
 
-Now: which suspect is on top? If it is `knn_retrieval`, you have just discovered
-the defect at the centre of this whole family. **Every column here is *optimized*
-by handing back the training data.** A model that memorizes the dataset scores
-perfectly on all of them.
-
-So you have to ask a different question.
+If it is `knn_retrieval`, you have found the defect at the centre of this family:
+**a model that memorizes the dataset scores perfectly.** So ask something else.
 """
     ),
+    # ---- memorization ----
     md(
         """
-### Line of questioning 3 — memorization
+## Memorization
 
-Distance from each generated design to the nearest thing the model could have
-copied. The only cheap family that separates a model which *learned* the
-manifold from one that *memorized points on it*.
+- Distance from each design to the nearest thing it could have copied
+- The only cheap family separating *learned the manifold* from *memorized points on it*
+- ≈ 1 — as far from training data as a real held-out design
+- ≈ 0 — memorization. ≫ 1 — could be invention, could be garbage
+- **Nothing here tells invention from garbage.** Random pixels score enormous
+- Also here: `lv_novelty`
 """
     ),
     code(
         """
-case.evaluate("memorization").round(3)
+case.evaluate("novelty_ratio").round(3)
 """
     ),
-    md(
-        """
-`novelty_ratio` divides the raw distance by the same measurement taken on real
-held-out designs, which answer the same briefs and are also not in the training
-set. So:
-
-- **≈ 1** — as far from the training data as a genuine held-out design is
-- **≈ 0** — memorization
-- **≫ 1** — further from the data than real designs are, which is as likely to
-  be garbage as invention
-
-That last case matters: **nothing in this column distinguishes invention from
-garbage.** Random pixels are extremely far from the training data.
-
-Check it by eye — each design beside the closest thing in the training set:
-"""
-    ),
+    md("""Check it by eye — each design beside the closest thing in the training set:"""),
     code(
         """
 case.show("knn_retrieval", how="copying")
 """
     ),
+    # ---- diversity ----
     md(
         """
-### Line of questioning 4 — diversity
+## Diversity
 
-Can it give more than one answer, or does it have one story it repeats?
+- More than one answer, or one story repeated?
+- **A diversity number means nothing alone.** What does `pixel_vendi = 23` tell you?
+- Nothing — until you score models whose answer you already know
+- Also here: `dpp_geometric`, `pca_vendi`, `lv_vendi`
 """
     ),
     code(
         """
-case.evaluate("diversity").round(3)
+case.evaluate("pixel_vendi", controls=True).round(3)
 """
     ),
     md(
         """
-Two things worth knowing here.
+`controls=True` adds a scale bar, the way one belongs on a micrograph. None is a
+suspect; none is ever ranked.
 
-**A diversity number means nothing on its own.** What does `pixel_vendi = 23`
-tell you? Nothing, until you know what the column reads at a known input. So
-score models whose answer is already known — `collapsed` is one design repeated,
-`noise_doped` is real optimal designs with noise added, `volume_only` hits the
-budget with material that carries no load. None is a suspect; none is ever
-ranked. They are a scale bar under the board, the way one belongs on a
-micrograph.
-"""
-    ),
-    code(
-        """
-case.evaluate("diversity", controls=True).round(3)
-"""
-    ),
-    md(
-        """
-Read `noise_doped` against the suspects. Adding noise to a real optimal design
-**cannot** make it a better design. Look at what it does to `pixel_vendi`, and
-then at what it does to `lv_vendi`.
+- `collapsed` — one design repeated
+- `noise_doped` — real optimal designs with noise added
+- `volume_only` — hits the budget with material carrying no load
+
+**Adding noise to an optimal design cannot make it better.** Watch what it does
+here, then compare against `lv_vendi`.
 
 **A diversity metric that rewards corruption is measuring entropy, and entropy
 is free.**
-
-The second thing: the classic DPP diversity is the determinant of a 50×50 kernel
-matrix — fifty numbers below one, multiplied — so it lands anywhere between `1e0`
-and `1e-290`, and at any precision a paper's table would print, distinct models
-come out as identical zeros. It is not wrong; it is *unreportable*, which is a
-way for a metric to fail that is invisible in the code. `dpp_geometric` is the
-same quantity as its n-th root.
 """
     ),
     md(
         """
-### Line of questioning 5 — obedience
+One look at `dpp_geometric`:
 
-A generative model is supposed to answer *the question it was asked*, not just
-produce something plausible. This is where a model that ignores its conditions
-gives itself away.
+- The classic DPP is the determinant of a 50×50 kernel
+- Fifty numbers below one, multiplied — it lands between `1e0` and `1e-290`
+- At any precision a paper prints, distinct models come out as identical zeros
+- Not wrong. **Unreportable** — a failure mode invisible in the code
+- `dpp_geometric` is the same quantity as its n-th root
+"""
+    ),
+    # ---- obedience ----
+    md(
+        """
+## Obedience
+
+- A model should answer *the question asked*, not just produce something plausible
+- This is where a model that ignores its conditions gives itself away
+- Also here: `pixel_paired_distance`, `lv_paired_distance`
 """
     ),
     code(
         """
-case.evaluate("obedience").round(4)
+case.evaluate("cond_err").round(4)
 """
     ),
     code(
@@ -430,68 +353,78 @@ case.show("gan_cnn_2d", how="conditions")
     ),
     md(
         """
-`gan_cnn_2d` is unconditional — it never sees the brief at all. Compare it to a
-conditional model on the same view, and then check whether that difference shows
-up anywhere in the realism or diversity families. If it does not, then those
-families cannot tell a model that answered your question from one that ignored
-it.
+`gan_cnn_2d` is unconditional — it never sees the brief.
+
+**Does that difference show up anywhere in realism or diversity?** If not, those
+families cannot tell a model that answered your question from one that ignored it.
 """
     ),
+    # ---- legality ----
     md(
         """
-### Line of questioning 6 — legality
+## Legality
 
-Does it obey the problem's constraints and budgets?
+- Does it obey the problem's constraints and budgets?
+- A floor, not evidence of quality
+- Only column in this family here: `viol`
 """
     ),
     code(
         """
-case.evaluate("legality", controls=True).round(4)
+case.evaluate("viol", controls=True).round(4)
 """
     ),
     md(
         """
-Look at where `volume_only` lands. It hits the budget exactly, with material
-arranged so it carries no load whatsoever. **Feasibility is a floor, not
-evidence of quality.**
+Look where `volume_only` lands. It hits the budget exactly, with material
+arranged so it carries no load whatsoever.
+
+**Feasibility is a floor, not evidence of quality.**
 """
     ),
+    # ---- performance ----
     md(
         """
-### Line of questioning 7 — performance
+## Performance
 
-The one that matters, and the one nobody can afford. `iog`, `cog` and `fog`
-measure how far each design is from an optimal one, before and after
-re-optimization. Every sample runs one optimization and two simulations.
-
-Ask, and you get the price first. Nothing runs without `confirm=True`.
+- The one that matters, and the one nobody can afford
+- How far each design is from optimal, before and after re-optimization
+- Every sample runs one optimization and two simulations
+- Nothing runs without `confirm=True` — ask, and you get the price first
+- Also here: `iog`, `fog`
 """
     ),
     code(
         """
-case.evaluate("performance")     # this does NOT run anything -- it quotes you
+case.evaluate("cog")     # this does NOT run anything -- it quotes you
 """
     ),
     code(
         """
 # Pick how long you are willing to wait for.
-mine = case.evaluate("performance", models=["knn_retrieval", "cgan_cnn_2d"], n_samples=2, confirm=True)
+mine = case.evaluate("cog", models=["knn_retrieval", "cgan_cnn_2d"], n_samples=2, confirm=True)
 mine.round(3)
 """
     ),
     md(
         """
-Now multiply. A hyperparameter sweep is fifty configurations, five seeds each,
-three problems. At the rate you just watched — **that is why every paper you have
-read reports `mmd` and not `cog`.**
+Now multiply: fifty configurations × five seeds × three problems.
 
-A full board over every suspect at all 50 briefs was computed ahead of time --
-hours of optimizer per model -- and published into each checkpoint's own
-`metrics.json` on the Hub, beside the weights it describes. So it is read, not
-recomputed, and it comes from the same place the models did.
+**That is why every paper you have read reports `mmd` and not `cog`.**
+"""
+    ),
+    # ------------------------------------------------------------------
+    md(
+        """
+---
+# 4 · The board
 
-A suspect with no published run shows as blank rather than being dropped.
-"Nobody has measured this one" is a fact about the board and belongs on it.
+A full physics board over every suspect at all 50 briefs, computed ahead of time
+— hours of optimizer per model — and published into each checkpoint's own
+`metrics.json` on the Hub, beside the weights.
+
+Read, not recomputed. A suspect with no published run shows blank rather than
+being dropped.
 """
     ),
     code(
@@ -508,35 +441,30 @@ case.show(cheap, physics)        # the two boards side by side, as ranks
     ),
     md(
         """
-**Find two suspects the cheap columns rank in the opposite order to
-`iog`/`cog`/`fog`.** If you can, then every cheap column above is, for that pair,
-actively misleading — and the cheap columns are the only ones anyone reports.
+**Find two suspects the cheap columns rank in the opposite order to `cog`.**
+
+If you can, every cheap column above is — for that pair — actively misleading.
+And the cheap columns are the only ones anyone reports.
 """
     ),
     md(
         """
-### And about those names
+### About those names
 
-Unsealing the board also printed something else: **some of the suspects were
-built for this session rather than trained.** They carry no weights, they were
-written in an afternoon, and they were ranked beside the checkpoints on every
-column you asked for — several of them near the top.
+Some suspects were **built for this session rather than trained**. No weights,
+written in an afternoon, ranked beside the checkpoints on every column — several
+near the top. The disclosure above says what each was built to do.
 
-The disclosure above says what each one was built to do. Two of them are worth
-putting side by side, because they fail in opposite directions:
+Two fail in opposite directions:
 
-- one is 4th of 11 on `mmd` and 8th on `lv_mmd` — it looks reasonable in pixels
-  and bad in the learned space;
-- the other is 8th on `mmd` and 4th on `pca_mmd` — it looks bad in pixels and
-  reasonable in the fitted ones.
+- one looks reasonable in pixels, bad in the learned space
+- the other looks bad in pixels, reasonable in the fitted ones
 
-So "measure it in a better space" is not a recipe. The space is a choice, each
-one is blind to something, and **whichever you had picked before seeing this,
+So "measure it in a better space" is not a recipe. **Whichever you had picked,
 one of these two would have got past you.**
 
-Every one of them is built from the training split only — the same data every
-checkpoint here was fitted on. None of them ever saw the held-out designs they
-were scored against. The source is `engiopt/baselines/planted.py`; it is short,
+All are built from the training split only — none ever saw the held-out designs
+they were scored against. Source: `engiopt/baselines/planted.py`. It is short,
 and that is the point.
 """
     ),
@@ -545,27 +473,17 @@ and that is the point.
 ---
 ## What you could not ask
 
-Every number above came from **one trained checkpoint each**. The obvious next
-question — *would this ranking survive retraining the same model?* — is the one
-this notebook cannot answer, and it is worth knowing why.
+Every number came from **one trained checkpoint each**.
 
-Re-running a model with a different *sampling* seed only redraws its noise: the
-50 briefs are frozen by the evaluation spec, so nothing about the comparison
-moves except the particular designs each model happened to draw. That is a much
-weaker question than it looks, and answering it would tell you almost nothing.
+- A different *sampling* seed only redraws noise — the 50 briefs are frozen
+- The question with teeth needs several **training** seeds per model
+- If two training runs of one model straddle another entirely, the gap you spent
+  an hour ranking was never a property of the method
+- Those checkpoints exist, at seeds 1–10
 
-The question with teeth needs several **training** seeds per suspect — the same
-architecture, the same hyperparameters, retrained from scratch. If two training
-runs of one model straddle another model entirely, then the gap you have spent
-the last hour ranking was never a property of the method.
-
-Those checkpoints exist for some of these suspects, at seeds 1–10. Pulling them
-is the natural next version of this session.
-
-**So when you make your accusation, say how confident you are that it would
-survive a retrain — and note that you have no evidence either way.** That is the
-honest position, and it is the one almost every results table in the literature
-is also in, without saying so.
+**Say how confident you are that your answer survives a retrain — and note you
+have no evidence either way.** That is the honest position, and it is the one
+almost every results table is in, without saying so.
 """
     ),
     md(
@@ -575,24 +493,21 @@ is also in, without saying so.
 
 Out loud, to the room:
 
-1. **Who did it** — which suspect you would ship.
-2. **On what evidence** — the three columns you would actually report, and what
-   each one catches that the other two miss.
-3. **What you could not rule out** — the question you would need to ask, and
-   cannot afford to.
+1. **Who did it** — which model you would ship
+2. **On what evidence** — the three columns you would report, and what each
+   catches that the other two miss
+3. **What you could not rule out** — the question you cannot afford
 
-*"I would not ship any of these, because ___"* is an accepted answer, and often
-the best one. A team that says **these questions cannot separate this line-up, I
-need better questions** has got the point of the session.
+*"I would not ship any of these, because ___"* is an accepted answer, often the
+best one.
 
-Blank cell below. Some things worth trying:
+Blank cell below. Worth trying:
 
-- Take whichever suspect tops `mmd` and run `case.show(..., how="copying")` on it.
-- Score `constrained_plvae_2d` on the `lv_*` columns, then re-read who fitted
-  the space those columns are measured in.
-- Ask a question in a space you do not trust: `case.show("vqgan", "test", how="map")`.
-- Change the kernel bandwidth (`case.evaluate("mmd", sigma=0.5)`) and see how
-  much of the ranking was a property of a default nobody reported.
+- Take whichever suspect tops `mmd`, run `case.show(..., how="copying")` on it
+- Score `constrained_plvae_2d` on `lv_mmd`, then re-read who fitted that space
+- `case.show("vqgan", "test", how="map")` — a space you do not trust
+- `case.evaluate("mmd", sigma=0.5)` — how much of the ranking was a default
+  nobody reported?
 """
     ),
     code(
@@ -604,12 +519,9 @@ Blank cell below. Some things worth trying:
 ---
 
 **Take it further:** every `case.evaluate` call printed the `engiopt` command
-that reproduces it outside this notebook — on your own models.
+that reproduces it outside this notebook, on your own models.
 `python -m engiopt.evaluate --list-metrics` shows every column the benchmark can
-compute, and `BRING_YOUR_OWN_PROBLEM.md` walks through running all of this on a
-problem of your own.
-
-`case.help()` prints the whole toolbox on one card.
+compute, and `BRING_YOUR_OWN_PROBLEM.md` walks through a problem of your own.
 """
     ),
     code("""case.help()"""),
