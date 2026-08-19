@@ -772,7 +772,8 @@ class Views:
                 the flat grey backdrop, or any condition column by name.
 
         Returns:
-            `(values, label)`, or `(None, "")` when nothing can be graded.
+            `(values, name)` -- the column's own name is the colorbar label --
+            or `(None, "")` when nothing can be graded.
 
         Raises:
             KeyError: If `color` names no column the training split carries.
@@ -790,10 +791,8 @@ class Views:
             if not objectives or str(objectives[0][0]) not in columns:
                 return None, ""
             key = str(objectives[0][0])
-            minimized = "MIN" in str(getattr(objectives[0][1], "name", objectives[0][1])).upper()
-            note = "lower is better" if minimized else "higher is better"
         elif color in columns:
-            key, note = color, "a condition, not a score"
+            key = color
         else:
             gradable = [name for name in columns if name != "optimal_design"]
             raise KeyError(
@@ -803,7 +802,11 @@ class Views:
         values = np.asarray(split[key], dtype=float)
         if values.ndim != 1 or not np.isfinite(values).any():
             return None, ""
-        return values, f"{key} of the training designs ({note}, 2-98%)"
+        # The bar is labelled with the column's own name and nothing else. What
+        # it is measured on is the only cloud in the figure, and the clipping is
+        # a drawing decision rather than a fact about the data -- both were
+        # sentence fragments hanging off an axis that had room for a word.
+        return values, key
 
     def _source_codes(self, name: str, space: str, seed: int) -> tuple[Any, str]:
         """Encode one named source -- a model, or the data itself -- into a space.
