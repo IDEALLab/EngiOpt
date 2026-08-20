@@ -175,10 +175,10 @@ logs/*
 .ruff_cache/
 engibench_studies/*
 
-# Measurement artefacts that are evidence, not scratch: the scored pool board and
-# the cheap-vs-physics board are what the metric claims rest on, and a claim whose
-# numbers cannot be re-read is the thing this workshop argues against.
-!workshops/idetc26/tools/*.csv
+# The workshop's measured boards are covered by the *.csv rule above and stay
+# that way. They are the session's answer key -- which model tops which column,
+# and which of them is a lookup table -- so they belong in the working copy and
+# not in a public repository the participants can browse before the session.
 
 # ---------------------------------------------------------------------------
 # The repository is code plus documentation written for someone outside it.
@@ -207,8 +207,7 @@ templates/
 *.h5
 output_by_pid/
 
-# Cached measurements and scratch analysis. Boards under workshops/idetc26/tools
-# are exempted above because they are evidence.
+# Cached measurements and scratch analysis.
 candidates_lv.json
 candidates_by_cfg.json
 ladder_checkpoints.json
@@ -219,6 +218,13 @@ ladder_checkpoints.json
 # Working notes from AI sessions. Useful locally, never part of the project.
 claude_markdowns/
 .claude/
+CLAUDE.md
+
+# Internal planning: design docs written to decide something, not to be read by
+# anyone outside the project. The workshop plan also gives the session away.
+workshops/*/PLAN.md
+workshops/dcc26/slides/IMAGE_BRIEF.md
+workshops/dcc26/slides/INTRO_DECK_STORYBOARD.md
 
 # Scratch design cache written by the workshop tools; regenerated on demand.
 idetc26_work/
