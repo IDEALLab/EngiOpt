@@ -127,7 +127,16 @@ if "google.colab" in sys.modules:
     from pathlib import Path
     installed = Path(sysconfig.get_paths()["purelib"]) / "engibench/problems/photonics2d/v1.py"
     print(f"photonics2d v1 present: {{installed.exists()}}")
-    print("Runtime -> Restart session, then carry on from the next cell.")
+
+    # Restart automatically. The install replaces files on disk, but a runtime
+    # that already imported the old engibench keeps serving it from sys.modules
+    # -- which looks like the install silently failing, on a runtime where it
+    # plainly succeeded. Asking people to restart by hand is the step that gets
+    # skipped. Colab reconnects on its own; just run the next cell.
+    print("Restarting the runtime. When it reconnects, carry on from the next cell.")
+    import IPython
+
+    IPython.Application.instance().kernel.do_shutdown(restart=True)
 """
     ),
     code(
