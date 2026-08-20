@@ -73,7 +73,8 @@ the room rather than recorded by the notebook.
 
 The sequence moves from visual inspection to numerical evaluation and then to
 the participant's own comparison. The notebook keeps API explanation brief;
-the detailed command reference is available through `case.help()`.
+`case.help()` prints a one-screen formula sheet, and
+`case.help(full=True)` the complete reference.
 
 **There are two commands.** `case.evaluate` for numbers, `case.show` for
 pictures:
@@ -83,7 +84,7 @@ from engiopt.workshops.idetc26 import Case
 
 case = Case.open("beams2d")
 
-case.help()                         # the cheat sheet: five calls, then every knob
+case.help()                         # the formula sheet: five calls, then the two commands
 case.models()                       # who is in the line-up
 case.metrics()                      # what may be asked, by line of questioning
 
@@ -105,11 +106,19 @@ This requires participants to choose the metrics and models relevant to their
 argument instead of generating a complete board by default. The errors include
 an example of a valid call.
 
-**`case.help()` is the command reference.** It starts with the five calls used in
-the notebook — `models`, `metrics`, `explain`, `evaluate`, and `show` — followed
-by the available views, controls, and optional arguments. Keeping this reference
-in the API prevents notebook instructions from drifting when an argument
-changes.
+**`case.help()` is the command reference**, and it is deliberately two
+documents. The default is a formula sheet: the five calls used in the notebook —
+`models`, `metrics`, `explain`, `evaluate`, `show` — then one line per form of
+`evaluate` and `show`, with its result to the right. Twenty-eight lines, no
+prose. `case.help(full=True)` adds the controls, the space map and every
+optional argument with its default, under a header saying it is not needed for
+the session.
+
+The split is the point. The reference material is real and belongs somewhere,
+but sixty lines of it printed in the sixth cell of a ninety-minute session is
+read by nobody, and the participants who most need the five calls are the ones
+who skim hardest. Keeping both in the API rather than in markdown prevents the
+notebook from drifting when an argument changes.
 
 An earlier API exposed separate methods for computing, scoring, ranking, and
 running physics. The current interface consolidates numerical evaluation under

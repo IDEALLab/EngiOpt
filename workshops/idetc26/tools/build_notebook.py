@@ -18,10 +18,11 @@ attention on the API rather than on the argument.
 
 **The notebook does not document the API.** Argument tables in markdown went
 stale every time an argument moved, and they made every section twice as long as
-the idea in it. Every optional flag lives in `case.help()`, which is run as the
-sixth cell and pointed at again in the free-work section; the prose here uses
-the plain forms and stops. If you are about to add a table of keyword arguments
-to a cell, add it to `HELP` in `engiopt/workshops/idetc26/case.py` instead.
+the idea in it. Every optional flag lives in `case.help(full=True)`; `case.help()`
+itself is the formula sheet, run as the sixth cell and pointed at again in the
+free-work section. The prose here uses the plain forms and stops. If you are
+about to add a table of keyword arguments to a cell, add it to `HELP_REFERENCE`
+in `engiopt/workshops/idetc26/case.py` instead.
 
 **Neither command has a blanket form**, so no cell draws all ten suspects or
 scores every column at once. Both are read rather than thought about, and which
@@ -145,7 +146,7 @@ from engiopt.workshops.idetc26 import Case
 case = Case.open("beams2d")     # <- the problem you are working on
 """
     ),
-    md("""Use this cheat sheet whenever you need the API."""),
+    md("""The cheat sheet. `case.help(full=True)` adds the controls, the space map and every option."""),
     code("""case.help()"""),
     # ---- 1 · the scene of the crime ----
     md(
@@ -312,7 +313,9 @@ least-volume autoencoder. The `lv_...` metrics use the encoded latent space of
     # ---- looking at the space ----
     md("""### Looking at the space"""),
     code("""case.show("knn_retrieval", "test", how="space_map")"""),
-    md("""Same designs projected in linear PCA space. Nothing about the model changed; differences between plots come from the representation."""),
+    md(
+        """Same designs projected in linear PCA space. Nothing about the model changed; differences between plots come from the representation."""
+    ),
     code("""case.show("knn_retrieval", "test", how="space_map", space="pca")"""),
     # ---- 5 · visualizing a board ----
     md(

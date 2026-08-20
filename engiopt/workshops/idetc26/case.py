@@ -55,7 +55,8 @@ Three jobs, and it is worth knowing which:
 2. **It is the cache.** Drawn designs and computed columns are memoized on
    `(model, seed)`, which is why asking the same thing twice is free.
 3. **It is the menu.** `case.<tab>` is the entire toolbox, and `case.help()` is
-   the cheat sheet for it: the five calls that matter first, every knob after.
+   the formula sheet for it: the five calls that matter, then one line per form
+   of `evaluate` and `show`. `case.help(full=True)` adds the rest.
 """
 
 from __future__ import annotations
@@ -84,131 +85,117 @@ from engiopt.workshops.idetc26.seal import unseal
 if TYPE_CHECKING:
     from engiopt.workshops.idetc26.views import Views
 
-HELP = """
-THE CASE FILE -- cheat sheet. First block is all you need; the rest is reference.
+HELP_MINIMUM = """
+CHEAT SHEET
 
-================================================================================
-THE MINIMUM
-================================================================================
-  case.models()                    the line-up
-  case.metrics()                   what may be asked
-  case.explain("diffusion")        one suspect, in full
-  case.evaluate("mmd")             one question, every suspect
-  case.show("diffusion")           one suspect's designs
-
-Names are fragments: "diffusion", "knn", "plvae", as long as only one matches.
-Neither command has a blanket form -- name the question, name the suspects.
-
-================================================================================
-ASKING            case.evaluate(what, models=who)
-================================================================================
-  case.evaluate("mmd")                      one question, every suspect
-  case.evaluate("diversity")                a whole line of questioning
-  case.evaluate(["mmd", "novelty_ratio"])   a combination you picked
-  case.evaluate("mmd", models="knn")        one suspect
-  case.evaluate("mmd", models=["knn", "diffusion"])
-  case.evaluate("cog", models="knn", n_samples=2)   the simulator, kept small
-
-================================================================================
-LOOKING           case.show(who, how=which_picture)
-================================================================================
-  case.show("diffusion")           its designs
-  case.show("diffusion", n=12)     more of them
-  case.show("knn", "diffusion")    two suspects, same brief
-  case.show("cgan", "test")        a suspect against the real optimum
-  case.show("train") / ("test")    the data itself, on sliders
-
-  how=            draws
-  "designs"       [default] a grid of one suspect's designs
-  "compare"       the suspects you name on one brief, real optimum on top
-                  case.show("knn", "vqgan", how="compare")
-  "conditions"    each design captioned "asked 0.30 / got 0.41"
-                  case.show("gan_cnn_2d", how="conditions")
-  "nearest_training"  each design above its closest training design, with the
-                  distance -- the memorization check, by eye
-                  case.show("knn", how="nearest_training")
-  "space_map"     a suspect's designs as points in a fitted space -- below
-
-================================================================================
-THE LATENT MAP    case.show(who, "test", how="space_map")
-================================================================================
-Every other view draws designs; this one draws the distribution. A suspect's 50
-designs become 50 points in a fitted space, over the training set as a backdrop.
-Collapse, near-miss and missing coverage are legible here and are not
-recoverable from an MMD value.
-
-  case.show("vqgan", "test", how="space_map")                   against real designs
-  case.show("vqgan", "test", how="space_map", space="pca")      the linear control
-  case.show("vqgan", "test", how="space_map", color="volfrac")  regrade the backdrop
-  case.show("knn", "vqgan", how="space_map")                    two suspects
-
-  space="lv"    [default] the autoencoder the spec pins; case.latent_space()
-                names it, and one suspect is its sibling
-  space="pca"   a linear subspace fitted to the same width, as the control
-  color=        grades the backdrop: "performance" [default], any condition by
-                name, or "none"
-
-Axes are the two directions the *real* designs vary along most, so "lv" and
-"pca" are two different questions about the same designs.
-
-One or two sources; either may be "test" or "train". Two is the limit.
-
-================================================================================
-THE CONTROLS -- models whose answer is known before you measure
-================================================================================
-  case.evaluate("pixel_vendi", controls=True)    the scale bar under the board
-  case.explain("noise_doped")                    how a control is built
-  case.show("noise_doped")                       what it looks like
-
-  collapsed     one design repeated for every brief -- a diversity column's floor
-  noise_doped   real optima plus Gaussian noise -- strictly worse than the data,
-                so a column that rises here is rewarding damage
-  volume_only   blobs hitting the volume budget exactly, carrying no load --
-                whatever feasibility reads here is what feasibility is worth
-
-  Never ranked, never suspects. Every suspect between `collapsed` and
-  `noise_doped` means the column separated nothing.
-
-================================================================================
-YOUR OWN BOARD
-================================================================================
-  answers = case.evaluate(["mmd", "novelty_ratio", "pixel_vendi"])
-  case.show(answers)                             your columns, as ranks
-  case.show(answers, case.physics())             joined with the simulator's
-  case.show(answers, "mmd", "novelty_ratio")     two columns against each other
-
-================================================================================
-THE KNOBS -- all optional, all off by default
-================================================================================
-  case.evaluate(...)
-    models=["knn", "vqgan"]   who to ask, by fragment            [all of them]
-    ranks=True                placings, 1 = best, instead of values
-    controls=True             add the known-answer rows underneath
-    n_samples=10              score on 10 of the spec's briefs, not all
-    random_conditions=True    ...those 10 at random, not the first 10. One draw,
-                              shared by every suspect
-    sigma=0.5                 kernel width for mmd / dpp / vendi, replacing the
-                              median-distance default nobody reports
-    fresh=True                sample now instead of reading the cache. Slow, and
-                              the only way gen_seconds times *this* machine
-
-  case.show(...)
-    n=12                      designs drawn                                [4]
-    seed=2                    sampling draw. Redraws noise, never the briefs [1]
-    space="pca"               space for how="space_map"                 ["lv"]
-    color="volfrac"           backdrop grading for how="space_map"
-                                                            ["performance"]
-    fresh=True                resample instead of reading the cache
-
-================================================================================
-THE REST OF THE FILE
-================================================================================
-  case.designs("knn")            the raw array, to compute your own
-  case.designs("test")           the real designs it is scored against
-  case.problem.render(design)    EngiBench's renderer: the physics, not density
-  case.latent_space()            which autoencoder the lv_ columns measure in
-  case.physics()                 the published simulator board, from the Hub
+case.models()                             the line-up
+case.metrics()                            what you can measure
+case.explain("diffusion")                 one model, in full
+case.evaluate("mmd")                      one metric, all ten models
+case.show("diffusion")                    one model's designs
 """
+"""The five calls. Nothing below this is required to run the notebook."""
+
+HELP_COMMANDS = """
+MEASURE  ->  table
+
+case.evaluate("diversity")                a whole family at once
+case.evaluate(["mmd", "novelty_ratio"])   the columns you picked
+case.evaluate("mmd", models="knn")        one model
+case.evaluate("mmd", controls=True)       plus known-answer rows
+case.evaluate("cog", n_samples=2)         simulator -- keep n small
+
+LOOK  ->  picture
+
+case.show("train")                        the dataset, on sliders
+case.show("knn", "diffusion")             two models, same briefs
+case.show("cgan", "test")                 model against the real optimum
+case.show(answers)                        your table, drawn as ranks
+case.show("knn", how="compare")           side by side, optimum on top
+case.show("knn", how="conditions")        captioned  asked 0.30 / got 0.41
+case.show("knn", how="nearest_training")  each design vs closest training
+case.show("knn", how="space_map")         designs as points in a space
+
+Model names are fragments: "diffusion", "knn", "plvae".
+"""
+"""The two commands, one line per form the session uses."""
+
+HELP_SHORT = (HELP_MINIMUM + HELP_COMMANDS).strip("\n")
+"""What `case.help()` prints.
+
+A formula sheet, not documentation: one call per line, its result to the right,
+no prose. Keep it inside 80 columns and about thirty lines -- it has to be read
+at a glance beside a code cell. Anything needing a sentence belongs in
+`HELP_REFERENCE`, or in the docstring of the method it is about.
+"""
+
+HELP_REFERENCE = """
+================================================================================
+REFERENCE -- not needed for the session
+================================================================================
+
+CONTROLS -- answer known before you measure; never ranked
+
+collapsed                                 one design, repeated
+noise_doped                               real optima plus Gaussian noise
+volume_only                               hits the budget, carries no load
+
+case.evaluate("pixel_vendi", controls=True)
+case.explain("noise_doped")
+case.show("noise_doped")
+
+A model between `collapsed` and `noise_doped` means the column separated
+nothing.
+
+SPACE MAP -- how="space_map"
+
+space="lv"                                the spec's autoencoder    [default]
+space="pca"                               a linear subspace, same width
+color="performance"                       backdrop grading          [default]
+color="volfrac"                           grade by any condition
+color="none"                              no grading
+
+Draws the distribution, not the designs: 50 points over the training set.
+
+YOUR OWN BOARD
+
+answers = case.evaluate(["mmd", "novelty_ratio", "viol"])
+case.show(answers)                        your columns, as ranks
+case.show(answers, case.physics())        joined with the simulator's
+case.show(answers, "mmd", "viol")         two columns against each other
+
+MEASURE OPTIONS                                                     [default]
+
+models=["knn", "vqgan"]                   who to ask            [all of them]
+ranks=True                                placings, 1 = best          [False]
+controls=True                             add known-answer rows       [False]
+n_samples=10                              how many briefs to score      [all]
+random_conditions=True                    those briefs at random      [False]
+sigma=0.5                                 kernel width for mmd/dpp   [median]
+fresh=True                                resample, do not cache      [False]
+
+n_samples draws one subset, shared by every model, so the board still compares
+like with like. fresh=True is the only way gen_seconds times this machine.
+
+LOOK OPTIONS                                                        [default]
+
+n=12                                      how many designs to draw        [4]
+seed=2                                    sampling noise, never briefs    [1]
+space="pca"                               space for how="space_map"    ["lv"]
+color="volfrac"                           grading for how="space_map"
+fresh=True                                resample, do not cache      [False]
+
+RAW MATERIAL
+
+case.designs("knn")                       the array, to compute your own
+case.designs("test")                      the real designs it is scored on
+case.problem.render(design)               EngiBench's renderer: physics
+case.latent_space()                       which autoencoder lv_ measures in
+case.physics()                            the published simulator board
+"""
+"""The long tail: controls, the space map, every keyword, the raw arrays."""
+
+HELP = f"{HELP_SHORT}\n{HELP_REFERENCE}"
 
 
 @dataclass
@@ -292,7 +279,7 @@ class Case:
             print(f"  [unavailable] {metric}: {reason}")
         print("\n  case.models()    who is in the line-up")
         print("  case.metrics()   what you are allowed to ask")
-        print("  case.help()      the whole toolbox, on one card")
+        print("  case.help()      the formula sheet; case.help(full=True) for everything")
 
         return cls(config=config, evaluator=evaluator, bank=bank, controls=controls, artifact_dir=directory, store=store)
 
@@ -308,9 +295,24 @@ class Case:
         return self.evaluator.problem
 
     @staticmethod
-    def help() -> None:
-        """Print every command there is, with the line that runs it."""
-        print(HELP)
+    def help(*, full: bool = False) -> None:
+        """Print the cheat sheet.
+
+        By default that is thirty lines: five calls and the two commands. It
+        is the whole session's API, and a participant who reads only this can
+        run every cell in the notebook.
+
+        The long tail -- the controls, the space map, every keyword argument
+        with its default -- is real reference material and a wall of it in the
+        sixth cell of a ninety-minute session is read by nobody. It prints only
+        when asked for.
+
+        Args:
+            full: Also print the reference section.
+        """
+        print(HELP if full else HELP_SHORT)
+        if not full:
+            print("\nEverything else -- controls, the space map, every option:  case.help(full=True)")
 
     # ------------------------------------------------------------------
     # Who is here, and what may be asked
