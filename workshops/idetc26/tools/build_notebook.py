@@ -38,7 +38,7 @@ from pathlib import Path
 
 NOTEBOOK_DIR = Path(__file__).resolve().parents[1] / "notebooks"
 
-BRANCH = "feat/idetc26-workshop"
+BRANCH = "codex/idetc26-workshop-participant-rework"
 """The EngiOpt branch Colab installs from."""
 
 ENGIBENCH_REF = "main"
@@ -114,29 +114,28 @@ CELLS = [
     code(
         f"""
 import sys
+from pathlib import Path
 
 if "google.colab" in sys.modules:
-    %pip install -q "git+https://github.com/IDEALLab/EngiOpt.git@{BRANCH}"
-    # PyPI's engibench is 0.2.0 and so is the build from main, so pip calls the
-    # requirement satisfied and leaves photonics2d at v0. --force-reinstall is
-    # what actually swaps the code; --no-deps because main declares none that
-    # 0.2.0 did not.
-    %pip install -q --force-reinstall --no-deps "engibench[all] @ git+https://github.com/IDEALLab/EngiBench.git@{ENGIBENCH_REF}"
+    setup_marker = Path("/content/.idetc26_setup_v1")
+    if setup_marker.exists():
+        print("Setup already complete.")
+    else:
+        %pip install -q "git+https://github.com/IDEALLab/EngiOpt.git@{BRANCH}"
+        # PyPI's engibench is 0.2.0 and so is the build from main, so pip calls
+        # the requirement satisfied and leaves photonics2d at v0. Force the
+        # GitHub version into the current environment before EngiBench is first
+        # imported by the next cell.
+        %pip install -q --force-reinstall --no-deps "engibench[all] @ git+https://github.com/IDEALLab/EngiBench.git@{ENGIBENCH_REF}"
 
-    import sysconfig
-    from pathlib import Path
-    installed = Path(sysconfig.get_paths()["purelib"]) / "engibench/problems/photonics2d/v1.py"
-    print(f"photonics2d v1 present: {{installed.exists()}}")
+        import sysconfig
 
-    # Restart automatically. The install replaces files on disk, but a runtime
-    # that already imported the old engibench keeps serving it from sys.modules
-    # -- which looks like the install silently failing, on a runtime where it
-    # plainly succeeded. Asking people to restart by hand is the step that gets
-    # skipped. Colab reconnects on its own; just run the next cell.
-    print("Restarting the runtime. When it reconnects, carry on from the next cell.")
-    import IPython
+        installed = Path(sysconfig.get_paths()["purelib"]) / "engibench/problems/photonics2d/v1.py"
+        if not installed.exists():
+            raise RuntimeError("EngiBench installation failed: photonics2d v1 is missing.")
 
-    IPython.Application.instance().kernel.do_shutdown(restart=True)
+        setup_marker.write_text("EngiOpt {BRANCH}; EngiBench {ENGIBENCH_REF}\\n")
+        print("Setup complete. Continue with the next cell.")
 """
     ),
     code(
@@ -335,11 +334,11 @@ case.show(board)
 ---
 # 6 · Your accusation
 
-Out loud, to the room:
+Choose the model you would use and be ready to explain your choice to the room:
 
 1. **Who did it.** The model you think is the best.
 2. **On what evidence.** Why do you think so?
-3. **What you could not rule out.** What additional evidence would make the decision easier?
+3. **What you could not rule out.** What additional evidence would make your decision easier?
 
 The cell below is yours to build with. Get to work.
 
