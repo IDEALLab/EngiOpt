@@ -323,8 +323,15 @@ def main() -> None:
         "cells": CELLS,
         # Key order matches what Jupyter writes, so opening and saving the
         # notebook does not reorder the file under the next build.
+        # `accelerator` is what Colab reads to attach a runtime, so the notebook
+        # opens on a GPU without anybody visiting Runtime -> Change runtime type.
+        # Nothing in the session needs one -- the designs are cached and the
+        # physics is read from the Hub -- but a cache miss samples from a
+        # checkpoint, and that is the one place a participant would otherwise
+        # sit and wait.
         "metadata": {
-            "colab": {"provenance": [], "toc_visible": True},
+            "accelerator": "GPU",
+            "colab": {"gpuType": "T4", "provenance": [], "toc_visible": True},
             "kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
             "language_info": {"name": "python"},
         },
