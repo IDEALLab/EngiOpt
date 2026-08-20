@@ -62,6 +62,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from dataclasses import field
+import hashlib
+import hmac
 import io
 from pathlib import Path
 import textwrap
@@ -83,6 +85,26 @@ from engiopt.workshops.idetc26.seal import unseal
 
 if TYPE_CHECKING:
     from engiopt.workshops.idetc26.views import Views
+
+_REVEAL_GATE = "ec6ecbfbd552966130e43013f3c01f9b86e37ed8e9a452dbb7c880fff01b939f"
+
+_PLANTED_REVEAL = {
+    "coarse_to_fine_2d": {
+        "does": "Retrieves a training design, coarsens it, then upsamples it back to full size.",
+        "tests": "Can constraint checks miss a visible checkerboard artifact?",
+        "check": "Look at its designs, then compare its constraint and similarity scores.",
+    },
+    "portfolio_2d": {
+        "does": "Returns a varied set of training designs but pays little attention to which brief each one answers.",
+        "tests": "Can diversity look good when the model ignores part of the brief?",
+        "check": "Compare its diversity scores with paired distance and physics results.",
+    },
+    "annealed_2d": {
+        "does": "Retrieves a training design, adds noise, then adjusts it to meet the volume budget.",
+        "tests": "Can noise be rewarded as novelty and diversity?",
+        "check": "Compare its diversity and feasibility scores with latent distance and coverage.",
+    },
+}
 
 HELP = """
 THE CASE FILE -- cheat sheet. First block is all you need; the rest is reference.
@@ -235,6 +257,7 @@ class Case:
     _sample_meta: dict[tuple[str, int], dict[str, Any]] = field(default_factory=dict, repr=False)
     _published: dict[str, dict[str, Any]] = field(default_factory=dict, repr=False)
     _views: Views | None = field(default=None, repr=False)
+    _verdict: dict[str, str] | None = field(default=None, repr=False)
 
     # ------------------------------------------------------------------
     # Opening the file
@@ -885,6 +908,55 @@ class Case:
         out = pd.DataFrame(ranked, index=frame.index).astype("Int64")
         out.index.name = frame.index.name
         return out
+
+    def commit_verdict(self, model: str, evidence: str, uncertainty: str = "") -> pd.Series:
+        """Record a participant's choice before the reveal."""
+        member = self.bank.resolve(model)
+        evidence = evidence.strip()
+        uncertainty = uncertainty.strip()
+        if not evidence:
+            raise ValueError("Add one result or observation that supports your choice.")
+
+        self._verdict = {
+            "model": member.label,
+            "evidence": evidence,
+            "uncertainty": uncertainty or "Not stated",
+        }
+        print("Verdict recorded. Wait for the facilitator before opening the reveal.")
+        return pd.Series(self._verdict, name="your verdict")
+
+    def reveal(self, passphrase: str) -> None:
+        """Show the planted models after a participant has recorded a verdict."""
+        if self._verdict is None:
+            raise RuntimeError("Record your choice with case.commit_verdict(...) before opening the reveal.")
+
+        supplied = hashlib.sha256(passphrase.strip().casefold().encode()).hexdigest()
+        if not hmac.compare_digest(supplied, _REVEAL_GATE):
+            raise ValueError("That passphrase does not open the reveal.")
+
+        planted = [member for member in self.bank if member.kind == "planted"]
+        print("\nTHE REVEAL\n")
+        print(f"{len(planted)} suspects were planted in the line-up.")
+        print("Their scores are real. Each one was built to expose a gap in the evaluation.\n")
+
+        planted_labels = set()
+        for member in planted:
+            planted_labels.add(member.label)
+            details = _PLANTED_REVEAL.get(member.identity)
+            if details is None:
+                print(f"{member.label}\n  {member.summary}\n")
+                continue
+            print(member.label)
+            print(f"  What it does: {details['does']}")
+            print(f"  What it tests: {details['tests']}")
+            print(f"  What to check: {details['check']}\n")
+
+        if self._verdict["model"] in planted_labels:
+            print("Your choice was one of the planted models.")
+            print("The scores you used were real. Now you can see what those scores left out.")
+        else:
+            print("Your choice was not planted.")
+            print("Now check whether the same evidence would also have supported one of the planted models.")
 
     # ------------------------------------------------------------------
     # Internals

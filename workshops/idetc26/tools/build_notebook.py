@@ -334,18 +334,35 @@ case.show(board)
 ---
 # 6 · Your accusation
 
-Choose the model you would use and be ready to explain your choice to the room:
-
-1. **Who did it.** The model you think is the best.
-2. **On what evidence.** Why do you think so?
-3. **What you could not rule out.** What additional evidence would make your decision easier?
-
-The cell below is yours to build with. Get to work.
-
-Remember `case.help()`
+Choose the model you would use. Write down the main result behind your choice
+and one thing you are still unsure about.
 """
     ),
-    code(""""""),
+    code(
+        """
+model = "diffusion_2d_cond" # @param ["knn_retrieval", "deconv_regression", "vqgan", "coarse_to_fine_2d", "diffusion_2d_cond", "cgan_cnn_2d", "portfolio_2d", "gan_cnn_2d", "annealed_2d", "constrained_plvae_2d"]
+evidence = "" # @param {type:"string"}
+uncertainty = "" # @param {type:"string"}
+
+case.commit_verdict(model, evidence, uncertainty)
+"""
+    ),
+    # ---- 7 · the reveal ----
+    md(
+        """
+---
+# 7 · The reveal
+
+Wait for the facilitator. Once everyone has recorded a verdict, enter the
+passphrase and run the cell.
+"""
+    ),
+    code(
+        """
+passphrase = "" # @param {type:"string"}
+case.reveal(passphrase)
+"""
+    ),
 ]
 
 
