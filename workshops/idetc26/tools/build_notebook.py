@@ -110,6 +110,10 @@ CELLS = [
         """
 ---
 ## Setup
+
+**About two minutes.** The next cell installs EngiOpt and EngiBench (~1 min);
+the one after it opens the case and downloads the dataset (~45 s). Run both,
+then carry on.
 """
     ),
     code(
@@ -279,10 +283,16 @@ The design is not valid if it doesn't meet its budget
         """
 ## Performance — is the design actually any good?
 
-Is the design close to optimum on generation (iog), does it require little effort to reach optimum on warmstart (cog), or does it converge to better/worse design when warmstarting (fog)?
-`iog` measures the initial optimality gap before re-optimization. `cog` measures
-the cumulative gap during warm-start optimization. `fog` measures the final gap
-after optimization.
+Three optimality gaps, measured by re-running the optimizer from each generated
+design. Lower is better for all three.
+
+| | column | asks |
+|---|---|---|
+| **IOG** — initial | `iog` | how far the design starts from the reference optimum |
+| **COG** — cumulative | `cog` | how much work the optimizer does getting there |
+| **FOG** — final | `fog` | where it ends up |
+
+These are the columns that call the simulator, so they are the expensive ones.
 """
     ),
     code("""case.evaluate("cog", models=["knn_retrieval", "cgan_cnn_2d"]).round(3)"""),
