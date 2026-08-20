@@ -4,3 +4,6 @@ cache/
 
 # Scratch dir a notebook run creates next to itself; never shipped.
 notebooks/idetc26_work/
+
+# Local planning notes are not part of the workshop deliverable.
+PLAN.md
