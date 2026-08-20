@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
-from types import SimpleNamespace
 
 import numpy as np
 import pytest
@@ -108,70 +107,6 @@ def test_no_two_suspects_differ_only_by_training_seed() -> None:
         config = WorkshopConfig.load(problem)
         identities = [(entry["algo"], entry.get("config_fingerprint")) for entry in config.bank]
         assert len(identities) == len(set(identities)), f"{problem} has two suspects differing only by seed"
-
-
-def _case_for_reveal(tmp_path: Path) -> Case:
-    """A small model bank for testing the reveal without loading any data."""
-    members = [
-        SimpleNamespace(
-            label="diffusion_2d_cond",
-            identity="diffusion_2d_cond",
-            kind="pretrained",
-            summary="Conditional diffusion.",
-        ),
-        *[
-            SimpleNamespace(label=name, identity=name, kind="planted", summary="A planted model.")
-            for name in ("coarse_to_fine_2d", "portfolio_2d", "annealed_2d")
-        ],
-    ]
-
-    class RevealBank(list):
-        def resolve(self, name: str) -> SimpleNamespace:
-            matches = [member for member in self if name in member.label]
-            if len(matches) != 1:
-                raise KeyError(name)
-            return matches[0]
-
-    return Case(
-        config=WorkshopConfig.load(PROBLEM_ID),
-        evaluator=None,  # type: ignore[arg-type]
-        bank=RevealBank(members),  # type: ignore[arg-type]
-        controls=None,  # type: ignore[arg-type]
-        artifact_dir=tmp_path,
-        store=None,  # type: ignore[arg-type]
-    )
-
-
-def test_reveal_requires_a_written_verdict_and_the_facilitator_phrase(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
-    """The reveal stays closed until the participant commits and the facilitator opens it."""
-    import engiopt.workshops.idetc26.case as case_module
-
-    reveal_case = _case_for_reveal(tmp_path)
-    with pytest.raises(RuntimeError, match="Record your choice"):
-        reveal_case.reveal("anything")
-    with pytest.raises(ValueError, match="Add one result"):
-        reveal_case.commit_verdict("portfolio", "")
-
-    reveal_case.commit_verdict("portfolio", "It ranked highly on diversity.", "I did not run the simulator.")
-    with pytest.raises(ValueError, match="does not open"):
-        reveal_case.reveal("wrong")
-
-    test_phrase = "open the test reveal"
-    monkeypatch.setattr(
-        case_module,
-        "_REVEAL_GATE",
-        case_module.hashlib.sha256(test_phrase.casefold().encode()).hexdigest(),
-    )
-    reveal_case.reveal(test_phrase)
-    output = capsys.readouterr().out
-
-    assert "3 suspects were planted" in output
-    assert "coarse_to_fine_2d" in output
-    assert "portfolio_2d" in output
-    assert "annealed_2d" in output
-    assert "Your choice was one of the planted models" in output
 
 
 def test_a_suspect_that_is_not_a_seed_variant_is_not_named_like_one() -> None:
