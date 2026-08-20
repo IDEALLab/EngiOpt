@@ -39,6 +39,17 @@ from pathlib import Path
 NOTEBOOK_DIR = Path(__file__).resolve().parents[1] / "notebooks"
 
 BRANCH = "feat/idetc26-workshop"
+"""The EngiOpt branch Colab installs from."""
+
+ENGIBENCH_REF = "main"
+"""The EngiBench ref Colab installs from, rather than the PyPI release.
+
+PyPI still carries 0.2.0, whose `photonics2d` is v0: three conditions and the v0
+dataset. The frozen spec is defined against v1 -- six conditions and the v1
+dataset -- so `Case.open("photonics2d")` fails its own definition check on a
+released install, which is the guard working rather than a bug. `main` has v1
+and matches what the spec was frozen against; pinning it here costs one clone at
+setup and needs no release to land before the session."""
 """The branch Colab installs EngiOpt from.
 
 One constant, referenced everywhere. The DCC'26 notebooks hardcoded their branch
@@ -100,7 +111,7 @@ CELLS = [
 import sys
 
 if "google.colab" in sys.modules:
-    %pip install -q "git+https://github.com/IDEALLab/EngiOpt.git@{BRANCH}"
+    %pip install -q "engibench[all] @ git+https://github.com/IDEALLab/EngiBench.git@{ENGIBENCH_REF}" "git+https://github.com/IDEALLab/EngiOpt.git@{BRANCH}"
     print("Installed. Runtime -> Restart session, then carry on from the next cell.")
 """
     ),
