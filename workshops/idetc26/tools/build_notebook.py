@@ -49,7 +49,12 @@ dataset. The frozen spec is defined against v1 -- six conditions and the v1
 dataset -- so `Case.open("photonics2d")` fails its own definition check on a
 released install, which is the guard working rather than a bug. `main` has v1
 and matches what the spec was frozen against; pinning it here costs one clone at
-setup and needs no release to land before the session."""
+setup and needs no release to land before the session.
+
+It has to be forced. The build from `main` reports version 0.2.0, the same
+string PyPI carries, so a plain `pip install engibench @ git+...` reports the
+requirement already satisfied and changes nothing -- verified in a clean 3.12
+venv, where it left `photonics2d` at v0 and the spec check still failed."""
 """The branch Colab installs EngiOpt from.
 
 One constant, referenced everywhere. The DCC'26 notebooks hardcoded their branch
@@ -111,8 +116,18 @@ CELLS = [
 import sys
 
 if "google.colab" in sys.modules:
-    %pip install -q "engibench[all] @ git+https://github.com/IDEALLab/EngiBench.git@{ENGIBENCH_REF}" "git+https://github.com/IDEALLab/EngiOpt.git@{BRANCH}"
-    print("Installed. Runtime -> Restart session, then carry on from the next cell.")
+    %pip install -q "git+https://github.com/IDEALLab/EngiOpt.git@{BRANCH}"
+    # PyPI's engibench is 0.2.0 and so is the build from main, so pip calls the
+    # requirement satisfied and leaves photonics2d at v0. --force-reinstall is
+    # what actually swaps the code; --no-deps because main declares none that
+    # 0.2.0 did not.
+    %pip install -q --force-reinstall --no-deps "engibench[all] @ git+https://github.com/IDEALLab/EngiBench.git@{ENGIBENCH_REF}"
+
+    import sysconfig
+    from pathlib import Path
+    installed = Path(sysconfig.get_paths()["purelib"]) / "engibench/problems/photonics2d/v1.py"
+    print(f"photonics2d v1 present: {{installed.exists()}}")
+    print("Runtime -> Restart session, then carry on from the next cell.")
 """
     ),
     code(
