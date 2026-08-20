@@ -229,13 +229,6 @@ Similarity metrics: `mmd`, `pixel_paired_distance`
 """
     ),
     code("""case.evaluate(["mmd", "pixel_paired_distance"]).round(4)"""),
-    md(
-        """
-Who won? Every column in this family is maximized by handing back the training
-data — and it is the family almost every paper reports, because it is the one
-you can afford.
-"""
-    ),
     # ---- novelty ----
     md(
         """
