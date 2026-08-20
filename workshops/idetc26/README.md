@@ -42,7 +42,7 @@ trained models.
 
 ## Run it
 
-[Open the participant notebook in Google Colab](https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/codex/idetc26-workshop-participant-rework/workshops/idetc26/notebooks/01_find_the_best_model.ipynb)
+[Open the participant notebook in Google Colab](https://colab.research.google.com/github/IDEALLab/EngiOpt/blob/feat/idetc26-workshop/workshops/idetc26/notebooks/01_find_the_best_model.ipynb)
 
 The GitHub copy is read-only. Participants should select **File > Save a copy in
 Drive** before editing.

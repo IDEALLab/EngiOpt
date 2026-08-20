@@ -38,7 +38,7 @@ from pathlib import Path
 
 NOTEBOOK_DIR = Path(__file__).resolve().parents[1] / "notebooks"
 
-BRANCH = "codex/idetc26-workshop-participant-rework"
+BRANCH = "feat/idetc26-workshop"
 """The EngiOpt branch Colab installs from."""
 
 ENGIBENCH_REF = "main"
