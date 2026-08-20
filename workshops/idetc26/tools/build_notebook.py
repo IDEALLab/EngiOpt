@@ -334,8 +334,15 @@ case.show(board)
 ---
 # 6 · Your accusation
 
-Choose the model you would use. Write down the main result behind your choice
-and one thing you are still unsure about.
+Choose the model you would use and be ready to explain your choice to the room:
+
+1. **Who did it.** The model you think is the best.
+2. **On what evidence.** Why do you think so?
+3. **What you could not rule out.** What additional evidence would make your decision easier?
+
+The cell below is yours to build with. Get to work.
+
+Remember `case.help()`
 """
     ),
     code(
@@ -353,8 +360,8 @@ case.commit_verdict(model, evidence, uncertainty)
 ---
 # 7 · The reveal
 
-Wait for the facilitator. Once everyone has recorded a verdict, enter the
-passphrase and run the cell.
+Do not run this cell yet. Once everyone has recorded a verdict, we will give
+you the passphrase.
 """
     ),
     code(
