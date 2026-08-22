@@ -290,6 +290,12 @@ design. Lower is better for all three.
 | **COG** — cumulative | `cog` | how much work the optimizer does getting there |
 | **FOG** — final | `fog` | where it ends up |
 
+Each has a median twin — `iog_median`, `cog_median`, `fog_median` — over the same
+50 designs. A single design the optimizer cannot rescue has an effectively
+unbounded gap, so a mean of 50 is set by its worst member: on `beams2d` three
+models report mean IOG of 818, 50 and 1.5e8 while all three finish at the same
+FOG. Rank on the mean and you have ranked one design.
+
 These are the columns that call the simulator, so they are the expensive ones.
 """
     ),

@@ -28,8 +28,11 @@
     "pca_dims",
     "lv_active_dims",
     "iog",
+    "iog_median",
     "cog",
+    "cog_median",
     "fog",
+    "fog_median",
     "settle_calls",
     "first_call_yield"
   ],

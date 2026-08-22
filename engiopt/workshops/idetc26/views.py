@@ -66,6 +66,7 @@ would need a fourth caps instead of inventing a hue."""
 MARKERS = ["o", "^", "s"]
 """Paired with SERIES, so identity survives being printed in greyscale."""
 
+
 GRADED = "viridis"
 """The ramp for a graded cloud: thousands of small dots carrying a magnitude.
 
@@ -91,6 +92,40 @@ BACKDROP = "#b9b8b1"
 Thousands of points showing where the data lives. It is drawn at low alpha and
 small size on purpose -- it is context for the comparison, and anything bolder
 would compete with the two series that are actually being compared."""
+
+
+def series_style(position: int, hues: list[str], marks: list[str]) -> dict:
+    """How the n-th named source is drawn on a space map.
+
+    The first source is a filled mark; every later one is a **ring** -- same
+    hue, same marker, no fill. Two filled series cannot be layered: whichever
+    lands on top wins every overlap outright, and on two 50-point clouds
+    covering the same region that is most of them, so the lower series reads as
+    though it had fewer designs than it has.
+
+    Measured on overlapping synthetic clouds, counting how many of the lower
+    series' pixels the upper one destroys: 30% when both are filled, 25% with
+    the upper one hollow. The visual difference is larger than that gap
+    suggests, because the survivors are no longer scattered fragments -- a
+    triangle inside a ring is still a whole triangle.
+
+    Hue was the other candidate and is not available: `OVER_GRADED` is already
+    the pair furthest from viridis and from each other, so the two marks cannot
+    be pushed further apart in colour without landing on the backdrop.
+
+    Args:
+        position: Which named source this is, from zero.
+        hues: The palette in use, graded or not.
+        marks: The marker sequence in use.
+
+    Returns:
+        Keyword arguments for `Axes.scatter`.
+    """
+    hue = hues[position % len(hues)]
+    mark = marks[position % len(marks)]
+    if position == 0:
+        return {"s": 92, "facecolor": hue, "edgecolor": "#ffffff", "linewidth": 1.2, "marker": mark}
+    return {"s": 80, "facecolor": "none", "edgecolor": hue, "linewidth": 2.4, "marker": mark}
 
 
 class Views:
@@ -748,13 +783,9 @@ class Views:
             axis.scatter(
                 codes[:, top[0]],
                 codes[:, top[1]],
-                s=68,
-                color=hues[position % len(hues)],
-                edgecolor="#ffffff",
-                linewidth=1.2,
                 label=label,
-                marker=marks[position % len(marks)],
                 zorder=2 + position,
+                **series_style(position, hues, marks),
             )
 
         axis.set_xlabel(f"{axis_names} {top[0]}", fontsize=10, color=INK_SOFT)
