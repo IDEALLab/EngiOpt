@@ -111,9 +111,7 @@ CELLS = [
 ---
 ## Setup
 
-**About two minutes.** The next cell installs EngiOpt and EngiBench (~1 min);
-the one after it opens the case and downloads the dataset (~45 s). Run both,
-then carry on.
+**About two minutes.** Run the next two cells, then carry on.
 """
     ),
     code(
