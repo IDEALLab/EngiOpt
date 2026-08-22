@@ -84,17 +84,40 @@ class VolumeOnly(DatasetGenerator):
     wins = ("viol", "cond_err")
     loses = ("iog", "cog", "fog")
 
-    volume_condition: ClassVar[str] = "volfrac"
+    volume_conditions: ClassVar[tuple[str, ...]] = ("volfrac", "volume")
+    """Names a volume budget goes by, in the order they are looked for.
+
+    The same list `PlantedGenerator` keeps, and for the same reason: beams2d
+    calls the budget `volfrac` and heatconduction2d calls it `volume`. This
+    class hardcoded `volfrac`, so on heatconduction2d -- which has a budget,
+    under the other name -- it raised instead of running, and took
+    `case.evaluate(..., controls=True)` down with it.
+
+    photonics2d has no budget at all, so this control is not configured there;
+    the error below is for a problem that offers neither name.
+
+    Kept identical to `PlantedModel.volume_conditions` on purpose -- two classes
+    resolving the same thing by different lists is how they drift. Neither
+    covers thermoelastic2d, whose budget is `volume_fraction_target`; adding it
+    here alone would make this control disagree with the planted ones, and
+    adding it to both changes what those already measure on that problem. It is
+    a deliberate gap, not an oversight, and it has to be closed in both places
+    at once by somebody who can re-score the boards it moves.
+    """
 
     def _sample(self, conditions: ConditionBatch, n: int) -> npt.NDArray[Any]:
         """Threshold a smooth random field at the quantile realizing the requested fraction.
 
         Raises:
-            ValueError: If the problem has no volume-fraction condition.
+            ValueError: If the problem has no volume-fraction condition under
+                any of `volume_conditions`.
         """
-        column = self.bank.column(self.volume_condition)
+        column = next((found for name in self.volume_conditions if (found := self.bank.column(name)) is not None), None)
         if column is None:
-            raise ValueError(f"{self.algo_id} needs a {self.volume_condition!r} condition; {self.problem_id} has none.")
+            raise ValueError(
+                f"{self.algo_id} needs one of {list(self.volume_conditions)} as a condition; "
+                f"{self.problem_id} has none of them."
+            )
 
         requested = self.requested(conditions, n)[:, column]
         shape = self.bank.split("train").designs.shape[1:]

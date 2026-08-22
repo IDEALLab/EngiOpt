@@ -703,6 +703,37 @@ def test_a_problem_without_a_volume_budget_loses_only_the_volume_columns() -> No
     assert "pixel_paired_distance" in config.available(config.cheap_metrics)
 
 
+def test_every_configured_control_can_find_what_it_needs() -> None:
+    """A control the config offers has to be able to run on that problem.
+
+    `volume_only` hardcoded `volfrac`, so on heatconduction2d -- which has a
+    volume budget, spelled `volume` -- it raised rather than sampled, and took
+    the whole `case.evaluate(..., controls=True)` cell down with it. The board
+    never got as far as being wrong; the notebook just stopped.
+
+    Checked against the frozen spec rather than the dataset, so this runs
+    without a download: the spec names the budget, and the control has to look
+    for the name the spec uses.
+    """
+    from engiopt.baselines.references import REFERENCE_INSTRUMENTS
+    from engiopt.evaluation.spec import EvalSpec
+
+    for problem in ("beams2d", "heatconduction2d", "photonics2d"):
+        config = WorkshopConfig.load(problem)
+        spec = EvalSpec.load(config.spec)
+        for entry in config.controls:
+            names = getattr(REFERENCE_INSTRUMENTS[entry["algo"]], "volume_conditions", None)
+            if names is None:
+                continue  # a control with no budget to hit needs nothing resolved
+            assert spec.volume_condition is not None, (
+                f"{problem} configures {entry['algo']!r}, which needs a volume budget, but {config.spec} declares none"
+            )
+            assert spec.volume_condition in names, (
+                f"{problem} calls its budget {spec.volume_condition!r}, which "
+                f"{entry['algo']!r} does not look for: {list(names)}"
+            )
+
+
 def test_every_problem_config_declares_registered_metrics_and_a_full_bank() -> None:
     """Each problem the workshop offers has to be loadable and internally consistent."""
     from engiopt.evaluation.registry import METRICS
