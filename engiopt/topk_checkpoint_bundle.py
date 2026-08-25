@@ -125,8 +125,8 @@ def archive_topk_checkpoint_bundle(
         merged_config = dict(inferred_config)
         if run_config:
             merged_config.update(run_config)
-        package_label = spec.package_label
         inferred_package_label = infer_checkpoint_package_label(spec.model_id, merged_config)
+        package_label = spec.package_label or inferred_package_label
 
         bundle_metadata = {
             "bundle_type": "top_k_checkpoints",
@@ -264,6 +264,7 @@ def _eval_only_checkpoint(checkpoint: dict[str, Any], model_id: str) -> dict[str
             "loss",
             "model",
             "model_config",
+            "training_wandb",
         },
         "diffusion_2d_cond": {
             "args",
@@ -276,6 +277,7 @@ def _eval_only_checkpoint(checkpoint: dict[str, Any], model_id: str) -> dict[str
             "loss",
             "model",
             "model_config",
+            "training_wandb",
         },
         "cgan_cnn_2d": {
             "args",
@@ -284,6 +286,7 @@ def _eval_only_checkpoint(checkpoint: dict[str, Any], model_id: str) -> dict[str
             "epoch",
             "generator",
             "loss",
+            "training_wandb",
         },
     }
     keys = keep_by_model.get(model_id)

@@ -16,12 +16,17 @@ import tyro
 import wandb
 
 from engiopt import metrics
+from engiopt.checkpoint_store import resolve_checkpoint_reference
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.flow_matching_2d_cond.core import build_model
 from engiopt.flow_matching_2d_cond.core import generate_samples
 from engiopt.flow_matching_2d_cond.core import load_local_checkpoint
 from engiopt.reporting import build_display_name
 from engiopt.reporting import write_metrics_csv
+from engiopt.selected_checkpoint_bundle import archive_selected_checkpoint_bundle
+from engiopt.selected_checkpoint_bundle import SelectedCheckpointBackend
+from engiopt.selected_checkpoint_bundle import SelectedCheckpointSpec
+from engiopt.selected_checkpoint_bundle import stage_selected_checkpoint_bundle
 from engiopt.timing import generation_timer_elapsed
 from engiopt.timing import generation_timer_start
 from engiopt.topk_checkpoint_bundle import restore_topk_checkpoint_dir
@@ -39,10 +44,20 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
+    wandb_group: str | None = None
+    """Optional W&B group shared by one experiment campaign."""
     hf_entity: str = ""
     """HF org/user where checkpoint packages are stored. Empty infers the token username."""
     hf_repo_prefix: str = "engiopt"
     """HF repo prefix used for model-family repositories."""
+    hf_private: bool = False
+    """Create/use private HF model repositories."""
+    selected_checkpoint_backend: SelectedCheckpointBackend = "none"
+    """Durable backend for the checkpoint selected by validation COG."""
+    selected_checkpoint_release: str = "v1"
+    """Release label used in the selected-checkpoint HF package path."""
+    selected_checkpoint_staging_root: str | None = None
+    """Persistent root for upload-ready selected bundles when backend is local."""
     track: bool = True
     """Log evaluation metrics and metadata to W&B."""
     run_name: str | None = None
@@ -61,6 +76,10 @@ class Args:
     """Append to an existing CSV. Use --no-append-output to overwrite instead."""
     checkpoint_path: str | None = None
     """Optional local checkpoint path. Preferred over WandB artifacts when set."""
+    checkpoint_ref: str | None = None
+    """Optional explicit hf://, wandb://, or local selected-checkpoint package reference."""
+    checkpoint_revision: str | None = None
+    """Optional immutable HF revision used with checkpoint_ref."""
     checkpoint_dir: str | None = None
     """Optional directory containing validation_metrics.json and epoch checkpoints for top-k post-training selection."""
     checkpoint_source: Literal["local", "auto", "hf"] = "local"
@@ -295,8 +314,24 @@ if __name__ == "__main__":
     final_generated_designs_np: np.ndarray | None = None
     final_reference_designs_np: np.ndarray | None = None
     selection_validation_rows: list[dict[str, Any]] = []
+    selected_checkpoint_path: Path | None = None
+    selected_validation_metrics_path: Path | None = None
 
-    if args.checkpoint_path is not None:
+    direct_checkpoint_path = args.checkpoint_path
+    direct_checkpoint_source = "local_checkpoint"
+    if args.checkpoint_ref is not None:
+        if args.checkpoint_path is not None:
+            raise ValueError("Use only one of --checkpoint-path and --checkpoint-ref")
+        resolved_checkpoint = resolve_checkpoint_reference(
+            model_source="auto",
+            model_ref=args.checkpoint_ref,
+            required_files=["model.pth"],
+            hf_revision=args.checkpoint_revision,
+        )
+        direct_checkpoint_path = resolved_checkpoint.files["model.pth"]
+        direct_checkpoint_source = f"{resolved_checkpoint.source}_selected_checkpoint"
+
+    if direct_checkpoint_path is not None:
         conditions_tensor, sampled_conditions, sampled_designs_np, _ = sample_conditions(
             problem=problem,
             n_samples=args.n_samples,
@@ -306,7 +341,7 @@ if __name__ == "__main__":
         conditions_tensor = conditions_tensor.unsqueeze(1)
 
         metrics_dict, final_generated_designs_np = evaluate_checkpoint(
-            checkpoint_path=args.checkpoint_path,
+            checkpoint_path=direct_checkpoint_path,
             conditions_tensor=conditions_tensor,
             sampled_conditions=sampled_conditions,
             sampled_designs_np=sampled_designs_np,
@@ -315,7 +350,7 @@ if __name__ == "__main__":
                 device=device,
                 args=args,
                 generation_seed=args.seed + 2000,
-                checkpoint_source="local_checkpoint",
+                checkpoint_source=direct_checkpoint_source,
             ),
         )
         metrics_dict.update(
@@ -330,7 +365,7 @@ if __name__ == "__main__":
         )
         final_reference_designs_np = sampled_designs_np
         write_metrics_csv([metrics_dict], out_path, append_output=args.append_output)
-        checkpoint_source = "local_checkpoint"
+        checkpoint_source = direct_checkpoint_source
 
     elif args.select_best_of_top_k and (args.checkpoint_dir is not None or args.checkpoint_source in {"auto", "hf"}):
         checkpoint_dir, topk_checkpoint_source = restore_topk_checkpoint_dir(
@@ -382,6 +417,7 @@ if __name__ == "__main__":
                     "validation_cog": float(val_metrics["cog"]),
                     "validation_fog": float(val_metrics["fog"]),
                     "validation_eval_mmd": float(val_metrics["mmd"]),
+                    "validation_generation_seed": args.seed + 1000 + rank,
                 }
             )
             if float(val_metrics["cog"]) < best_candidate_val_cog:
@@ -403,6 +439,8 @@ if __name__ == "__main__":
         selected_rank = next(
             idx for idx, row in enumerate(selection_validation_rows, 1) if row["epoch"] == int(best_candidate["epoch"] + 1)
         )
+        selected_checkpoint_path = Path(best_candidate["checkpoint_path"])
+        selected_validation_metrics_path = checkpoint_dir / "validation_metrics.json"
 
         metrics_dict, final_generated_designs_np = evaluate_checkpoint(
             checkpoint_path=best_candidate["checkpoint_path"],
@@ -435,7 +473,6 @@ if __name__ == "__main__":
             }
         )
         metrics_dict["display_name"] = build_display_name(metrics_dict)
-        write_metrics_csv([metrics_dict], out_path, append_output=args.append_output)
         checkpoint_source = topk_checkpoint_source
         final_reference_designs_np = test_sampled_designs_np
 
@@ -532,11 +569,13 @@ if __name__ == "__main__":
     evaluation_runtime_sec = float(metrics_dict["evaluation_runtime_sec"])
     generation_samples_per_sec = float(metrics_dict["generation_samples_per_sec"])
 
+    run = None
     if args.track:
         run_name = args.run_name or f"{args.problem_id}__{args.method}__flow_matching_2d_cond__eval__seed{args.seed}__{int(time.time())}"
         run = wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
+            group=args.wandb_group,
             job_type=args.wandb_job_type,
             name=run_name,
             config={
@@ -547,6 +586,59 @@ if __name__ == "__main__":
         )
         if run is None:
             raise RuntimeError("Failed to initialize Weights & Biases run")
+
+    if selected_checkpoint_path is not None and selected_validation_metrics_path is not None:
+        selected_spec = SelectedCheckpointSpec(
+                model_id="flow_matching_2d_cond",
+                problem_id=args.problem_id,
+                seed=args.seed,
+                checkpoint_path=selected_checkpoint_path,
+                validation_metrics_path=selected_validation_metrics_path,
+                selection_rows=selection_validation_rows,
+                selected_rank=int(metrics_dict["selection_rank"]),
+                selected_epoch=int(metrics_dict["selection_candidate_epoch"]),
+                top_k=args.top_k,
+                selection_batch_size=args.selection_batch_size,
+                selection_seed=args.seed + args.selection_seed_offset,
+                test_seed=args.seed,
+                test_generation_seed=args.seed + 2000,
+                release=args.selected_checkpoint_release,
+                package_label=args.checkpoint_package_label,
+            )
+        if args.selected_checkpoint_backend == "local":
+            if args.selected_checkpoint_staging_root is None:
+                raise ValueError("Local selected-checkpoint staging requires --selected-checkpoint-staging-root")
+            archive_info = stage_selected_checkpoint_bundle(
+                spec=selected_spec,
+                staging_root=args.selected_checkpoint_staging_root,
+                test_metrics=metrics_dict,
+            )
+        else:
+            archive_info = archive_selected_checkpoint_bundle(
+                spec=selected_spec,
+                checkpoint_backend=args.selected_checkpoint_backend,
+                hf_entity=args.hf_entity,
+                hf_repo_prefix=args.hf_repo_prefix,
+                hf_private=args.hf_private,
+                test_metrics=metrics_dict,
+            )
+        metrics_dict.update(
+            {
+                key: archive_info.get(key)
+                for key in (
+                    "checkpoint_backend",
+                    "hf_repo_id",
+                    "hf_package_path",
+                    "hf_model_ref",
+                    "hf_revision",
+                    "selected_checkpoint_staging_dir",
+                    "selected_checkpoint_sha256",
+                )
+            }
+        )
+        write_metrics_csv([metrics_dict], out_path, append_output=args.append_output)
+
+    if run is not None:
         if selection_validation_rows:
             run.log(
                 {

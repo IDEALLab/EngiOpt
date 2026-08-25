@@ -89,6 +89,7 @@ def save_checkpoint_package(  # noqa: PLR0913
         "checkpoint_backend": checkpoint_backend,
         "hf_repo_id": None,
         "hf_package_path": None,
+        "hf_model_ref": None,
         "hf_run_package_path": None,
         "hf_revision": None,
         "hf_run_revision": None,
@@ -102,13 +103,14 @@ def save_checkpoint_package(  # noqa: PLR0913
         primary_files=primary_files,
         metadata=metadata,
     )
-    metadata_payload.update(_build_wandb_run_metadata())
+    metadata_payload.update(active_wandb_run_metadata())
 
     if checkpoint_backend == "hf":
         repo_id = build_hf_repo_id(hf_entity, hf_repo_prefix, algo)
         package_path = build_hf_package_path(problem_id, seed, extra_path_parts)
         info["hf_repo_id"] = repo_id
         info["hf_package_path"] = package_path
+        info["hf_model_ref"] = f"hf://{repo_id}/{package_path}"
         metadata_payload["hf_repo_id"] = repo_id
         metadata_payload["hf_package_path"] = package_path
 
@@ -166,6 +168,7 @@ def resolve_named_checkpoint(  # noqa: PLR0913
     wandb_artifact_alias: str | None = None,
     local_model_dir: str | None = None,
     extra_path_parts: list[str] | None = None,
+    hf_revision: str | None = None,
 ) -> ResolvedCheckpoint:
     """Resolve a checkpoint package by the standard EngiOpt problem/algo/seed naming.
 
@@ -182,6 +185,7 @@ def resolve_named_checkpoint(  # noqa: PLR0913
                 repo_id=build_hf_repo_id(hf_entity, hf_repo_prefix, algo),
                 package_path=build_hf_package_path(problem_id, seed, extra_path_parts),
                 required_files=required_files,
+                revision=hf_revision,
             )
         except Exception as exc:
             if model_source == "hf":
@@ -216,6 +220,7 @@ def resolve_checkpoint_reference(
     model_ref: str,
     required_files: list[str] | None = None,
     active_wandb_run: wandb.sdk.wandb_run.Run | None = None,
+    hf_revision: str | None = None,
 ) -> ResolvedCheckpoint:
     """Resolve a checkpoint package from an explicit HF/W&B/local reference."""
     inferred_source = model_source
@@ -232,7 +237,12 @@ def resolve_checkpoint_reference(
 
     if inferred_source == "hf":
         repo_id, package_path = _parse_hf_reference(model_ref)
-        return _resolve_hf_package(repo_id=repo_id, package_path=package_path, required_files=required_files or [])
+        return _resolve_hf_package(
+            repo_id=repo_id,
+            package_path=package_path,
+            required_files=required_files or [],
+            revision=hf_revision,
+        )
     if inferred_source == "wandb":
         artifact_path = model_ref.removeprefix("wandb://")
         return _resolve_wandb_reference(
@@ -278,11 +288,14 @@ def _upload_package_to_hf(  # noqa: PLR0913
     return getattr(commit_info, "oid", None)
 
 
-def _resolve_hf_package(*, repo_id: str, package_path: str, required_files: list[str]) -> ResolvedCheckpoint:
+def _resolve_hf_package(
+    *, repo_id: str, package_path: str, required_files: list[str], revision: str | None = None
+) -> ResolvedCheckpoint:
     repo_snapshot = snapshot_download(
         repo_id=repo_id,
         repo_type="model",
         allow_patterns=[f"{package_path}/*"],
+        revision=revision,
     )
     root_dir = os.path.join(repo_snapshot, package_path)
     if not os.path.isdir(root_dir):
@@ -469,7 +482,7 @@ def _build_metadata(  # noqa: PLR0913
     return payload
 
 
-def _build_wandb_run_metadata() -> dict[str, Any]:
+def active_wandb_run_metadata() -> dict[str, Any]:
     """Return W&B run identity fields for checkpoint metadata when tracking is active."""
     if wandb.run is None:
         return {}
@@ -511,10 +524,22 @@ def _ensure_hf_repo_readme(api: HfApi, repo_id: str, algo: str) -> None:
 
 def _repo_readme_text(algo: str) -> str:
     return (
+        "---\n"
+        "license: gpl-3.0\n"
+        "library_name: engiopt\n"
+        "tags:\n"
+        "- engineering-design\n"
+        "- inverse-design\n"
+        "- engibench\n"
+        "---\n\n"
         f"# EngiOpt {algo}\n\n"
-        "This repository stores EngiOpt checkpoint packages for one model family.\n\n"
-        "Each checkpoint package contains model weight files together with `run_config.json` "
-        "and `metadata.json` so evaluation can run without depending on W&B run config state.\n"
+        "This repository stores evaluation-ready EngiOpt checkpoints for one model family. "
+        "The models are trained on EngiBench problem datasets and are intended as learned "
+        "initializations for downstream engineering optimization.\n\n"
+        "Each package contains model weights, `run_config.json`, and `metadata.json`. Selected "
+        "checkpoint packages also include the validation shortlist and selection results. The "
+        "metadata links each package to its W&B evaluation run and records the source revisions "
+        "needed to reproduce the evaluation.\n"
     )
 
 
@@ -525,6 +550,7 @@ def _log_checkpoint_summary_to_wandb(metadata: dict[str, Any], info: dict[str, A
     if info["hf_repo_id"] is not None:
         wandb.summary["hf_repo_id"] = info["hf_repo_id"]
         wandb.summary["hf_package_path"] = info["hf_package_path"]
+        wandb.summary["hf_model_ref"] = info["hf_model_ref"]
         wandb.summary["hf_revision"] = info["hf_revision"]
     if info["hf_run_package_path"] is not None:
         wandb.summary["hf_run_package_path"] = info["hf_run_package_path"]

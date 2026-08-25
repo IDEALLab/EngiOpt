@@ -94,3 +94,22 @@ When the project is ready to reclaim W&B storage:
 - W&B remains part of the lineage story even after HF becomes the canonical checkpoint host.
 - HF should be treated as the long-lived storage backend for public or durable checkpoints.
 - Backward compatibility matters more than immediate cleanup.
+
+## Post-training Top-K Selection
+
+The 2D flow-matching comparison uses a two-stage validation procedure. Training
+keeps the five checkpoints with the lowest validation MMD locally. Evaluation
+then compares those five candidates by downstream validation COG and selects one
+checkpoint before touching the test split.
+
+For durable publication, archive only that selected checkpoint together with:
+- `validation_metrics.json`, containing the training-time validation history
+- `selection_results.json` and `selection_results.csv`, containing all five candidate scores
+- `run_config.json` and `metadata.json`
+- the selected checkpoint checksum, source revisions, seeds, and W&B run links
+
+The selected checkpoint is sufficient to reproduce final test evaluation. The
+candidate score files preserve the selection evidence without multiplying model
+storage by five. Evaluators can either upload directly to HF for a smoke test or
+stage bundles locally for a serialized upload job. Full campaigns should use the
+staged path so concurrent GPU jobs never commit to the same HF repository.

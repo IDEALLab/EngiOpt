@@ -16,6 +16,7 @@ import tqdm
 import tyro
 
 from engiopt.best_epoch_selection import BestEpochTracker
+from engiopt.checkpoint_store import active_wandb_run_metadata
 from engiopt import metrics
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.flow_matching_2d_cond.core import args_to_dict
@@ -46,6 +47,14 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
+    wandb_group: str | None = None
+    """Optional W&B group shared by one experiment campaign."""
+    wandb_job_type: str = "training"
+    """W&B job type."""
+    run_name: str | None = None
+    """Optional W&B run name override."""
+    upload_legacy_wandb_checkpoint: bool = False
+    """Upload the final checkpoint as a legacy W&B artifact instead of storing only an HF pointer."""
     seed: int = 1
     """Random seed."""
     strict_determinism: bool = False
@@ -194,9 +203,17 @@ if __name__ == "__main__":
     problem = BUILTIN_PROBLEMS[args.problem_id]()
     problem.reset(seed=args.seed)
 
-    run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
+    run_name = args.run_name or f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
     if args.track:
-        wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args), save_code=True, name=run_name)
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            group=args.wandb_group,
+            job_type=args.wandb_job_type,
+            config=vars(args),
+            save_code=True,
+            name=run_name,
+        )
         wandb.define_metric("validation/epoch")
         wandb.define_metric("validation/mmd", step_metric="validation/epoch")
 
@@ -461,6 +478,7 @@ if __name__ == "__main__":
                     "optimizer": optimizer.state_dict(),
                     "loss": last_loss,
                     "args": args_to_dict(args),
+                    "training_wandb": active_wandb_run_metadata(),
                     "model_config": {
                         "layers_per_block": args.layers_per_block,
                         "num_train_timesteps": args.num_train_timesteps,
@@ -491,6 +509,7 @@ if __name__ == "__main__":
                     "optimizer": optimizer.state_dict(),
                     "loss": last_loss,
                     "args": args_to_dict(args),
+                    "training_wandb": active_wandb_run_metadata(),
                     "model_config": {
                         "layers_per_block": args.layers_per_block,
                         "num_train_timesteps": args.num_train_timesteps,
@@ -588,6 +607,7 @@ if __name__ == "__main__":
             "optimizer": optimizer.state_dict(),
             "loss": last_loss,
             "args": args_to_dict(args),
+            "training_wandb": active_wandb_run_metadata(),
             "model_config": {
                 "layers_per_block": args.layers_per_block,
                 "num_train_timesteps": args.num_train_timesteps,
@@ -602,7 +622,7 @@ if __name__ == "__main__":
             "design_max": design_max,
         }
         th.save(checkpoint, args.checkpoint_path)
-        if args.track:
+        if args.track and args.upload_legacy_wandb_checkpoint:
             artifact_model = wandb.Artifact(f"{args.problem_id}_{args.algo}_model", type="model")
             artifact_model.add_file(args.checkpoint_path, name="model.pth")
             wandb.log_artifact(artifact_model, aliases=[f"seed_{args.seed}"])

@@ -23,6 +23,7 @@ import tyro
 
 from engiopt import metrics
 from engiopt.best_epoch_selection import BestEpochTracker
+from engiopt.checkpoint_store import active_wandb_run_metadata
 from engiopt.dataset_sample_conditions import sample_conditions
 from engiopt.topk_checkpoint_bundle import archive_topk_checkpoint_bundle
 from engiopt.topk_checkpoint_bundle import TopKBundleSpec
@@ -47,6 +48,14 @@ class Args:
     """Wandb project name."""
     wandb_entity: str | None = None
     """Wandb entity name."""
+    wandb_group: str | None = None
+    """Optional W&B group shared by one experiment campaign."""
+    wandb_job_type: str = "training"
+    """W&B job type."""
+    run_name: str | None = None
+    """Optional W&B run name override."""
+    upload_legacy_wandb_checkpoint: bool = False
+    """Upload final generator/discriminator checkpoints as legacy W&B artifacts."""
     seed: int = 1
     """Random seed."""
     save_model: bool = False
@@ -299,9 +308,17 @@ if __name__ == "__main__":
     n_conds = len(problem.conditions_keys)
 
     # Logging
-    run_name = f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
+    run_name = args.run_name or f"{args.problem_id}__{args.algo}__{args.seed}__{int(time.time())}"
     if args.track:
-        wandb.init(project=args.wandb_project, entity=args.wandb_entity, config=vars(args), save_code=True, name=run_name)
+        wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            group=args.wandb_group,
+            job_type=args.wandb_job_type,
+            config=vars(args),
+            save_code=True,
+            name=run_name,
+        )
         wandb.define_metric("validation/epoch")
         wandb.define_metric("validation/mmd", step_metric="validation/epoch")
 
@@ -595,6 +612,7 @@ if __name__ == "__main__":
                     "optimizer_generator": optimizer_generator.state_dict(),
                     "loss": last_g_loss,
                     "args": vars(args),
+                    "training_wandb": active_wandb_run_metadata(),
                 },
                 periodic_gen_path,
             )
@@ -606,6 +624,7 @@ if __name__ == "__main__":
                     "optimizer_discriminator": optimizer_discriminator.state_dict(),
                     "loss": last_d_loss,
                     "args": vars(args),
+                    "training_wandb": active_wandb_run_metadata(),
                 },
                 periodic_disc_path,
             )
@@ -626,6 +645,7 @@ if __name__ == "__main__":
                     "optimizer_generator": optimizer_generator.state_dict(),
                     "loss": last_g_loss,
                     "args": vars(args),
+                    "training_wandb": active_wandb_run_metadata(),
                 },
                 validation_gen_path,
             )
@@ -637,6 +657,7 @@ if __name__ == "__main__":
                     "optimizer_discriminator": optimizer_discriminator.state_dict(),
                     "loss": last_d_loss,
                     "args": vars(args),
+                    "training_wandb": active_wandb_run_metadata(),
                 },
                 validation_disc_path,
             )
@@ -715,6 +736,7 @@ if __name__ == "__main__":
             "optimizer_generator": optimizer_generator.state_dict(),
             "loss": last_g_loss,
             "args": vars(args),
+            "training_wandb": active_wandb_run_metadata(),
         }
         ckpt_disc = {
             "epoch": epoch,
@@ -723,6 +745,7 @@ if __name__ == "__main__":
             "optimizer_discriminator": optimizer_discriminator.state_dict(),
             "loss": last_d_loss,
             "args": vars(args),
+            "training_wandb": active_wandb_run_metadata(),
         }
 
         th.save(ckpt_gen, args.generator_checkpoint_path)
@@ -734,7 +757,7 @@ if __name__ == "__main__":
         th.save(ckpt_gen, best_output_gen)
         th.save(ckpt_disc, best_output_disc)
 
-        if args.track:
+        if args.track and args.upload_legacy_wandb_checkpoint:
             artifact_gen = wandb.Artifact(f"{args.problem_id}_{args.algo}_generator", type="model")
             artifact_gen.add_file(args.generator_checkpoint_path, name="generator.pth")
             artifact_disc = wandb.Artifact(f"{args.problem_id}_{args.algo}_discriminator", type="model")
