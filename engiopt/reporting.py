@@ -83,10 +83,15 @@ def load_metric_shards(
     if not base.exists():
         raise FileNotFoundError(f"Metric shard directory not found: {base}")
 
-    pattern = "metrics_*.csv" if problem_id is None else f"metrics_*_{problem_id}_seed*.csv"
+    patterns = (
+        ("metrics_*.csv", "tourn_*.csv")
+        if problem_id is None
+        else (f"metrics_*_{problem_id}_seed*.csv", f"tourn_{problem_id}_*.csv")
+    )
     frames: list[pd.DataFrame] = []
 
-    for path in sorted(base.glob(pattern)):
+    paths = sorted({path for pattern in patterns for path in base.glob(pattern)})
+    for path in paths:
         frame = pd.read_csv(path)
         if frame.empty:
             continue
@@ -98,7 +103,7 @@ def load_metric_shards(
         frames.append(frame)
 
     if not frames:
-        raise ValueError(f"No metric shards matched pattern '{pattern}' in {base}")
+        raise ValueError(f"No metric shards matched patterns {patterns!r} in {base}")
 
     return pd.concat(frames, ignore_index=True, sort=False)
 
@@ -112,7 +117,9 @@ def summarize_metrics(
     if not metric_list:
         raise ValueError("No requested metrics found in raw results")
 
-    group_cols = [col for col in ("problem_id", "model_id", "integration_steps") if col in raw_df.columns]
+    group_cols = [
+        col for col in ("problem_id", "model_id", "method", "integration_steps") if col in raw_df.columns
+    ]
     if not group_cols:
         raise ValueError("No grouping columns found in raw results")
 
@@ -120,7 +127,7 @@ def summarize_metrics(
         raw_df.melt(
             id_vars=[
                 col
-                for col in ("problem_id", "model_id", "integration_steps", "seed", "source_file")
+                for col in ("problem_id", "model_id", "method", "integration_steps", "seed", "source_file")
                 if col in raw_df.columns
             ],
             value_vars=metric_list,
