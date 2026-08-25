@@ -8,9 +8,15 @@ import json
 from pathlib import Path
 from typing import Any
 
+from huggingface_hub import hf_hub_download
+from huggingface_hub import HfApi
+from huggingface_hub.utils import EntryNotFoundError
+from huggingface_hub.utils import RepositoryNotFoundError
 import tyro
 import wandb
 
+from engiopt.checkpoint_store import build_hf_package_path
+from engiopt.checkpoint_store import build_hf_repo_id
 from engiopt.checkpoint_store import save_checkpoint_package
 from engiopt.selected_checkpoint_bundle import selected_extra_path_parts
 
@@ -60,6 +66,22 @@ def publish_staged_bundle(args: Args) -> dict[str, Any]:
             f"Checksum mismatch for {selected_filename}: expected {expected_sha256}, got {actual_sha256}"
         )
 
+    existing_info = _recover_existing_remote_package(
+        args=args,
+        metadata=metadata,
+        selected_filename=selected_filename,
+        expected_sha256=actual_sha256,
+    )
+    if existing_info is not None and not args.force:
+        existing_info["bundle_dir"] = str(bundle_dir)
+        _write_json(receipt_path, existing_info)
+        _update_wandb_summary(metadata, existing_info)
+        print(
+            "Recovered existing upload: "
+            f"{existing_info.get('hf_model_ref')} @ {existing_info.get('hf_revision')}"
+        )
+        return existing_info
+
     info = save_checkpoint_package(
         checkpoint_backend="hf",
         hf_entity=args.hf_entity,
@@ -88,6 +110,67 @@ def publish_staged_bundle(args: Args) -> dict[str, Any]:
     _update_wandb_summary(metadata, info)
     print(f"Uploaded: {info.get('hf_model_ref')} @ {info.get('hf_revision')}")
     return info
+
+
+def _recover_existing_remote_package(
+    *,
+    args: Args,
+    metadata: dict[str, Any],
+    selected_filename: str,
+    expected_sha256: str,
+) -> dict[str, Any] | None:
+    """Recover an identical remote package or reject a conflicting release path."""
+    repo_id = build_hf_repo_id(args.hf_entity, args.hf_repo_prefix, str(metadata["algo"]))
+    package_path = build_hf_package_path(
+        str(metadata["problem_id"]),
+        int(metadata["seed"]),
+        selected_extra_path_parts(
+            str(metadata["release"]),
+            str(metadata["package_label"]) if metadata.get("package_label") else None,
+        ),
+    )
+    metadata_filename = f"{package_path}/metadata.json"
+    try:
+        remote_metadata_path = hf_hub_download(
+            repo_id=repo_id,
+            repo_type="model",
+            filename=metadata_filename,
+        )
+    except (EntryNotFoundError, RepositoryNotFoundError):
+        return None
+
+    remote_metadata = _read_json(Path(remote_metadata_path))
+    remote_expected_sha256 = str(remote_metadata.get("selected_checkpoint_sha256", ""))
+    if remote_expected_sha256 != expected_sha256:
+        raise FileExistsError(
+            f"HF release path already exists with different content: {repo_id}/{package_path}. "
+            "Use a new release label instead of overwriting it."
+        )
+
+    remote_checkpoint_path = hf_hub_download(
+        repo_id=repo_id,
+        repo_type="model",
+        filename=f"{package_path}/{selected_filename}",
+    )
+    remote_actual_sha256 = _sha256(Path(remote_checkpoint_path))
+    if remote_actual_sha256 != expected_sha256:
+        raise ValueError(
+            f"Remote checkpoint checksum mismatch at {repo_id}/{package_path}/{selected_filename}: "
+            f"expected {expected_sha256}, got {remote_actual_sha256}"
+        )
+
+    revision = HfApi().repo_info(repo_id=repo_id, repo_type="model").sha
+    return {
+        "checkpoint_backend": "hf",
+        "hf_repo_id": repo_id,
+        "hf_package_path": package_path,
+        "hf_model_ref": f"hf://{repo_id}/{package_path}",
+        "hf_run_package_path": None,
+        "hf_revision": revision,
+        "hf_run_revision": None,
+        "selected_checkpoint_sha256": expected_sha256,
+        "recovered_existing_upload": True,
+    }
 
 
 def _update_wandb_summary(metadata: dict[str, Any], info: dict[str, Any]) -> None:

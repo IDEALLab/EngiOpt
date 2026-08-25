@@ -113,3 +113,7 @@ candidate score files preserve the selection evidence without multiplying model
 storage by five. Evaluators can either upload directly to HF for a smoke test or
 stage bundles locally for a serialized upload job. Full campaigns should use the
 staged path so concurrent GPU jobs never commit to the same HF repository.
+The serialized publisher writes a local `upload_receipt.json`. If scratch is
+later purged, republishing the same release first compares the remote metadata
+and checkpoint checksum. Identical content is recovered idempotently; different
+content at the same HF path is rejected and must use a new release label.
