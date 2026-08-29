@@ -351,6 +351,7 @@ if __name__ == "__main__":
             ).to(device)
             flow_model.load_state_dict(flow_checkpoint["model"])
             flow_model.eval()
+            th.manual_seed(args.seed + 2000)
             flow_designs = generate_samples(
                 model=flow_model,
                 design_shape=design_shape,
@@ -442,10 +443,12 @@ if __name__ == "__main__":
             latent_dim=int(cgan_config["latent_dim"]),
             n_conds=len(problem.conditions_keys),
             design_shape=design_shape,
+            generator_output_activation=cgan_config.get("generator_output_activation", "tanh"),
         ).to(device)
         cgan_model.load_state_dict(cgan_ckpt["generator"])
         cgan_model.eval()
         cgan_conditions = conditions_tensor.unsqueeze(-1).unsqueeze(-1)
+        th.manual_seed(args.seed + 2000)
         noise = th.randn((args.n_samples, int(cgan_config["latent_dim"]), 1, 1), device=device, dtype=th.float)
         cgan_designs = cgan_model(noise, cgan_conditions)
         cgan_np = cgan_designs.detach().cpu().numpy().reshape(args.n_samples, *design_shape)
