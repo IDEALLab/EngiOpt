@@ -171,3 +171,10 @@ logs/*
 
 .ruff_cache/
 engibench_studies/*
+
+# Local operating-system and reproduction outputs
+.DS_Store
+**/.DS_Store
+reproducibility/conditional_flow_matching/outputs/
+reproducibility/conditional_flow_matching/local/
+/outputs/
