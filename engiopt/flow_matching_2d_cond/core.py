@@ -163,6 +163,24 @@ def integrate(
         return state
 
 
+def euler_integrate(
+    model,
+    initial_state: th.Tensor,
+    encoder_hidden_states: th.Tensor,
+    integration_steps: int,
+    num_train_timesteps: int,
+) -> th.Tensor:
+    """Integrate with Euler while preserving the original public helper."""
+    return integrate(
+        model=model,
+        initial_state=initial_state,
+        encoder_hidden_states=encoder_hidden_states,
+        integration_steps=integration_steps,
+        num_train_timesteps=num_train_timesteps,
+        method="euler",
+    )
+
+
 def generate_samples(
     model,
     design_shape: tuple[int, int],
