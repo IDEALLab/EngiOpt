@@ -10,7 +10,9 @@ from engiopt import metrics as metrics_mod
 from engiopt.evaluation.context import EvaluationContext
 from engiopt.evaluation.context import LatentInstrumentUnavailableError
 from engiopt.evaluation.registry import METRICS
+from engiopt.lvae import slope
 from engiopt.lvae.components import Encoder2D
+from engiopt.lvae.components import TrueSNDecoder2D
 from engiopt.lvae.config import LVAEConfig
 from engiopt.lvae.encode import encode_active
 from engiopt.lvae.encode import encode_designs
@@ -214,3 +216,66 @@ def test_median_sigma_adapts_to_the_scale_of_its_input() -> None:
     rng = np.random.default_rng(0)
     small = rng.normal(size=(40, 6))
     assert metrics_mod.compute_median_sigma(small * 100) > metrics_mod.compute_median_sigma(small)
+
+
+def test_operator_norm_recovers_a_known_singular_value() -> None:
+    """A diagonal linear map's operator norm is its largest entry."""
+    layer = th.nn.Linear(3, 3, bias=False)
+    with th.no_grad():
+        layer.weight.copy_(th.diag(th.tensor([0.5, 4.0, 2.0])))
+    assert slope.operator_norm(layer, (3,)) == pytest.approx(4.0, rel=1e-4)
+
+
+def test_operator_norm_ignores_bias() -> None:
+    """Bias translates the output and cannot change a Lipschitz constant."""
+    layer = th.nn.Linear(3, 3)
+    with th.no_grad():
+        layer.weight.copy_(th.diag(th.tensor([0.5, 4.0, 2.0])))
+        layer.bias.copy_(th.tensor([100.0, -50.0, 7.0]))
+    assert slope.operator_norm(layer, (3,)) == pytest.approx(4.0, rel=1e-4)
+
+
+def test_the_conv_bound_torch_enforces_is_not_the_operator_norm() -> None:
+    """The reason `spectral_norm_conv` needs replacing, stated as a test.
+
+    `torch`'s spectral_norm normalises the weight's `(out_channels, -1)` reshape,
+    which for a convolution is a lower bound on the operator norm. So a layer it
+    has normalised still stretches by more than 1.
+    """
+    th.manual_seed(0)
+    decoder = TrueSNDecoder2D(latent_dim=8, design_shape=(100, 100)).eval()
+    convs = [norm for name, norm in slope.layer_norms(decoder, 8) if "deconv" in name]
+    assert max(convs) > 1.0
+
+
+def test_the_decoder_bound_still_holds_despite_that() -> None:
+    """The composed product lands under the cap, because the last stage contracts.
+
+    This is the number that matters for Theorem 11, and it is why the loose
+    per-layer normalisation is a correctness bug rather than an active one.
+    """
+    th.manual_seed(0)
+    decoder = TrueSNDecoder2D(latent_dim=8, design_shape=(100, 100)).eval()
+    assert slope.certified_slope(decoder, 8) < 1.0
+
+
+def test_the_measured_slope_never_exceeds_the_certified_one() -> None:
+    """If it did, the certification would be wrong."""
+    th.manual_seed(0)
+    decoder = TrueSNDecoder2D(latent_dim=8, design_shape=(100, 100)).eval()
+    assert slope.measured_slope(decoder, 8) <= slope.certified_slope(decoder, 8)
+
+
+def test_the_output_resize_changes_the_constant_per_problem() -> None:
+    """An uncounted stage: the same cap means different things on different grids.
+
+    `resize_out` is linear, so it carries its own operator norm -- amplifying
+    when a 100x100 decode is upsampled to photonics' 120x120 and contracting on
+    thermoelastic's 64x64. Latent distances are therefore not in comparable
+    units across problems at the same configured `lipschitz_scale`.
+    """
+    th.manual_seed(0)
+    up = TrueSNDecoder2D(latent_dim=8, design_shape=(120, 120)).eval()
+    down = TrueSNDecoder2D(latent_dim=8, design_shape=(64, 64)).eval()
+    assert slope.operator_norm(up.resize_out, (1, 100, 100)) > 1.0
+    assert slope.operator_norm(down.resize_out, (1, 100, 100)) < 1.0
