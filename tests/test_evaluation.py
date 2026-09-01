@@ -522,9 +522,16 @@ def test_metrics_without_requirements_need_no_setup() -> None:
     assert {spec.name for spec in selected} == {"mmd", "dpp", "viol", "novelty", "cond_err"}
 
 
-def test_the_committed_specs_need_no_instrument() -> None:
-    """v1 is what a contributor evaluates against by default; it must work unconfigured."""
+def test_the_committed_specs_supply_what_their_metrics_need() -> None:
+    """v1 is what a contributor evaluates against by default, so it has to run.
+
+    The specs used to select no metric that needed configuring. They now pin a
+    latent instrument and select the `lv_*` columns that read it, so the property
+    worth holding is not "requires nothing" but "supplies everything it requires".
+    `_check_requirements` is the same check evaluation runs before scoring, so
+    asserting it does not raise keeps the test and the product in step.
+    """
     for path in Path("engiopt/specs").glob("*/v1.json"):
         spec = EvalSpec.load(f"{path.parent.name}/v1")
-        required = {req for name in spec.metrics for req in METRICS[name].requires}
-        assert not required, f"{path.parent.name}/v1 selects metrics requiring {required}"
+        evaluator = _evaluator_with(spec)
+        evaluator._check_requirements([METRICS[name] for name in spec.metrics])
