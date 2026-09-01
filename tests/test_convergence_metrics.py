@@ -16,11 +16,23 @@ silently averages its own padding.
 
 from __future__ import annotations
 
+import math
+import types
+from typing import Any
+
 import numpy as np
 import pytest
 
+from engiopt.evaluation.metrics import builtin
 from engiopt.evaluation.metrics.builtin import _settle_calls
 from engiopt.evaluation.physics_board import pack_trajectories
+
+
+def _context(paths: list[list[float]]) -> Any:
+    """The only part of `EvaluationContext` the trajectory metrics read."""
+    return types.SimpleNamespace(
+        optimization=types.SimpleNamespace(trajectories=[np.asarray(p, dtype=np.float32) for p in paths])
+    )
 
 
 def path(*values: float) -> np.ndarray:
@@ -127,3 +139,29 @@ def test_cog_is_still_summed_at_full_precision() -> None:
     steps = [1.2345678e8] * 100
     assert float(np.asarray(steps, dtype=np.float32).sum()) != pytest.approx(sum(steps), rel=1e-9)
     assert float(np.asarray(steps, dtype=np.float64).sum()) == pytest.approx(sum(steps), rel=1e-12)
+
+
+def test_recovery_reads_the_budget_and_carries_short_paths_forward() -> None:
+    """`gap_after_k` is the gap at call k, and a path that ended early keeps its last value."""
+    ctx = _context([[10.0, 3.0, -1.0, -1.0, -1.0], [5.0, -1.0]])
+    row = builtin.recovery(ctx)
+    assert row["gap_after_1"] == pytest.approx(7.5)  # median of 10 and 5
+    assert row["gap_after_2"] == pytest.approx(1.0)  # median of 3 and -1
+    # The two-step path has converged, so call 10 sees its final value, not an error.
+    assert row["gap_after_10"] == pytest.approx(-1.0)
+
+
+def test_calls_to_parity_counts_non_reachers_past_the_end() -> None:
+    """A design that never matches the reference must rank worse than a slow one."""
+    slow = _context([[10.0, 8.0, 6.0, 3.0, -0.5]])
+    never = _context([[10.0, 9.0, 8.5, 8.4, 8.4]])
+    assert builtin.calls_to_parity(slow) == pytest.approx(5.0)
+    assert builtin.calls_to_parity(never) == pytest.approx(6.0)
+    assert builtin.calls_to_parity(never) > builtin.calls_to_parity(slow)
+
+
+def test_recovery_family_reports_nan_without_a_trajectory() -> None:
+    """No optimizer run means no answer, not a zero that would rank as perfect."""
+    empty = _context([])
+    assert all(math.isnan(v) for v in builtin.recovery(empty).values())
+    assert math.isnan(builtin.calls_to_parity(empty))

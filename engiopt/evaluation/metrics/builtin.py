@@ -281,6 +281,87 @@ def settle_calls(ctx: EvaluationContext) -> float:
     return float(np.mean([_settle_calls(path) for path in paths])) if paths else float("nan")
 
 
+# ----------------------------------------------------------------------
+# Recoverability: how quickly does the optimizer fix what the model got wrong?
+# ----------------------------------------------------------------------
+#
+# `iog` asks whether the generated design is already good. That is the wrong
+# question whenever a defect is cheap to repair, and on these problems many are:
+# the conditions that shift the optimum most -- beams2d's `rmin`, photonics2d's
+# `blur_radius` -- set a filter length scale, and a design at the wrong scale is
+# corrected by the first few filtered updates. Worse, those conditions leave no
+# measurable signature in the design, so no cheap obedience column can price
+# them: the retrieval baseline hands back the dataset optimum for each brief and
+# still shows no rank correlation between requested `rmin` and any standard
+# length-scale statistic of what it returns.
+#
+# The metrics below price the defect in the currency an engineer actually pays,
+# which is solver calls, and are indifferent to whether the model got the brief
+# exactly right. They read the same trajectory `iog`/`cog`/`fog` summarise, so
+# they cost nothing beyond a physics run that is already happening.
+
+RECOVERY_CALLS = (1, 2, 5, 10)
+"""Call budgets to report the remaining gap at. Small on purpose -- the question
+is whether a defect clears immediately, not where the trajectory ends up."""
+
+
+@register_metric(
+    "recovery",
+    family="performance",
+    cost="expensive",
+    higher_is_better=False,
+    outputs=tuple(f"gap_after_{k}" for k in RECOVERY_CALLS),
+    description="Median optimality gap remaining after 1, 2, 5 and 10 optimizer calls.",
+)
+def recovery(ctx: EvaluationContext) -> dict[str, float]:
+    """Median remaining gap at each call budget in `RECOVERY_CALLS`.
+
+    Median rather than mean for the reason the median gaps exist at all: one
+    unrecoverable design in fifty sets a mean over a quantity that is unbounded
+    above, and at small call budgets that design has had no chance to recover.
+
+    A path shorter than the budget has converged early, so its final value is
+    carried forward -- the optimizer would have spent the remaining calls and
+    changed nothing.
+    """
+    paths = ctx.optimization.trajectories
+    if not paths:
+        return {f"gap_after_{k}": float("nan") for k in RECOVERY_CALLS}
+    return {
+        f"gap_after_{k}": float(np.median([float(path[min(k, path.size) - 1]) for path in paths]))
+        for k in RECOVERY_CALLS
+    }
+
+
+@register_metric(
+    "calls_to_parity",
+    family="performance",
+    cost="expensive",
+    higher_is_better=False,
+    description="Median optimizer calls until a design matches the reference optimum; inf if it never does.",
+)
+def calls_to_parity(ctx: EvaluationContext) -> float:
+    """How long until the warm start is as good as the dataset answer.
+
+    The gap is measured against the reference optimum and is lower-is-better, so
+    parity is the first call at which it reaches zero. This is the number to
+    select on when a model's defects are real but cheap: it does not care how
+    wrong the design started, only how much solver time that wrongness costs.
+
+    Designs that never reach parity are counted at one past the path length
+    rather than dropped, so a model that never gets there ranks worse than one
+    that is merely slow instead of silently scoring on its successes alone.
+    """
+    paths = ctx.optimization.trajectories
+    if not paths:
+        return float("nan")
+    calls = []
+    for path in paths:
+        reached = np.flatnonzero(np.asarray(path) <= 0.0)
+        calls.append(float(reached[0] + 1) if reached.size else float(path.size + 1))
+    return float(np.median(calls))
+
+
 @register_metric(
     "first_call_yield",
     family="performance",

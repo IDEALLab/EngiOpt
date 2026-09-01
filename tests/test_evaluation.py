@@ -111,6 +111,10 @@ def test_builtin_metrics_declare_their_cost() -> None:
         # is what `expensive` declares.
         "settle_calls",
         "first_call_yield",
+        # Same trajectory again, read at a small call budget rather than at the
+        # end: what the model got wrong matters less than what fixing it costs.
+        "recovery",
+        "calls_to_parity",
     }
     assert {"mmd", "dpp", "viol"} <= {spec.name for spec in METRICS.select(cost="cheap")}
 

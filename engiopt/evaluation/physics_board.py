@@ -305,6 +305,148 @@ def publish_trajectories(
     print(f"      published -> {package_path}/{TRAJECTORY_FILE} ({written} B)", flush=True)
 
 
+def step_arrays(history: list, path: np.ndarray, *, prefix: str) -> dict[str, np.ndarray]:
+    """Everything one optimizer run leaves behind that a later method might want.
+
+    `OptiStep` (in `engibench.core`, so every problem returns it) carries six
+    fields and the boards kept none of them. Four are worth the bytes:
+
+    - `x` -- the intermediate design. The trajectory-manifold thrust needs these,
+      and they are the only source of many-designs-per-brief that exists, since
+      every dataset holds exactly one design per condition.
+    - `x_sensitivities` -- dJ/dx at that design. Both the sensitivity-weighted
+      metric and any learned field surrogate are built on these, and recomputing
+      one costs a full solve.
+    - `x_update` -- the move the optimizer actually made, which is dJ/dx *after*
+      the filter, the update rule, the move limits and the volume multiplier. Not
+      a substitute for the gradient, but it is the target for an
+      optimizer-response surrogate: learning x -> next x is exactly the
+      "predict what the optimizer will do" thrust.
+    - `obj_values_update` -- the objective delta per step. Kilobytes, and it is
+      what a steps-to-parity regressor regresses on.
+
+    Designs and moves are stored at float16 and sensitivities at float32. Designs
+    live in [0, 1] and are nearly binary, moves are small deltas, and float16
+    carries ~3 significant digits, which is more than either needs; sensitivities
+    span several orders of magnitude within one field and must not be squeezed.
+    That split roughly halves the bytes for no loss that matters.
+    """
+
+    def stack(field: str, dtype: type) -> tuple[np.ndarray, np.ndarray] | None:
+        """The steps that carry `field`, stacked, plus which steps those were.
+
+        A field can be absent on some steps and present on others -- beams2d
+        records no sensitivity on the step that merely reports the starting
+        design, since nothing has been solved yet. Dropping the whole array for
+        that would throw away every later step, and substituting zeros would
+        quietly poison anything trained on it, so the present steps are kept and
+        indexed.
+        """
+        pairs = [(n, getattr(step, field, None)) for n, step in enumerate(history)]
+        kept = [(n, value) for n, value in pairs if value is not None]
+        if not kept:
+            return None
+        stacked = np.asarray([np.ravel(np.asarray(value)) for _, value in kept], dtype=dtype)
+        return stacked, np.asarray([n for n, _ in kept], dtype=np.int32)
+
+    out = {f"{prefix}_gap": path.astype(np.float32)}
+    for field, name, dtype in (
+        ("x", "x", np.float16),
+        ("x_sensitivities", "dc", np.float32),
+        ("x_update", "dx", np.float16),
+        ("obj_values_update", "dobj", np.float32),
+    ):
+        stacked = stack(field, dtype)
+        if stacked is None:
+            continue
+        values, steps = stacked
+        out[f"{prefix}_{name}"] = values
+        if values.shape[0] != len(history):
+            out[f"{prefix}_{name}_steps"] = steps
+    return out
+
+
+def package_path_for(problem_id: str, fingerprint: str | None, seed: int) -> str:
+    """Where a package lives inside its family repo."""
+    return f"{problem_id}/" + (f"cfg_{fingerprint}/" if fingerprint else "") + f"seed_{seed}"
+
+
+def publish_arrays(
+    arrays: dict[str, np.ndarray],
+    *,
+    filename: str,
+    problem_id: str,
+    algo: str,
+    fingerprint: str | None,
+    seed: int,
+    meta: dict[str, Any] | None = None,
+    hf_entity: str = "IDEALLab",
+    hf_repo_prefix: str = "engiopt",
+) -> str | None:
+    """Attach one compressed array bundle to a package, beside its weights.
+
+    The generalisation of `publish_trajectories`, for anything else a run
+    produces that a later run should never have to recompute: per-design columns,
+    intermediate designs, sensitivity fields. The rule everywhere in this
+    repository is that a number lives with the thing it describes, so that
+    curation is a metadata scan and a result can never be orphaned from the
+    checkpoint that produced it.
+
+    Returns None on success, or a short error string -- a failed upload must
+    never sink a sweep that has already paid for the compute.
+    """
+    import tempfile
+
+    from huggingface_hub import HfApi
+
+    package_path = package_path_for(problem_id, fingerprint, seed)
+    payload = dict(arrays)
+    if meta is not None:
+        payload["meta"] = np.asarray(json.dumps(meta))
+    with tempfile.TemporaryDirectory() as directory:
+        local = Path(directory) / filename
+        np.savez_compressed(local, **payload)
+        written = local.stat().st_size
+        try:
+            HfApi().upload_file(
+                path_or_fileobj=str(local),
+                path_in_repo=f"{package_path}/{filename}",
+                repo_id=f"{hf_entity}/{hf_repo_prefix}-{algo.replace('_', '-')}",
+                commit_message=f"{filename} for {package_path}",
+            )
+        except Exception as exc:  # noqa: BLE001 - a failed upload must not sink a multi-hour sweep
+            return f"{type(exc).__name__}: {str(exc)[:80]}"
+    print(f"      published -> {package_path}/{filename} ({written} B)", flush=True)
+    return None
+
+
+def published_arrays(
+    problem_id: str,
+    algo: str,
+    fingerprint: str | None,
+    seed: int,
+    *,
+    filename: str,
+    hf_entity: str = "IDEALLab",
+    hf_repo_prefix: str = "engiopt",
+) -> dict[str, np.ndarray] | None:
+    """One package's stored array bundle, or None if it has none.
+
+    The read half of `publish_arrays`, and the reason a re-run is cheap: a sweep
+    checks this before computing and skips whatever the last sweep already left
+    behind.
+    """
+    from huggingface_hub import hf_hub_download
+
+    path = f"{package_path_for(problem_id, fingerprint, seed)}/{filename}"
+    try:
+        local = hf_hub_download(f"{hf_entity}/{hf_repo_prefix}-{algo.replace('_', '-')}", path)
+    except Exception:  # noqa: BLE001 - a package that predates this file is the normal case
+        return None
+    with np.load(local, allow_pickle=False) as payload:
+        return {key: payload[key] for key in payload.files}
+
+
 def published_trajectories(problem_id: str, algo: str, fingerprint: str | None, seed: int) -> dict[str, np.ndarray] | None:
     """One package's stored paths as `{gaps, lengths, iog}`, or None if it has none.
 
