@@ -42,12 +42,15 @@ def stub_lvae(
         mask[pruned_dims] = True
         encoder = PrunedEncoder(encoder, mask, th.zeros(latent_dim))
 
-    return LoadedLVAE(
+    lvae = LoadedLVAE(
         encoder=encoder.eval(),
-        decoder=TrueSNDecoder2D(latent_dim=latent_dim, design_shape=shape).eval(),
         config=LVAEConfig(latent_dim=latent_dim, perf_dim=latent_dim, resize_dimensions=(100, 100), design_shape=shape),
         resolved=None,  # type: ignore[arg-type]
     )
+    # `LoadedLVAE.decoder` is a cached_property, so assigning to it fills the
+    # cache and nothing ever tries to rebuild one from published weights.
+    lvae.decoder = TrueSNDecoder2D(latent_dim=latent_dim, design_shape=shape).eval()
+    return lvae
 
 
 def stub_designs(n: int, design_shape: tuple[int, ...], seed: int = 0) -> npt.NDArray:
