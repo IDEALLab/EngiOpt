@@ -249,3 +249,10 @@ slurm/
 # Scratch debugging notebook: 2.8 MB of embedded outputs, referenced by nothing.
 # Listed as well as untracked -- a rule added after a file is tracked is inert.
 Engi_debugger.ipynb
+
+# Internal research tooling. Archived to ../EngiOpt-legacy/, never public:
+# cluster job scripts and the paper/poster figure generators. A .git/hooks/
+# pre-push guard blocks these paths from reaching origin as well; the hook is
+# not versioned, so this list is the part that travels with a clone.
+*.sbatch
+metric_validation/
