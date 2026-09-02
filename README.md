@@ -38,6 +38,21 @@ As much as we can, we follow the [CleanRL](https://github.com/vwxyzjn/cleanrl) p
 [vqgan](engiopt/generators/vqgan) | Inverse Design | 2D | ✅ | VQVAE + Transformer
 [pixel_cnn_pp_2d](engiopt/generators/pixel_cnn_pp_2d) | Inverse Design | 2D | ✅ | PixelCNN++ Autoregressive Model
 
+Every algorithm above is registered, meaning this repository holds an adapter that
+can rebuild it. Being *evaluable* additionally needs published weights, and the two
+are not the same: `cgan_cnn_2d`, `diffusion_2d_cond`, `gan_cnn_2d`, and `vqgan` have
+checkpoints on HuggingFace, and the rest must be trained before they can be scored.
+The `Dimensions` column is the other half of the answer — a 1D or 3D generator has no
+`beams2d` checkpoint because it cannot serve a 2D problem at all, not because one is
+missing. For the live answer rather than this snapshot:
+
+```
+python -m engiopt.evaluate --problem-id beams2d --list-generators --check-availability
+```
+
+Historical W&B-era checkpoints are **not** being migrated; see
+[docs/checkpoint_layout.md](docs/checkpoint_layout.md#historical-checkpoints).
+
 ## Dashboards
 HuggingFace hosts everything that has to be reloaded or compared -- model weights, run configs, evaluation metrics, and the leaderboard. WandB hosts what you only look at: loss curves and sample images. Nothing in the evaluation path requires WandB, so training with `--track false` produces exactly the same checkpoints and scores. You can access some of our runs at https://wandb.ai/engibench/engiopt.
 <img src="imgs/wandb_dashboard.png" alt="WandB dashboards"/>
@@ -77,7 +92,7 @@ huggingface-cli login
 ```
 
 ### Inverse design
-Usually, we provide two scripts per algorithm: one to train the model, and one to evaluate it.
+Each generator provides its own training script and adapter; evaluation is handled through the shared `python -m engiopt.evaluate` command.
 
 To train a model, you can run (for example):
 

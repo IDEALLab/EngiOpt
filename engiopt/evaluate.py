@@ -121,40 +121,55 @@ class Args:
 def _print_generators(args: Args) -> None:
     """Print every registered generator, and say which ones can actually be loaded.
 
-    Registered and available are different things, and the gap is wide enough to
-    mislead: an adapter is code in this repository, while a usable model also
-    needs published weights. Listing all fourteen as though they were
-    interchangeable sends people to `--generators all` and a wall of load
-    failures that look like bugs.
+    Three states, not two, and collapsing the last two misleads in opposite
+    directions. An adapter is code in this repository; a model that *fits the
+    problem* additionally has a matching design kind; a model you can evaluate
+    additionally has published weights. Reporting a 1D generator as missing a
+    `beams2d` checkpoint invents a migration nobody owes, and reporting all
+    fourteen as interchangeable sends people to `--generators all` and a wall of
+    load failures that look like bugs.
     """
-    print(f"{len(BUILTIN_GENERATORS)} generators registered:\n")
-    published = _published_packages(args)
+    fitting = _fitting_generator_names(args.problem_id)
+    print(f"{len(BUILTIN_GENERATORS)} generators registered, {len(fitting)} of them fit {args.problem_id}:\n")
+    published = _published_packages(args, fitting)
     for name, generator in sorted(BUILTIN_GENERATORS.items()):
         kinds = "/".join(generator.design_kinds)
         conditioning = "conditional" if generator.conditional else "unconditional"
-        availability = "" if published is None else f"  {_availability_label(published.get(name))}"
-        print(f"  {name:<20} {kinds:<10} {conditioning:<15}{availability}")
-    if published is not None:
-        missing = sorted(name for name, count in published.items() if not count)
-        if missing:
-            print(
-                f"\n{len(missing)} generator(s) have no published {args.problem_id} checkpoint under "
-                f"{args.hf_entity}: {', '.join(missing)}.\n"
-                "They can be trained and evaluated, but `--generators all` will report them as load "
-                "failures until someone publishes weights. W&B is not a checkpoint source."
-            )
-    else:
+        status = _status(args.problem_id, name, fitting, published)
+        print(f"  {name:<20} {kinds:<10} {conditioning:<15}  {status}".rstrip())
+    if published is None:
         print(
             f"\nPass --check-availability to also query {args.hf_entity} for which of these have "
             f"published {args.problem_id} checkpoints."
         )
+        return
+    missing = sorted(name for name in fitting if not published.get(name))
+    if missing:
+        print(
+            f"\n{len(missing)} of the {len(fitting)} generators that fit {args.problem_id} have no published "
+            f"checkpoint under {args.hf_entity}: {', '.join(missing)}.\n"
+            "They can be trained and evaluated, but `--generators all` will report them as load "
+            "failures until someone publishes weights. W&B is not a checkpoint source."
+        )
 
 
-def _published_packages(args: Args) -> dict[str, int] | None:
-    """How many packages each generator has for this problem, or None if not asked.
+def _status(problem_id: str, name: str, fitting: set[str], published: dict[str, int] | None) -> str:
+    """One column saying why a generator is or is not usable on this problem."""
+    if name not in fitting:
+        return f"does not fit {problem_id}"
+    if published is None:
+        return ""
+    return _availability_label(published.get(name))
+
+
+def _published_packages(args: Args, fitting: set[str]) -> dict[str, int] | None:
+    """How many packages each fitting generator has, or None if not asked.
 
     Behind a flag because it is one Hub request per generator, and `-h`-adjacent
-    commands should not depend on the network.
+    commands should not depend on the network. Generators that cannot serve the
+    problem are not queried: their repository holds nothing for it by
+    construction, so the answer would be zero for a reason unrelated to
+    publishing.
     """
     if not args.check_availability:
         return None
@@ -162,7 +177,7 @@ def _published_packages(args: Args) -> dict[str, int] | None:
     from engiopt.checkpoint_store import list_packages
 
     counts: dict[str, int] = {}
-    for name in BUILTIN_GENERATORS:
+    for name in sorted(fitting):
         repo = build_hf_repo_id(args.hf_entity, args.hf_repo_prefix, name)
         try:
             counts[name] = len(list_packages(repo, args.problem_id))
@@ -193,9 +208,14 @@ def _resolve_generator_names(requested: tuple[str, ...], problem_id: str) -> lis
     """Expand `all` to every registered generator compatible with the problem."""
     if "all" not in requested:
         return list(requested)
+    return sorted(_fitting_generator_names(problem_id))
+
+
+def _fitting_generator_names(problem_id: str) -> set[str]:
+    """Names of the generators whose design kind matches this problem's."""
     from engibench.utils.all_problems import BUILTIN_PROBLEMS
 
-    return sorted(generators_for(BUILTIN_PROBLEMS[problem_id]()))
+    return set(generators_for(BUILTIN_PROBLEMS[problem_id]()))
 
 
 def _fingerprints_for(requested: tuple[str, ...], algo: str) -> tuple[str | None, ...]:

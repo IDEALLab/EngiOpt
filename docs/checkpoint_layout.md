@@ -37,6 +37,23 @@ Each package contains the model files plus:
 | `metadata.json` | problem, algo, seed, fingerprint, primary files, W&B run URL |
 | `metrics.json` | evaluation scores, when `--attach-metrics` was used |
 
+## Historical checkpoints
+
+Checkpoints trained before this layout existed lived in W&B artifacts, and they
+are **not being migrated**. W&B is no longer a checkpoint source, so those
+weights are reachable only by retraining.
+
+The decision is deliberate rather than deferred. A migrated checkpoint would
+arrive without the two things this layout exists to provide -- a config
+fingerprint identifying the hyperparameters that produced it, and a content hash
+tying a leaderboard row to exact bytes -- so it could be stored but never
+canonically addressed or verified. Retraining a model costs less than a
+provenance story nobody can check.
+
+What this means in practice: a generator with no published package is trained,
+not recovered. `--list-generators --check-availability` reports which those are
+for a given problem, and counts only generators whose design kind can serve it.
+
 ## Writing one
 
 Training scripts call `save_checkpoint_package` and splat
