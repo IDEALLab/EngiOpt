@@ -60,7 +60,9 @@ class Diffusion1D(Generator):
             seq_length=int(np.prod(padded_shape)),
             auto_normalize=config.get("auto_norm", True),
         ).to(device)
-        diffusion.load_state_dict(th.load(resolved.files["model.pth"], map_location=device)[cls.primary_state_key])
+        diffusion.load_state_dict(
+            th.load(resolved.files["model.pth"], map_location=device, weights_only=True)[cls.primary_state_key]
+        )
         diffusion.eval()
         return cls(
             net=diffusion,

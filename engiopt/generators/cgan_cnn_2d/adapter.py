@@ -43,7 +43,7 @@ class CGANCNN2D(Generator):
             design_shape=problem.design_space.shape,
             generator_output_activation=config.get("generator_output_activation", "tanh"),
         )
-        checkpoint = th.load(resolved.files["generator.pth"], map_location=device)
+        checkpoint = th.load(resolved.files["generator.pth"], map_location=device, weights_only=True)
         net.load_state_dict(checkpoint[cls.primary_state_key])
         net.eval().to(device)
         return cls(net=net, latent_dim=config["latent_dim"], problem=problem, device=device, **base)

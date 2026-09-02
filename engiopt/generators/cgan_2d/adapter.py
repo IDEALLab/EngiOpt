@@ -42,7 +42,9 @@ class CGAN2D(Generator):
             design_shape=problem.design_space.shape,
             generator_output_activation=config.get("generator_output_activation", "tanh"),
         ).to(device)
-        net.load_state_dict(th.load(resolved.files["generator.pth"], map_location=device)[cls.primary_state_key])
+        net.load_state_dict(
+            th.load(resolved.files["generator.pth"], map_location=device, weights_only=True)[cls.primary_state_key]
+        )
         net.eval()
         return cls(net=net, latent_dim=config["latent_dim"], problem=problem, device=device, **base)
 

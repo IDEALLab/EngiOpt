@@ -62,7 +62,7 @@ class VQGANGenerator(Generator):
             latent_dim=config["latent_dim"],
             num_codebook_vectors=config["num_codebook_vectors"],
         )
-        vqgan.load_state_dict(th.load(resolved.files["vqgan.pth"], map_location=device, weights_only=False)["vqgan"])
+        vqgan.load_state_dict(th.load(resolved.files["vqgan.pth"], map_location=device, weights_only=True)["vqgan"])
         vqgan.eval().to(device)
         cvqgan = VQGAN(
             device=device,
@@ -91,7 +91,7 @@ class VQGANGenerator(Generator):
             dropout=config["dropout"],
         )
         net.load_state_dict(
-            th.load(resolved.files["transformer.pth"], map_location=device, weights_only=False)[cls.primary_state_key]
+            th.load(resolved.files["transformer.pth"], map_location=device, weights_only=True)[cls.primary_state_key]
         )
         net.eval().to(device)
         return cls(net=net, latent_size=config["latent_size"], problem=problem, device=device, **base)
@@ -109,7 +109,7 @@ class VQGANGenerator(Generator):
             if config["conditional"]:
                 raise FileNotFoundError(f"Conditional VQGAN needs cvqgan.pth, missing from {package_root}")
             return None
-        return th.load(path, map_location=device, weights_only=False)["cvqgan"]
+        return th.load(path, map_location=device, weights_only=True)["cvqgan"]
 
     def _sample(self, conditions: ConditionBatch, n: int) -> th.Tensor:
         """Sample a full grid of latent codes autoregressively, then decode it."""

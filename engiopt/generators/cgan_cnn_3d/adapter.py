@@ -55,7 +55,9 @@ class CGANCNN3D(Generator):
             n_conds=len(condition_keys_for(problem, resolved)),
             design_shape=problem.design_space.shape,
         )
-        net.load_state_dict(th.load(resolved.files["generator_3d.pth"], map_location=device)[cls.primary_state_key])
+        net.load_state_dict(
+            th.load(resolved.files["generator_3d.pth"], map_location=device, weights_only=True)[cls.primary_state_key]
+        )
         net.eval().to(device)
         return cls(net=net, latent_dim=config["latent_dim"], problem=problem, device=device, **base)
 

@@ -66,7 +66,9 @@ class GANBezier(Generator):
             eps=_EPS,
             scalar_features=1,
         ).to(device)
-        net.load_state_dict(th.load(resolved.files["bezier_generator.pth"], map_location=device)[cls.primary_state_key])
+        net.load_state_dict(
+            th.load(resolved.files["bezier_generator.pth"], map_location=device, weights_only=True)[cls.primary_state_key]
+        )
         net.eval()
         return cls(
             net=net, latent_dim=config["latent_dim"], noise_dim=config["noise_dim"], problem=problem, device=device, **base

@@ -349,7 +349,9 @@ class Generator(abc.ABC):
 
             config = resolved.run_config
             net = MyNet(latent_dim=config["latent_dim"], design_shape=problem.design_space.shape).to(device)
-            net.load_state_dict(th.load(resolved.files["generator.pth"], map_location=device)[cls.primary_state_key])
+            net.load_state_dict(
+                th.load(resolved.files["generator.pth"], map_location=device, weights_only=True)[cls.primary_state_key]
+            )
             net.eval()
             return cls(net=net, latent_dim=config["latent_dim"], problem=problem, device=device, **base)
 

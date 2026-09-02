@@ -55,7 +55,9 @@ class PixelCNNpp2D(Generator):
             input_channels=1,
             nr_conditions=len(condition_keys_for(problem, resolved)),
         )
-        net.load_state_dict(th.load(resolved.files["model.pth"], map_location=device)[cls.primary_state_key])
+        net.load_state_dict(
+            th.load(resolved.files["model.pth"], map_location=device, weights_only=True)[cls.primary_state_key]
+        )
         net.eval().to(device)
         return cls(
             net=net,

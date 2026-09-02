@@ -52,7 +52,7 @@ class Diffusion2DCond(Generator):
     def build(cls, resolved: ResolvedCheckpoint, problem: Problem, device: th.device, **base: Any) -> Diffusion2DCond:
         """Rebuild the UNet and its noise schedule from the checkpoint package."""
         config = resolved.run_config
-        checkpoint = th.load(resolved.files["model.pth"], map_location=device)
+        checkpoint = th.load(resolved.files["model.pth"], map_location=device, weights_only=True)
         net = UNet2DConditionModel(
             sample_size=problem.design_space.shape,
             in_channels=1,

@@ -45,7 +45,9 @@ class GAN1D(Generator):
             design_shape=design_shape_of(problem),
             design_normalizer=design_normalizer,
         ).to(device)
-        net.load_state_dict(th.load(resolved.files["generator.pth"], map_location=device)[cls.primary_state_key])
+        net.load_state_dict(
+            th.load(resolved.files["generator.pth"], map_location=device, weights_only=True)[cls.primary_state_key]
+        )
         net.eval()
         return cls(net=net, latent_dim=config["latent_dim"], problem=problem, device=device, **base)
 

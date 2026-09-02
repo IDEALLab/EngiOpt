@@ -78,7 +78,7 @@ class MyModel(Generator):
         #         n_conds=len(condition_keys_for(problem, resolved)),
         #         design_shape=design_shape_of(problem),
         #     ).to(device)
-        #     state = th.load(resolved.files["generator.pth"], map_location=device)
+        #     state = th.load(resolved.files["generator.pth"], map_location=device, weights_only=True)
         #     net.load_state_dict(state[cls.primary_state_key])
         #     net.eval()
         net = cls._build_network(config, problem, device, resolved)

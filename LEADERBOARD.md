@@ -13,8 +13,8 @@ solving the problem. Neither defence helps with the other.
 
 ## Submitting
 
-Nothing here needs write access to `IDEALLab`. Publish your checkpoints to your
-own HuggingFace account:
+Publish your checkpoints to your own HuggingFace account -- nothing about the
+weights needs `IDEALLab`:
 
 ```bash
 python engiopt/generators/my_model/my_model.py \
@@ -29,6 +29,14 @@ python -m engiopt.evaluate \
 
 Your rows land immediately, marked `verified=false`. They are visible on the
 board and absent from the ranking until a runner re-scores them.
+
+**The last step needs write access to the board repository.** `--push-to` uploads
+the merged CSV directly, so submission is currently open to people who already
+have it. That is a real limit on how public this board is, and it is the one
+piece of the submission path that is not yet self-service; a no-access route
+(a pending manifest opened as a HuggingFace Community PR) is tracked alongside
+the safe-loading work below. Everything else above -- the checkpoints, the
+address a row records, the audit command -- already works from any account.
 
 Three things are worth knowing before you run it.
 
@@ -80,6 +88,35 @@ Four outcomes:
 The runner is not privileged. It is the first auditor, and because every row
 carries a full address, the same command run by anyone else produces the same
 answer — which is what keeps the runner honest too.
+
+### Loading someone else's weights
+
+A `.pth` file is not data. It is pickled Python, and unpickling executes
+instructions carried inside the file, so `torch.load` on a stranger's checkpoint
+runs a stranger's code. A recorded revision and content hash say *which* bytes
+were loaded; they say nothing about whether loading them was safe.
+
+Every checkpoint load in this repository therefore passes `weights_only=True`,
+which swaps in an unpickler that can rebuild tensors and refuses arbitrary
+imports and calls. All nine weight files across the four published packages load
+under it unchanged, so this costs nothing today and closes the obvious hole.
+
+**It is not sufficient for unattended verification, and this document should not
+be read as claiming otherwise.** A restricted unpickler narrows the attack
+surface; it does not make an arbitrary tensor file safe to feed to an adapter,
+and it does nothing about resource exhaustion. Before a runner re-scores
+submissions from the public without a human in the loop, the submission format
+needs to carry weights in a format with no code path at all (safetensors),
+validated JSON for reconstruction settings and preprocessing state, and
+adapter-side checks on tensor names, shapes and dtypes read from the header
+before any allocation — and the runner itself needs isolation, no credentials,
+and time and memory limits.
+
+None of that is built here, because nothing outside `IDEALLab` can submit yet:
+`--push-to` still requires write access to the board. The two are the same piece
+of work and should land together, since building a submission format before the
+thing that consumes it means guessing at what it needs. Until then, the runner
+is run by hand against checkpoints whose origin is known.
 
 ## What gets ranked
 

@@ -42,7 +42,7 @@ class CGANVAE(Generator):
             n_conds=len(condition_keys_for(problem, resolved)),
             design_shape=problem.design_space.shape,
         )
-        checkpoint = th.load(resolved.files["multiview_3d_vaegan.pth"], map_location=device)
+        checkpoint = th.load(resolved.files["multiview_3d_vaegan.pth"], map_location=device, weights_only=True)
         net.load_state_dict(checkpoint[cls.primary_state_key])
         net.eval().to(device)
         return cls(net=net, latent_dim=config["latent_dim"], problem=problem, device=device, **base)

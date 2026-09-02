@@ -113,3 +113,22 @@ def test_registry_is_a_plain_mapping_like_builtin_problems() -> None:
     """`BUILTIN_GENERATORS` mirrors `BUILTIN_PROBLEMS`: a dict of name -> class."""
     assert isinstance(BUILTIN_GENERATORS, dict)
     assert all(isinstance(g, type) and issubclass(g, Generator) for g in BUILTIN_GENERATORS.values())
+
+
+def test_every_checkpoint_load_uses_the_restricted_unpickler() -> None:
+    """A `.pth` file is pickled Python, so loading one runs whatever it contains.
+
+    `weights_only=True` swaps in an unpickler that can rebuild tensors and
+    nothing else. Every published checkpoint loads under it, so the unrestricted
+    form buys nothing and costs arbitrary code execution the moment a checkpoint
+    comes from someone else's HuggingFace account.
+    """
+    adapters = [Path("engiopt/generators", name, "adapter.py") for name in BUILTIN_GENERATORS]
+    sources = [Path("engiopt/core.py"), Path("engiopt/generators/_template/adapter.py"), *adapters]
+
+    offenders = []
+    for path in sources:
+        for number, line in enumerate(path.read_text().splitlines(), start=1):
+            if "th.load(" in line and "weights_only=True" not in line:
+                offenders.append(f"{path}:{number}")
+    assert not offenders, "checkpoint loads without weights_only=True: " + ", ".join(offenders)
