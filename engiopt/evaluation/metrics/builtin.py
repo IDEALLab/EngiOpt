@@ -2,7 +2,7 @@
 
 These wrap the numerics in `engiopt.metrics` and declare, for each one, the
 question it answers, whether it needs a simulator, and which direction is
-better. Behaviour is identical to the per-model `evaluate_*.py` scripts these
+better. Behavior is identical to the per-model `evaluate_*.py` scripts these
 replaced, so numbers remain comparable.
 
 Adding a metric means adding one decorated function here (or in your own module
@@ -77,7 +77,7 @@ def novelty(ctx: EvaluationContext) -> dict[str, float]:
     committed spec. A lookup table keyed on the condition vector therefore tops
     `mmd`, `iog`, and `fog` -- not by cheating the implementation, but because
     those metrics are *defined* as closeness to exactly the designs it returns.
-    No amount of care in the evaluator changes that; the only defence available
+    No amount of care in the evaluator changes that; the only defense available
     to a public board is to measure retrieval and say so.
 
     Two columns, because they answer different questions:

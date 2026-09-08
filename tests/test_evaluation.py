@@ -111,7 +111,7 @@ def test_cheap_metrics_never_touch_the_solver(fake_problem: Any) -> None:
 
 
 # ----------------------------------------------------------------------
-# Registry behaviour
+# Registry behavior
 # ----------------------------------------------------------------------
 
 

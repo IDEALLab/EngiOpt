@@ -352,7 +352,7 @@ class EvaluationContext:
            This is what a new problem gets for free.
         2. The volume-fraction budget named by the spec's `volume_condition`,
            when the problem has one. Missing that target is a design failing to
-           honour its brief rather than an invalid design, and no EngiBench
+           honor its brief rather than an invalid design, and no EngiBench
            constraint covers it.
 
         A problem with neither -- photonics2d has no volume budget -- is scored

@@ -101,7 +101,7 @@ def test_copying_the_training_split_is_caught_too(fake_problem: Any) -> None:
 def test_near_copies_count_as_copies(fake_problem: Any) -> None:
     """Adding imperceptible noise to a retrieved design must not launder it.
 
-    Otherwise the defence is defeated by one line, and the tolerance is what
+    Otherwise the defense is defeated by one line, and the tolerance is what
     decides how much perturbation counts as having generated something.
     """
     rng = np.random.default_rng(3)
@@ -290,7 +290,7 @@ def test_flagged_rows_stay_on_the_board_and_out_of_the_ranking() -> None:
 
 
 def test_an_entry_missing_a_required_seed_is_not_ranked() -> None:
-    """The cherry-picking defence.
+    """The cherry-picking defense.
 
     Twenty seeds run, the best three published, and a median over a maximum
     looks exactly like an honest median in every individual row. Requiring
@@ -400,7 +400,7 @@ def _generator(problem: Any, produce: Any, *, algo_id: str = "demo", conditional
 def test_the_evaluator_detects_a_lookup_table_end_to_end(fake_problem: Any) -> None:
     """The full path: sample, build the corpus, score, and report `copy_rate`.
 
-    This is the claim the whole memorization defence rests on, so it is asserted
+    This is the claim the whole memorization defense rests on, so it is asserted
     through the evaluator rather than against a hand-built context -- a metric
     that works but is never fed would pass every other test in this file.
     """

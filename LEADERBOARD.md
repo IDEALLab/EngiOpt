@@ -3,7 +3,7 @@
 A public board has two problems an internal one does not, and they are
 independent. Someone can report numbers no model produced, and someone can
 report perfectly honest numbers from a model that games the metric instead of
-solving the problem. Neither defence helps with the other.
+solving the problem. Neither defense helps with the other.
 
 - Against **fabrication**: re-execution. Nothing is ranked until a runner has
   fetched the weights itself and reproduced the score.
@@ -13,7 +13,7 @@ solving the problem. Neither defence helps with the other.
 
 ## Submitting
 
-Publish your checkpoints to your own HuggingFace account -- nothing about the
+Publish your checkpoints to your own HuggingFace account — nothing about the
 weights needs `IDEALLab`:
 
 ```bash
@@ -34,9 +34,10 @@ board and absent from the ranking until a runner re-scores them.
 the merged CSV directly, so submission is currently open to people who already
 have it. That is a real limit on how public this board is, and it is the one
 piece of the submission path that is not yet self-service; a no-access route
-(a pending manifest opened as a HuggingFace Community PR) is tracked alongside
-the safe-loading work below. Everything else above -- the checkpoints, the
-address a row records, the audit command -- already works from any account.
+(a pending manifest opened as a HuggingFace Community PR) is tracked in
+[#78](https://github.com/IDEALLab/EngiOpt/issues/78), alongside the
+safe-loading work below. Everything else above — the checkpoints, the address a
+row records, the audit command — already works from any account.
 
 Three things are worth knowing before you run it.
 
@@ -178,7 +179,7 @@ designs.
 
 That is the right benchmark for a generative design model, and it is not built
 here: freezing such a spec means an optimizer run per condition. The mechanism
-this PR adds — flags, eligibility, and a spec version that carries its own
+already in place — flags, eligibility, and a spec version that carries its own
 thresholds — is what a v2 would plug into.
 
 ## Reading the board

@@ -205,7 +205,7 @@ def save_checkpoint_package(
       redefine what the bare model name means.
     Pass `config_fingerprint` and `is_default_config` together via
     `engiopt.core.checkpoint_identity(args)`. Omitting them keeps the older
-    behaviour of writing only the canonical path.
+    behavior of writing only the canonical path.
 
     Each uploaded package carries its own `metadata.json` describing *that*
     package, so a `metadata.json` never points at a path this run did not write.

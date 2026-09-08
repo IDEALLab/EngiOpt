@@ -29,6 +29,7 @@ model lands where the loader expects:
 
 ```python
 from engiopt.checkpoint_store import save_checkpoint_package
+from engiopt.core import checkpoint_identity
 
 save_checkpoint_package(
     checkpoint_backend="hf",
@@ -49,7 +50,7 @@ save_checkpoint_package(
 `checkpoint_identity(args)` is what lets many hyperparameter settings coexist.
 Each run is stored at `{problem_id}/cfg_{fingerprint}/seed_{seed}`, and a run
 using your script's *default* hyperparameters additionally claims the canonical
-`{problem_id}/seed_{seed}` -- which is what the bare model name resolves to. A
+`{problem_id}/seed_{seed}` — which is what the bare model name resolves to. A
 sweep therefore can never redefine what your model means.
 
 `run_config` matters: it is what `from_pretrained` reads to reconstruct your
@@ -81,7 +82,7 @@ n_conds = len(condition_keys_for(problem, resolved))
 ```
 
 That is what keeps a checkpoint loadable after a problem gains a condition, and
-what makes the evaluator refuse -- with a clear message -- to feed your model
+what makes the evaluator refuse — with a clear message — to feed your model
 conditions it was not trained on.
 
 Also reuse the shared helpers rather than rewriting them:
@@ -121,7 +122,8 @@ Then implement the two methods:
 def build(cls, resolved, problem, device, **base):
     config = resolved.run_config
     net = MyNet(latent_dim=config["latent_dim"], design_shape=problem.design_space.shape).to(device)
-    net.load_state_dict(th.load(resolved.files["generator.pth"], map_location=device)[cls.primary_state_key])
+    state = th.load(resolved.files["generator.pth"], map_location=device, weights_only=True)
+    net.load_state_dict(state[cls.primary_state_key])
     net.eval()
     return cls(net=net, latent_dim=config["latent_dim"], problem=problem, device=device, **base)
 ```
@@ -184,7 +186,7 @@ Watch two columns while you develop:
 
 - **`cond_sens`** should be greater than zero if you declared `conditional =
   True`. Exactly zero means your conditions are not reaching the network, which
-  is a wiring bug far more often than a modelling choice.
+  is a wiring bug far more often than a modeling choice.
 - **`copy_rate`** should be near zero. High means your model is reproducing
   training designs rather than generating, and the board will publish it without
   ranking it.
@@ -234,7 +236,7 @@ in a notebook cell and it will appear in the next leaderboard you build.
 | Loss curves, sample images | Weights & Biases, when `--track` is on |
 
 HuggingFace holds everything that must be reloaded or compared; W&B holds what
-you only look at. Nothing in the evaluation path requires W&B -- training with
+you only look at. Nothing in the evaluation path requires W&B — training with
 `--track false` produces exactly the same checkpoints and scores.
 
 To attach a model's scores to its own checkpoint:

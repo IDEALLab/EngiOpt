@@ -79,7 +79,7 @@ save_checkpoint_package(
 ## Reading one
 
 ```python
-# the default-hyperparameter checkpoint -- what the bare model name means
+# the default-hyperparameter checkpoint — what the bare model name means
 gen = BUILTIN_GENERATORS["cgan_cnn_2d"].from_pretrained(problem, problem_id="beams2d", seed=1)
 
 # one specific configuration from a sweep

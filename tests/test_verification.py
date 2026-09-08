@@ -1,6 +1,6 @@
 """Tests for re-running a published row from its checkpoint address.
 
-Verification is the only defence a public board has against a number that no
+Verification is the only defense a public board has against a number that no
 model produced, so the properties here are about what it refuses to accept:
 weights that have moved since they were scored, addresses that lead nowhere, and
 models nobody can rebuild. The successful path matters less than those, because

@@ -12,7 +12,7 @@ This repository contains the code for optimization and machine learning algorith
 
 ## Coding Philosophy
 As much as we can, we follow the [CleanRL](https://github.com/vwxyzjn/cleanrl) philosophy: single-file, high-quality implementations with research-friendly features:
-* Single-file implementation: every training detail is in one file, so you can easily understand and modify the code. Evaluation is not per-model — every model is scored by one shared evaluator through the `Generator` contract in `adapter.py`, so a metric is added once rather than thirteen times.
+* Single-file implementation: every training detail is in one file, so you can easily understand and modify the code. Evaluation is not per-model — every model is scored by one shared evaluator through the `Generator` contract in `adapter.py`, so a metric is added once rather than once per model.
 * High-quality: we use type hints, docstrings, and comments to make the code easy to understand. We also rely on linters for formatting and checking our code.
 * Logging: we use experiment tracking tools like [Weights & Biases](https://wandb.ai/site) to log the results of our experiments. All our "official" runs are logged in the [EngiOpt project](https://wandb.ai/engibench/engiopt).
 * Reproducibility: we seed all the random number generators, make PyTorch deterministic, report the hyperparameters and code in WandB.
@@ -35,8 +35,8 @@ As much as we can, we follow the [CleanRL](https://github.com/vwxyzjn/cleanrl) p
 [gan_bezier](engiopt/generators/gan_bezier/) | Inverse Design | 1D | ❌ | GAN + Bezier layer
 [gan_cnn_2d](engiopt/generators/gan_cnn_2d/) | Inverse Design | 2D | ❌ | GAN + CNN
 [surrogate_model](engiopt/surrogate_model/) | Surrogate Model | 1D | ❌ | MLP
-[vqgan](engiopt/generators/vqgan) | Inverse Design | 2D | ✅ | VQVAE + Transformer
-[pixel_cnn_pp_2d](engiopt/generators/pixel_cnn_pp_2d) | Inverse Design | 2D | ✅ | PixelCNN++ Autoregressive Model
+[vqgan](engiopt/generators/vqgan/) | Inverse Design | 2D | ✅ | VQVAE + Transformer
+[pixel_cnn_pp_2d](engiopt/generators/pixel_cnn_pp_2d/) | Inverse Design | 2D | ✅ | PixelCNN++ Autoregressive Model
 
 Every algorithm above is registered, meaning this repository holds an adapter that
 can rebuild it. Being *evaluable* additionally needs published weights, and the two
@@ -54,7 +54,7 @@ Historical W&B-era checkpoints are **not** being migrated; see
 [docs/checkpoint_layout.md](docs/checkpoint_layout.md#historical-checkpoints).
 
 ## Dashboards
-HuggingFace hosts everything that has to be reloaded or compared -- model weights, run configs, evaluation metrics, and the leaderboard. WandB hosts what you only look at: loss curves and sample images. Nothing in the evaluation path requires WandB, so training with `--track false` produces exactly the same checkpoints and scores. You can access some of our runs at https://wandb.ai/engibench/engiopt.
+HuggingFace hosts everything that has to be reloaded or compared — model weights, run configs, evaluation metrics, and the leaderboard. WandB hosts what you only look at: loss curves and sample images. Nothing in the evaluation path requires WandB, so training with `--track false` produces exactly the same checkpoints and scores. You can access some of our runs at https://wandb.ai/engibench/engiopt.
 <img src="imgs/wandb_dashboard.png" alt="WandB dashboards"/>
 
 
@@ -157,7 +157,7 @@ Publishing downloads the existing board, merges on the row key, and uploads the 
 
 Every row records what produced it: **which repo, path, revision, and content hash** the weights came from, the EngiOpt version, and the EngiBench version that ran the evaluation. The spec records what it was frozen against, including the pinned dataset revision, so a change to either side is visible rather than silently shifting every number.
 
-**Contributors with write access to the leaderboard repository may publish provisional rows; external self-service submission is tracked in #78. Nothing is ranked until it is re-run.** Rows land `verified=false`, and a runner re-fetches the checkpoint at its recorded revision and scores it itself before they enter the ranking:
+**Contributors with write access to the leaderboard repository may publish provisional rows; external self-service submission is tracked in [#78](https://github.com/IDEALLab/EngiOpt/issues/78). Nothing is ranked until it is re-run.** Rows land `verified=false`, and a runner re-fetches the checkpoint at its recorded revision and scores it itself before they enter the ranking:
 
 ```
 python -m engiopt.verify --board IDEALLab/engiopt-leaderboard            # audit; writes nothing
@@ -180,14 +180,11 @@ The current surrogate model comprises several steps:
 
 See this [notebook](https://github.com/IDEALLab/EngiOpt/blob/main/engiopt/surrogate_model/case_study_pe_notebook.ipynb) for an example.
 
-Surrogate-model optimization paths now use the same checkpoint abstraction. For example, the power-electronics optimizer can consume:
+Surrogate-model optimization uses the same checkpoint abstraction. For example, the power-electronics optimizer can consume:
 * HF package refs such as `hf://IDEALLab/engiopt-mlp-tabular-only/power_electronics/DcGain/seed_42`
 * local checkpoint package directories
 
-HuggingFace is the only checkpoint backend. W&B artifacts are no longer a model source anywhere in the codebase; see [docs/checkpoint_layout.md](docs/checkpoint_layout.md) for the package layout.
-
-
-
+HuggingFace is the only checkpoint backend; see [docs/checkpoint_layout.md](docs/checkpoint_layout.md) for the package layout.
 
 ## Colab notebooks
 We have some colab notebooks that show how to use some of the EngiBench/EngiOpt features.
@@ -197,7 +194,7 @@ We have some colab notebooks that show how to use some of the EngiBench/EngiOpt 
 
 ## Citing
 
-If you use EngiBenc/EngiOpt in your research, please cite the following paper:
+If you use EngiBench/EngiOpt in your research, please cite the following paper:
 
 ```bibtex
 @misc{felten_engibench_2025,
@@ -206,7 +203,7 @@ If you use EngiBenc/EngiOpt in your research, please cite the following paper:
 	doi = {10.48550/arXiv.2508.00831},
 	urldate = {2025-08-07},
 	publisher = {arXiv},
-	author = {Felten, Florian and Apaza, Gabriel and B\¨aunlich, Gerhard and Diniz, Cashen and Dong, Xuliang and Drake, Arthur and Habibi, Milad and Hoffman, Nathaniel J. and Keeler, Matthew and Massoudi, Soheyl and VanGessel, Francis G. and Fuge, Mark},
+	author = {Felten, Florian and Apaza, Gabriel and B{\"a}unlich, Gerhard and Diniz, Cashen and Dong, Xuliang and Drake, Arthur and Habibi, Milad and Hoffman, Nathaniel J. and Keeler, Matthew and Massoudi, Soheyl and VanGessel, Francis G. and Fuge, Mark},
 	month = jun,
 	year = {2025},
 }

@@ -60,7 +60,7 @@ python -m engiopt.evaluate --problem-id heatconduction3d --generators cgan_vae -
 
 
 
-## References:
+## References
 
 Original VAE-GAN: https://arxiv.org/pdf/1512.09300
 Multiview approach: https://github.com/bryonkucharski/Multiview-3D-VAE-GAN

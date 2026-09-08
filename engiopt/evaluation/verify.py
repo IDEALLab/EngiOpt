@@ -1,7 +1,7 @@
 """Re-running a published row from its checkpoint address.
 
 The board cannot trust the numbers it is given. Whoever computed a row also
-chose what to report, and no amount of schema design changes that -- the defence
+chose what to report, and no amount of schema design changes that -- the defense
 against a fabricated score is not a stricter column, it is running the model
 again.
 
