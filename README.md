@@ -157,7 +157,7 @@ Publishing downloads the existing board, merges on the row key, and uploads the 
 
 Every row records what produced it: **which repo, path, revision, and content hash** the weights came from, the EngiOpt version, and the EngiBench version that ran the evaluation. The spec records what it was frozen against, including the pinned dataset revision, so a change to either side is visible rather than silently shifting every number.
 
-**Anyone may publish; nothing is ranked until it is re-run.** Rows land `verified=false`, and a runner re-fetches the checkpoint at its recorded revision and scores it itself before they enter the ranking:
+**Contributors with write access to the leaderboard repository may publish provisional rows; external self-service submission is tracked in #78. Nothing is ranked until it is re-run.** Rows land `verified=false`, and a runner re-fetches the checkpoint at its recorded revision and scores it itself before they enter the ranking:
 
 ```
 python -m engiopt.verify --board IDEALLab/engiopt-leaderboard            # audit; writes nothing

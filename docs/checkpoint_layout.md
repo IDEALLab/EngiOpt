@@ -43,12 +43,13 @@ Checkpoints trained before this layout existed lived in W&B artifacts, and they
 are **not being migrated**. W&B is no longer a checkpoint source, so those
 weights are reachable only by retraining.
 
-The decision is deliberate rather than deferred. A migrated checkpoint would
-arrive without the two things this layout exists to provide -- a config
-fingerprint identifying the hyperparameters that produced it, and a content hash
-tying a leaderboard row to exact bytes -- so it could be stored but never
-canonically addressed or verified. Retraining a model costs less than a
-provenance story nobody can check.
+The decision is deliberate rather than deferred. A migrated package could be
+hashed, and a config fingerprint could be derived when the complete run
+configuration is recoverable. Recovering and validating that metadata
+consistently across historical W&B runs would take substantial manual work and
+may still leave incomplete provenance. We therefore require missing packages to
+be retrained and published in the current format rather than migrating legacy
+artifacts.
 
 What this means in practice: a generator with no published package is trained,
 not recovered. `--list-generators --check-availability` reports which those are
