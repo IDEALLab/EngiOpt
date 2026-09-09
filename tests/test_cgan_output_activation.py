@@ -7,14 +7,14 @@ import pytest
     ("module_name", "latent_shape", "condition_shape", "design_shape", "activation_getter"),
     [
         (
-            "engiopt.cgan_2d.cgan_2d",
+            "engiopt.generators.cgan_2d.cgan_2d",
             (2, 4),
             (2, 1),
             (3, 3),
             lambda model: model.model[-1],
         ),
         (
-            "engiopt.cgan_cnn_2d.cgan_cnn_2d",
+            "engiopt.generators.cgan_cnn_2d.cgan_cnn_2d",
             (2, 4, 1, 1),
             (2, 1, 1, 1),
             (8, 8),
@@ -42,14 +42,14 @@ def test_cgan_generators_keep_tanh_as_default(
     ("module_name", "latent_shape", "condition_shape", "design_shape", "activation_getter"),
     [
         (
-            "engiopt.cgan_2d.cgan_2d",
+            "engiopt.generators.cgan_2d.cgan_2d",
             (2, 4),
             (2, 1),
             (3, 3),
             lambda model: model.model[-1],
         ),
         (
-            "engiopt.cgan_cnn_2d.cgan_cnn_2d",
+            "engiopt.generators.cgan_cnn_2d.cgan_cnn_2d",
             (2, 4, 1, 1),
             (2, 1, 1, 1),
             (8, 8),

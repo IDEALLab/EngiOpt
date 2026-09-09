@@ -171,3 +171,6 @@ logs/*
 
 .ruff_cache/
 engibench_studies/*
+
+# macOS
+.DS_Store

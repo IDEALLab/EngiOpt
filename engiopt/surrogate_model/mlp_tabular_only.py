@@ -123,7 +123,7 @@ class Args:
             self.params_cols = parse_list_from_single_item_list(self.params_cols, "--params_cols")
 
 
-def scale_data(  # noqa: PLR0913
+def scale_data(
     x_train: npt.NDArray,
     x_val: npt.NDArray,
     x_test: npt.NDArray,

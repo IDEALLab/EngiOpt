@@ -10,7 +10,6 @@ from torch import optim
 import torch.nn.functional as F  # noqa: N812
 from torch.utils.data import DataLoader
 from torch.utils.data import Dataset
-
 import wandb
 
 if TYPE_CHECKING:
@@ -136,7 +135,7 @@ class PlainTabularDataset(Dataset):
         return self.x[idx], self.y[idx]
 
 
-def _create_mlp(  # noqa: PLR0913
+def _create_mlp(
     in_dim: int,
     hidden_size: int,
     hidden_layers: int,

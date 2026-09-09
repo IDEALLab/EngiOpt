@@ -16,7 +16,9 @@ jobs:
         with:
           args: "--version"
       - run: ruff format --check
-      - run: ruff check --fix --output-format=github .
+      # No --fix: repairing violations inside the runner makes the job pass on
+      # code that does not, so import-order drift never reaches a review.
+      - run: ruff check --output-format=github .
 
   mypy:
     runs-on: ubuntu-latest
@@ -27,3 +29,28 @@ jobs:
       - uses: actions/checkout@v4
       - run: pip install mypy numpy pytest
       - run: mypy
+
+  pytest:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/setup-python@v4
+        with:
+          python-version: "3.12"
+      - uses: actions/checkout@v4
+      - run: pip install -e ".[testing]"
+      # The committed eval specs are frozen against the current EngiBench, whose
+      # photonics2d and thermoelastic2d read the v1 datasets. The newest release
+      # on PyPI (0.2.0) still points those two at v0, so the PyPI build draws
+      # different conditions and no spec could reproduce itself.
+      #
+      # --force-reinstall is required, not decorative: the git build reports the
+      # same version string (0.2.0) as the PyPI one, so a plain install is a
+      # no-op and the specs would be verified against the wrong EngiBench.
+      # --no-deps keeps it from re-resolving the whole stack.
+      - run: pip install --force-reinstall --no-deps "engibench @ git+https://github.com/IDEALLab/EngiBench.git@0a028c03d02b266cb4394968c386e45781f4605b"
+      # Fail loudly if the pin silently stopped taking effect.
+      - run: python -c "import engibench.problems.thermoelastic2d.v0 as m; assert m.ThermoElastic2D.dataset_id.endswith('_v1'), m.ThermoElastic2D.dataset_id"
+      # Every committed spec must still resolve: same problem definition, same
+      # pinned dataset revision, same digest.
+      - run: pytest tests/ -v

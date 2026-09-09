@@ -11,8 +11,8 @@ and logs every generation to Weights & Biases so you can explore:
 Example usage
 -------------
 python run_pe_optimization.py \
-    --model_gain_path "my_entity/engiopt/your_run_name_model:latest" \
-    --model_ripple_path "my_entity/engiopt/your_other_run_name_model:latest" \
+    --model_gain_path "hf://IDEALLab/engiopt-mlp-tabular-only/power_electronics/DcGain/seed_1" \
+    --model_ripple_path "hf://IDEALLab/engiopt-mlp-tabular-only/power_electronics/VoltageRipple/seed_1" \
     --device mps \
     --pop_size 500 \
     --n_gen 100 \
@@ -53,9 +53,9 @@ if TYPE_CHECKING:
 class Args:
     # Surrogate pipelines
     model_gain_path: str
-    """Model ref for the gain surrogate (W&B artifact, HF package ref, or local package directory)."""
+    """Model ref for the gain surrogate (HF package ref, or local package directory)."""
     model_ripple_path: str
-    """Model ref for the ripple surrogate (W&B artifact, HF package ref, or local package directory)."""
+    """Model ref for the ripple surrogate (HF package ref, or local package directory)."""
 
     # Optimisation hyperparameters
     seed: int
@@ -172,16 +172,11 @@ def save_front(res: Result, output_dir: str) -> tuple[str, str, str, str, str]:
     return evals_csv, designs_csv, pareto_csv, evals_txt, designs_txt
 
 
-def load_model_from_reference(
-    model_ref: str,
-    *,
-    active_wandb_run: wandb.sdk.wandb_run.Run | None,
-) -> ModelPipeline:
-    """Load a model pipeline from a W&B artifact, HF package, or local directory.
+def load_model_from_reference(model_ref: str) -> ModelPipeline:
+    """Load a model pipeline from an HF package or local directory.
 
     Args:
-        model_ref: Reference to the stored model package or artifact.
-        active_wandb_run: Optional active W&B run for artifact access.
+        model_ref: Reference to the stored model package.
 
     Returns:
         Loaded model pipeline.
@@ -190,7 +185,6 @@ def load_model_from_reference(
         model_source="auto",
         model_ref=model_ref,
         required_files=[],
-        active_wandb_run=active_wandb_run,
     )
     model_file = next(file_path for file_path in resolved.files.values() if file_path.endswith(".pkl"))
     return ModelPipeline.load(model_file)
@@ -216,15 +210,8 @@ def main(args: Args) -> None:
         wandb.define_metric("generation")
         wandb.define_metric("*", step_metric="generation")
 
-    active_wandb_run = wandb.run if args.track else None
-    pipeline_g = load_model_from_reference(
-        args.model_gain_path,
-        active_wandb_run=active_wandb_run,
-    )
-    pipeline_r = load_model_from_reference(
-        args.model_ripple_path,
-        active_wandb_run=active_wandb_run,
-    )
+    pipeline_g = load_model_from_reference(args.model_gain_path)
+    pipeline_r = load_model_from_reference(args.model_ripple_path)
 
     problem = PymooPowerElecProblem(
         pipeline_r=pipeline_r,

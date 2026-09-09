@@ -1,0 +1,266 @@
+"""Tests for the committed evaluation specs.
+
+A spec is the promise that every leaderboard row was produced under identical
+conditions. These check the promise is well-formed offline, and -- when the
+datasets are reachable -- that every committed spec still reproduces exactly the
+conditions it was frozen with.
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import json
+from typing import Any, ClassVar
+
+import numpy as np
+import pytest
+
+from engiopt.evaluation.registry import METRICS
+from engiopt.evaluation.spec import _digest
+from engiopt.evaluation.spec import EvalSpec
+from engiopt.evaluation.spec import ProblemDefinitionMismatchError
+from engiopt.evaluation.spec import SPEC_ROOT
+
+SPEC_PATHS = sorted(SPEC_ROOT.glob("*/*.json"))
+SPEC_IDS = [f"{path.parent.name}/{path.stem}" for path in SPEC_PATHS]
+
+
+class _FakeConditions:
+    """A stand-in for the sampled-conditions dataset the digest hashes."""
+
+    def __init__(self, columns: dict[str, Any]):
+        self._columns = columns
+        self.column_names = list(columns)
+
+    def __getitem__(self, name: str) -> Any:
+        return self._columns[name]
+
+
+# ----------------------------------------------------------------------
+# Offline: the committed files are well-formed
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("path", SPEC_PATHS, ids=SPEC_IDS)
+def test_committed_spec_loads_and_round_trips(path: Any) -> None:
+    """A spec must parse into the current dataclass, with no stale fields."""
+    spec = EvalSpec.load(str(path))
+    assert spec.problem_id == path.parent.name
+    assert spec.version == path.stem
+    assert dataclasses.asdict(spec) == dataclasses.asdict(EvalSpec(**json.loads(path.read_text())))
+
+
+@pytest.mark.parametrize("path", SPEC_PATHS, ids=SPEC_IDS)
+def test_committed_spec_requests_registered_metrics(path: Any) -> None:
+    """A spec asking for a metric nobody registered would fail at evaluation time."""
+    for metric in EvalSpec.load(str(path)).metrics:
+        assert metric in METRICS, f"{path.name} requests unregistered metric {metric!r}"
+
+
+@pytest.mark.parametrize("path", SPEC_PATHS, ids=SPEC_IDS)
+def test_committed_spec_pins_its_dataset(path: Any) -> None:
+    """A package version does not identify a dataset; a revision does.
+
+    Without this, an upstream dataset upload silently changes what every
+    published score means.
+    """
+    spec = EvalSpec.load(str(path))
+    assert spec.condition_digest, f"{path.name} was never frozen"
+    assert spec.dataset_id, f"{path.name} does not name its dataset"
+    assert spec.dataset_revision, f"{path.name} does not pin a dataset revision"
+
+
+@pytest.mark.parametrize("path", SPEC_PATHS, ids=SPEC_IDS)
+def test_multi_objective_specs_declare_a_scalarization(path: Any) -> None:
+    """Combining objectives with different units needs a declared rule, not a default."""
+    spec = EvalSpec.load(str(path))
+    if spec.objective_weights is None and spec.objective_weight_condition is None:
+        return
+    assert not (spec.objective_weights and spec.objective_weight_condition), (
+        f"{path.name} declares two conflicting scalarizations"
+    )
+
+
+# ----------------------------------------------------------------------
+# The digest covers everything a score depends on
+# ----------------------------------------------------------------------
+
+
+def test_digest_changes_when_a_condition_value_changes() -> None:
+    """Hashing only the row indices would miss an edited condition: row 7 is still row 7."""
+    indices = np.array([0, 1, 2])
+    designs = np.zeros((3, 4))
+    before = _digest(indices, _FakeConditions({"volfrac": [0.3, 0.4, 0.5]}), designs)
+    after = _digest(indices, _FakeConditions({"volfrac": [0.3, 0.4, 0.9]}), designs)
+    assert before != after
+
+
+def test_digest_changes_when_a_condition_is_renamed() -> None:
+    """The column names are part of the contract, not just the numbers."""
+    indices = np.array([0, 1, 2])
+    designs = np.zeros((3, 4))
+    before = _digest(indices, _FakeConditions({"volfrac": [0.3, 0.4, 0.5]}), designs)
+    after = _digest(indices, _FakeConditions({"volume": [0.3, 0.4, 0.5]}), designs)
+    assert before != after
+
+
+def test_digest_is_stable_across_column_order() -> None:
+    """Two datasets holding the same conditions must agree, whatever their column order."""
+    indices = np.array([0, 1])
+    designs = np.zeros((2, 4))
+    one = _digest(indices, _FakeConditions({"a": [1.0, 2.0], "b": [3.0, 4.0]}), designs)
+    other = _digest(indices, _FakeConditions({"b": [3.0, 4.0], "a": [1.0, 2.0]}), designs)
+    assert one == other
+
+
+def test_digest_covers_array_valued_conditions() -> None:
+    """thermoelastic2d's boundary matrices decide the answer as much as the scalars do."""
+    indices = np.array([0])
+    designs = np.zeros((1, 4))
+    before = _digest(indices, _FakeConditions({"fixed_elements": [np.zeros((2, 2))]}), designs)
+    after = _digest(indices, _FakeConditions({"fixed_elements": [np.eye(2)]}), designs)
+    assert before != after
+
+
+# ----------------------------------------------------------------------
+# Online: every committed spec still resolves
+# ----------------------------------------------------------------------
+
+
+@pytest.mark.network
+@pytest.mark.parametrize("path", SPEC_PATHS, ids=SPEC_IDS)
+def test_committed_spec_reproduces_its_frozen_conditions(path: Any) -> None:
+    """The check the reviewer ran by hand: every spec must resolve, not just parse.
+
+    `resolve` raises if the digest no longer matches, or if the installed
+    EngiBench defines the problem differently than the spec was frozen against.
+
+    Both are failures, not skips. Skipping the mismatch would mean this job goes
+    green precisely when the EngiBench pin has stopped taking effect -- which is
+    the one thing it exists to catch.
+    """
+    from engibench.utils.all_problems import BUILTIN_PROBLEMS
+
+    spec = EvalSpec.load(str(path))
+    problem = BUILTIN_PROBLEMS[spec.problem_id]()
+    problem.reset(seed=spec.condition_seed)
+
+    resolved = spec.resolve(problem)
+
+    assert len(resolved.ref_designs) == spec.n_samples
+    assert resolved.conditions_tensor.shape == (spec.n_samples, len(resolved.condition_keys))
+    if spec.volume_condition is not None:
+        assert spec.volume_condition in problem.conditions_keys
+
+
+def test_a_differently_defined_problem_reports_itself() -> None:
+    """A pinned dataset does not pin the problem definition, which also lives in EngiBench.
+
+    Without this check the case shows up only as two hashes that will never
+    match, giving no hint that the EngiBench versions disagree.
+    """
+
+    class _Problem:
+        conditions_keys: ClassVar[list[str]] = ["volfrac", "rmin", "weight"]
+        dataset_id = "IDEALLab/thermoelastic_2d_v0"
+
+    spec = EvalSpec(
+        problem_id="thermoelastic2d",
+        problem_conditions=("volume_fraction_target", "rmin", "weight"),
+        dataset_id="IDEALLab/thermoelastic_2d_v1",
+        engibench_version="0.2.0",
+    )
+    with pytest.raises(ProblemDefinitionMismatchError) as caught:
+        spec.check_problem_definition(_Problem())
+
+    message = str(caught.value)
+    assert "volume_fraction_target" in message
+    assert "volfrac" in message
+    assert "thermoelastic_2d_v0" in message
+
+
+def test_a_matching_problem_definition_passes() -> None:
+    """The check must not fire when the installed EngiBench agrees with the spec."""
+
+    class _Problem:
+        conditions_keys: ClassVar[list[str]] = ["volfrac", "rmin"]
+        dataset_id = "IDEALLab/beams_2d_50_100_v0"
+
+    spec = EvalSpec(
+        problem_id="beams2d",
+        problem_conditions=("volfrac", "rmin"),
+        dataset_id="IDEALLab/beams_2d_50_100_v0",
+    )
+    spec.check_problem_definition(_Problem())
+
+
+# ----------------------------------------------------------------------
+# freeze_spec must not silently reset fields it forgot to expose
+# ----------------------------------------------------------------------
+
+
+class _FreezeProbe:
+    """A problem stand-in; freeze_spec only resets it and reads its conditions."""
+
+    conditions_keys: ClassVar[tuple[str, ...]] = ("volfrac",)
+
+    def reset(self, seed: int | None = None) -> None:
+        """Match `Problem.reset`, which freeze_spec calls before sampling."""
+
+
+def test_freeze_spec_carries_every_contract_field(monkeypatch: pytest.MonkeyPatch, tmp_path: Any) -> None:
+    """A parameter this entry point omits is a field it resets to the dataclass default.
+
+    `volume_condition` and `volfrac_tol` decide `viol`, and three of the four
+    committed specs set a non-null volume condition. Freezing a v2 through the
+    documented CLI without them would hand the new version a different
+    feasibility contract than the one it succeeds -- silently, since the spec
+    would still write and still load.
+    """
+    from engibench.utils import all_problems
+
+    from engiopt.evaluation import spec as spec_mod
+
+    captured: dict[str, Any] = {}
+
+    def _capture(self: EvalSpec, problem: Any) -> EvalSpec:
+        captured.update(dataclasses.asdict(self))
+        return self
+
+    monkeypatch.setattr(EvalSpec, "freeze", _capture)
+    monkeypatch.setattr(EvalSpec, "save", lambda self: tmp_path / "v2.json")
+    monkeypatch.setitem(all_problems.BUILTIN_PROBLEMS, "freeze_probe", _FreezeProbe)
+
+    spec_mod.freeze_spec(
+        "freeze_probe",
+        version="v2",
+        volume_condition="volfrac",
+        volfrac_tol=0.05,
+        required_seeds=(1, 2, 3, 4),
+        copy_tol=0.02,
+        max_copy_rate=0.25,
+        copy_corpus_size=64,
+    )
+
+    assert captured["volume_condition"] == "volfrac"
+    assert captured["volfrac_tol"] == 0.05
+    assert captured["required_seeds"] == (1, 2, 3, 4)
+    assert captured["copy_tol"] == 0.02
+    assert captured["max_copy_rate"] == 0.25
+    assert captured["copy_corpus_size"] == 64
+
+
+def test_freeze_spec_defaults_track_the_dataclass() -> None:
+    """The CLI's defaults must not become a second, drifting copy of the contract's.
+
+    Two hand-maintained copies diverge invisibly: both sides still typecheck and
+    the spec still writes, but a freshly frozen version quietly disagrees with
+    the one it succeeds.
+    """
+    import inspect
+
+    from engiopt.evaluation import spec as spec_mod
+
+    parameters = inspect.signature(spec_mod.freeze_spec).parameters
+    for field_name in ("metrics", "volfrac_tol", "required_seeds", "copy_tol", "max_copy_rate", "copy_corpus_size"):
+        assert parameters[field_name].default == getattr(EvalSpec, field_name), field_name

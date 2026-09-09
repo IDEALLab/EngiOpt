@@ -322,7 +322,7 @@ class ModelPipeline:
     Provides convenience methods for prediction, evaluation, saving, and loading.
     """
 
-    def __init__(  # noqa: PLR0913
+    def __init__(
         self,
         models: list[torch.nn.Module],
         scalers: dict[str, Any],

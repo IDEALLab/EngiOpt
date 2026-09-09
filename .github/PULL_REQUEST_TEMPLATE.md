@@ -44,10 +44,10 @@ To upload images to a PR -- simply drag and drop an image while in edit mode and
 - [ ] The code is reproducible: random seeds are set, PyTorch determinism is enabled
 - [ ] Hyperparameters are configurable via command-line arguments using `tyro`
 - [ ] WandB logging is integrated with `--track` flag support
-- [ ] The model can be saved and restored via WandB artifacts (`--save-model` flag)
+- [ ] The model is saved as a HuggingFace checkpoint package via `--save-model` (see `docs/checkpoint_layout.md`)
 
 ### Algorithm Completeness (for new algorithms)
-- [ ] Both training script (`algorithm.py`) and evaluation script (`evaluate_algorithm.py`) are provided
+- [ ] Both the training script (`algorithm.py`) and the `Generator` adapter (`adapter.py`) are provided; evaluation runs through `python -m engiopt.evaluate`
 - [ ] The algorithm works with EngiBench's `Problem` interface
 - [ ] The algorithm is added to the README table with correct metadata
 
@@ -71,7 +71,7 @@ For example,
 - [ ] The code follows the CleanRL single-file philosophy where appropriate.
 - [ ] The code is understandable and commented. No large code blocks are left unexplained. Can I read and understand the code easily?
 - [ ] There is no merge conflict.
-- [ ] For new algorithms: both training and evaluation scripts are provided.
-- [ ] For new algorithms: WandB integration is complete (logging, artifacts, reproducibility).
+- [ ] For new algorithms: the training script and `Generator` adapter are provided, and `python -m engiopt.evaluate` scores the model.
+- [ ] For new algorithms: `--track` logging works and the checkpoint lands on HuggingFace with `--save-model`.
 - [ ] For bugfixes: it is a robust fix and not a hacky workaround.
 - [ ] The changes do not break existing trained models or evaluation workflows without good reason.

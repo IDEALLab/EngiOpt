@@ -10,7 +10,7 @@ import pytest
 def test_diffusion_1d_batch_is_normalized_before_forward() -> None:
     """The 1D diffusion model should receive [0, 1] designs before auto-normalization."""
     th = pytest.importorskip("torch")
-    diffusion_1d = pytest.importorskip("engiopt.diffusion_1d.diffusion_1d")
+    diffusion_1d = pytest.importorskip("engiopt.generators.diffusion_1d.diffusion_1d")
 
     designs = th.tensor([[2.0, 4.0], [6.0, 8.0]])
     normalizer = diffusion_1d.Normalizer(
@@ -18,7 +18,7 @@ def test_diffusion_1d_batch_is_normalized_before_forward() -> None:
         max_val=th.tensor([6.0, 8.0]),
     )
 
-    batch = diffusion_1d._prepare_diffusion_batch(designs, normalizer)  # noqa: SLF001
+    batch = diffusion_1d._prepare_diffusion_batch(designs, normalizer)
 
     expected_shape = (2, 1, 2)
     assert batch.shape == expected_shape
@@ -28,7 +28,7 @@ def test_diffusion_1d_batch_is_normalized_before_forward() -> None:
 def test_default_linear_schedule_reaches_nearly_pure_noise() -> None:
     """The default noisiest training step should be close to the pure-noise sampling prior."""
     th = pytest.importorskip("torch")
-    diffusion_2d = pytest.importorskip("engiopt.diffusion_2d_cond.diffusion_2d_cond")
+    diffusion_2d = pytest.importorskip("engiopt.generators.diffusion_2d_cond.diffusion_2d_cond")
 
     betas = diffusion_2d.beta_schedule(
         t=diffusion_2d.Args().num_timesteps,
@@ -46,7 +46,7 @@ def test_default_linear_schedule_reaches_nearly_pure_noise() -> None:
 def test_diffusion_2d_normalizer_round_trips_arbitrary_bounds() -> None:
     """2D diffusion should not assume designs are already in [0, 1]."""
     th = pytest.importorskip("torch")
-    diffusion_2d = pytest.importorskip("engiopt.diffusion_2d_cond.diffusion_2d_cond")
+    diffusion_2d = pytest.importorskip("engiopt.generators.diffusion_2d_cond.diffusion_2d_cond")
 
     designs = th.tensor([[-2.0, 1.0], [4.0, 10.0]])
     design_min = designs.min()
@@ -63,7 +63,7 @@ def test_diffusion_2d_normalizer_round_trips_arbitrary_bounds() -> None:
 def test_diffusion_2d_uses_problem_design_bounds_when_available() -> None:
     """EngiBench design_space bounds should be the normalization source of truth."""
     th = pytest.importorskip("torch")
-    diffusion_2d = pytest.importorskip("engiopt.diffusion_2d_cond.diffusion_2d_cond")
+    diffusion_2d = pytest.importorskip("engiopt.generators.diffusion_2d_cond.diffusion_2d_cond")
 
     fallback_designs = th.tensor([[0.2, 0.8]])
     problem = SimpleNamespace(
@@ -82,7 +82,7 @@ def test_diffusion_2d_uses_problem_design_bounds_when_available() -> None:
 def test_diffusion_step_sample_uses_fresh_noise(monkeypatch: pytest.MonkeyPatch) -> None:
     """The reverse step should clip predicted x0 and use fresh posterior noise."""
     th = pytest.importorskip("torch")
-    diffusion_2d = pytest.importorskip("engiopt.diffusion_2d_cond.diffusion_2d_cond")
+    diffusion_2d = pytest.importorskip("engiopt.generators.diffusion_2d_cond.diffusion_2d_cond")
 
     betas = diffusion_2d.beta_schedule(t=4, start=1e-4, end=0.02)
     sampler = diffusion_2d.DiffusionSampler(t=4, betas=betas)
