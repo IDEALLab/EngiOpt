@@ -18,7 +18,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
-from typing import Any, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 import numpy as np
 import torch as th
@@ -134,11 +134,17 @@ class EvalSpec:
     """
 
     problem_id: str
-    version: str = "v1"
+    version: str = "v2"
     n_samples: int = 50
     condition_seed: int = 1
     metrics: tuple[str, ...] = ("mmd", "dpp", "novelty", "cond_sens", "viol", "iog", "cog", "fog")
     sigma: float = 10.0
+    aggregation: Literal["mean", "median"] = "mean"
+    """How per-design metrics (`iog`, `cog`, `fog`, distances) collapse to one number.
+
+    Changing it changes what every performance column means, so it is part of
+    the frozen spec and is recorded in every row, not a flag on the run.
+    """
     volfrac_tol: float = 0.01
     volume_condition: str | None = None
     objective_weights: tuple[float, ...] | None = None
@@ -178,7 +184,7 @@ class EvalSpec:
         if path.suffix == ".json" and path.exists():
             return cls(**json.loads(path.read_text()))
         problem_id, _, version = reference.partition("/")
-        version = version or "v1"
+        version = version or "v2"
         spec_path = (root or SPEC_ROOT) / problem_id / f"{version}.json"
         if not spec_path.exists():
             raise FileNotFoundError(

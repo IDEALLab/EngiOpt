@@ -178,6 +178,9 @@ class Evaluator:
             objective_weight_condition=self.spec.objective_weight_condition,
             copy_corpus_fn=self.copy_corpus,
             copy_tol=self.spec.copy_tol,
+            aggregation=self.spec.aggregation,
+            model_params=_parameter_count(generator),
+            train_minutes=getattr(generator, "train_minutes", None),
             resample_permuted=self._permuted_sampler(generator),
         )
 
@@ -302,6 +305,7 @@ class Evaluator:
             "seed": getattr(generator, "seed", None),
             "spec_version": self.spec.version,
             "n_samples": ctx.n_samples,
+            "aggregation": ctx.aggregation,
             "sample_seconds": ctx.sample_seconds,
             "checkpoint_repo": getattr(generator, "checkpoint_repo", None),
             "checkpoint_path": getattr(generator, "checkpoint_path", None),
@@ -354,6 +358,16 @@ class Evaluator:
 
 
 @functools.cache
+def _parameter_count(generator: Any) -> int | None:
+    """Trainable parameters of the generator's network, or None for a model with none."""
+    from torch import nn
+
+    modules = [m for m in getattr(generator, "__dict__", {}).values() if isinstance(m, nn.Module)]
+    if not modules:
+        return None
+    return sum(p.numel() for module in modules for p in module.parameters() if p.requires_grad)
+
+
 def engibench_version() -> str:
     """Which EngiBench *ran* this evaluation, however it was installed.
 

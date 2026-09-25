@@ -152,21 +152,27 @@ scored: the whole dataset is public, so a memorizer memorizes all of it.
 
 So the board measures retrieval instead:
 
-- **`novelty`** — mean per-element RMS distance from each generated design to the
-  nearest design the model could have copied: the training split it was fitted
-  on, plus the reference designs the protocol names.
-- **`copy_rate`** — the share of the batch closer than `copy_tol`. This is the
-  one that flags an entry.
+- **`copy_rate`** — the share of the batch within `copy_tol` (per-element RMS)
+  of any design the model could have copied: the training split it was fitted
+  on, plus the reference designs the protocol names. This is the one that flags
+  an entry.
+- **`train_distance`** — how far each generated design sits from the nearest
+  design in the training split. Zero means the model reproduces what it was
+  trained on.
 
 Both are diagnostic, with no ranking direction, and that is not an oversight.
-Ranking on novelty would put pure noise in first place — zero means retrieval,
+Ranking on `train_distance` would put pure noise in first place — zero means retrieval,
 but large means only "unlike the data", which a broken model also achieves.
 Closing one gaming vector by opening another is not progress. The same reasoning
 applies to `cond_sens`: an unconditional model is a legitimate thing to build,
 and responding to conditions *wrongly* also moves the output, so a large value is
 not by itself a good one.
 
-Read them next to `mmd` and `viol`, never on their own.
+Read them next to `mmd` and `viol`, never on their own. Every column's question,
+direction and cost is one call away — `METRICS.explain()` — and
+[`example_metrics_suite.ipynb`](example_metrics_suite.ipynb) walks the whole suite,
+including the construction that scores a perfect `mmd` by returning the correct
+designs for the wrong conditions.
 
 ### What would actually close it
 
@@ -190,7 +196,7 @@ from engiopt.evaluation.leaderboard import disagreement, load_from_hub, rank
 from engiopt.evaluation.spec import EvalSpec
 
 board = load_from_hub("IDEALLab/engiopt-leaderboard")
-spec = EvalSpec.load("beams2d/v1")
+spec = EvalSpec.load("beams2d/v2")
 
 rank(board, "fog", eval_spec=spec)  # the public ordering
 rank(board, "fog", eval_spec=spec, eligible_only=False)  # everything, including claims

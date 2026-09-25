@@ -89,12 +89,34 @@ def test_builtin_metrics_declare_their_cost() -> None:
     judged by a constraint check rather than by running the optimizer.
 
     The two integrity metrics are cheap too, and that matters more than it
-    sounds: `novelty` and `cond_sens` decide whether a row can be ranked at all,
+    sounds: `copy_rate` and `cond_sens` decide whether a row can be ranked at all,
     so a board that could only afford the cheap pass would otherwise have to
     rank models it had never checked for memorization.
     """
-    assert {spec.name for spec in METRICS.select(cost="cheap")} == {"mmd", "dpp", "viol", "novelty", "cond_sens"}
-    assert {spec.name for spec in METRICS.select(cost="expensive")} == {"iog", "cog", "fog"}
+    assert {spec.name for spec in METRICS.select(cost="cheap")} == {
+        "mmd",
+        "dpp",
+        "viol",
+        "train_distance",
+        "copy_rate",
+        "cond_sens",
+        "per_condition_distance",
+        "volume_error",
+        "coverage",
+        "vendi",
+        "generation_seconds",
+        "n_parameters",
+        "train_minutes",
+    }
+    assert {spec.name for spec in METRICS.select(cost="expensive")} == {
+        "iog",
+        "cog",
+        "fog",
+        "calls_to_settle",
+        "gap_after_calls",
+        "reaches_reference_rate",
+        "first_call_gain",
+    }
 
 
 def test_cheap_metrics_never_touch_the_solver(fake_problem: Any) -> None:
@@ -127,11 +149,21 @@ def test_registry_rejects_colliding_output_columns() -> None:
     """Two metrics writing the same column would silently overwrite each other."""
     registry = MetricRegistry()
     register_metric(
-        "first", family="diversity", cost="cheap", higher_is_better=True, outputs=("shared",), registry=registry
+        "first",
+        family="diversity",
+        cost="cheap",
+        higher_is_better=True,
+        outputs=("shared",),
+        registry=registry,
     )(lambda ctx: {"shared": 1.0})
     with pytest.raises(ValueError, match="already emitted"):
         register_metric(
-            "second", family="diversity", cost="cheap", higher_is_better=True, outputs=("shared",), registry=registry
+            "second",
+            family="diversity",
+            cost="cheap",
+            higher_is_better=True,
+            outputs=("shared",),
+            registry=registry,
         )(lambda ctx: {"shared": 2.0})
 
 
@@ -166,7 +198,7 @@ def _board() -> pd.DataFrame:
                 "seed": 1,
                 "spec_version": "v1",
                 "mmd": 0.1,
-                "dpp": 5.0,
+                "viol": 0.1,
             },
             {
                 "problem_id": "p",
@@ -176,7 +208,7 @@ def _board() -> pd.DataFrame:
                 "seed": 2,
                 "spec_version": "v1",
                 "mmd": 0.3,
-                "dpp": 7.0,
+                "viol": 0.1,
             },
             {
                 "problem_id": "p",
@@ -186,16 +218,16 @@ def _board() -> pd.DataFrame:
                 "seed": 1,
                 "spec_version": "v1",
                 "mmd": 0.05,
-                "dpp": 1.0,
+                "viol": 0.5,
             },
         ]
     )
 
 
 def test_rank_respects_each_metric_direction() -> None:
-    """Lower MMD ranks first; higher DPP ranks first."""
+    """Both columns are lower-is-better, and they pick different winners."""
     assert rank(_board(), "mmd").iloc[0]["algo_id"] == "b"
-    assert rank(_board(), "dpp").iloc[0]["algo_id"] == "a"
+    assert rank(_board(), "viol").iloc[0]["algo_id"] == "a"
 
 
 def test_rank_aggregates_seeds_with_the_median_by_default() -> None:
@@ -207,9 +239,9 @@ def test_rank_aggregates_seeds_with_the_median_by_default() -> None:
 
 def test_disagreement_surfaces_conflicting_rankings() -> None:
     """The two metrics crown different winners; the view must show both."""
-    table = disagreement(_board(), ["mmd", "dpp"])
+    table = disagreement(_board(), ["mmd", "viol"])
     assert table.loc[("p", "b", "cfg_b", "someone/engiopt-b", "v1"), "mmd"] == 1
-    assert table.loc[("p", "a", "cfg_a", "someone/engiopt-a", "v1"), "dpp"] == 1
+    assert table.loc[("p", "a", "cfg_a", "someone/engiopt-a", "v1"), "viol"] == 1
 
 
 def _two_configs_board() -> pd.DataFrame:

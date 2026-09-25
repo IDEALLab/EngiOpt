@@ -1,0 +1,51 @@
+{
+  "condition_digest": "40030d1b2482e003",
+  "condition_seed": 1,
+  "copy_corpus_size": 512,
+  "copy_tol": 0.01,
+  "dataset_id": "IDEALLab/heat_conduction_2d_v0",
+  "dataset_revision": "9f07c1e70d244f783e34a71c96db621173871dc1",
+  "engibench_version": "0.2.0+0a028c03d02b",
+  "max_copy_rate": 0.5,
+  "metrics": [
+    "mmd",
+    "coverage",
+    "vendi",
+    "dpp",
+    "viol",
+    "volume_error",
+    "per_condition_distance",
+    "cond_sens",
+    "train_distance",
+    "copy_rate",
+    "generation_seconds",
+    "n_parameters",
+    "train_minutes",
+    "iog",
+    "cog",
+    "fog",
+    "calls_to_settle",
+    "gap_after_calls",
+    "reaches_reference_rate",
+    "first_call_gain"
+  ],
+  "n_samples": 50,
+  "notes": "Feasibility = EngiBench constraints plus the volume budget. v2: the full metric suite on the one-decorator contract; `dpp` is now the n-th-root (geometric-mean) form and is not comparable with v1's raw determinant; `novelty` became `train_distance`; aggregation is declared here and recorded in every row.",
+  "objective_weight_condition": null,
+  "objective_weights": null,
+  "problem_conditions": [
+    "volume",
+    "length"
+  ],
+  "problem_id": "heatconduction2d",
+  "required_seeds": [
+    1,
+    2,
+    3
+  ],
+  "sigma": 10.0,
+  "version": "v2",
+  "volfrac_tol": 0.01,
+  "volume_condition": "volume",
+  "aggregation": "mean"
+}

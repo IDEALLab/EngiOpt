@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import field
 from functools import cached_property
-from typing import Any, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 from gymnasium import spaces
 import numpy as np
@@ -64,6 +64,8 @@ class OptimizationResults:
     shared instance.
     """
 
+    trajectories: list[npt.NDArray[Any]] = field(default_factory=list)
+    """Per design, the optimality gap at every optimizer call of its re-optimization."""
     iog: list[float] = field(default_factory=list)
     """Initial optimality gap: how far each generated design starts from the reference optimum."""
     cog: list[float] = field(default_factory=list)
@@ -121,6 +123,12 @@ class EvaluationContext:
     objective_weight_condition: str | None = None
     copy_corpus_fn: Callable[[], npt.NDArray[Any]] | None = None
     copy_tol: float = 0.01
+    aggregation: Literal["mean", "median"] = "mean"
+    model_params: int | None = None
+    """Trainable parameter count of the generator, when it is a network."""
+    train_minutes: float | None = None
+    """Wall-clock minutes the generator took to train, when the checkpoint records it."""
+    """How a metric with one value per design is collapsed into a column; see `reduce`."""
     resample_permuted: Callable[[npt.NDArray[Any]], npt.NDArray[Any]] | None = None
 
     @property
@@ -132,6 +140,30 @@ class EvaluationContext:
     def is_dict_space(self) -> bool:
         """Whether the problem uses a `spaces.Dict` design space needing flatten/unflatten."""
         return isinstance(self.problem.design_space, spaces.Dict)
+
+    def reduce(self, values: Any) -> float:
+        """Collapse one value per generated design into the column's single number.
+
+        `iog`, `cog`, `fog` and the per-design distances are each a vector with
+        one entry per generated design. Which single number that vector becomes
+        is a policy, not a measurement: a mean is pulled by one diverged design,
+        a median is not, and two boards that chose differently are not comparable.
+        So the choice is declared once (`EvalSpec.aggregation`), recorded in the
+        row, and applied here rather than hard-coded metric by metric.
+
+        Rates such as `viol` and `copy_rate` are fractions, not per-design
+        averages, and do not pass through this.
+
+        Args:
+            values: One value per generated design.
+
+        Returns:
+            The mean or median per the declared policy; NaN for no designs.
+        """
+        array = np.asarray(values, dtype=float)
+        if array.size == 0:
+            return float("nan")
+        return float(np.median(array) if self.aggregation == "median" else np.mean(array))
 
     @cached_property
     def gen_flat(self) -> npt.NDArray[Any]:
@@ -145,6 +177,17 @@ class EvaluationContext:
             return np.asarray(self.ref_designs).reshape(len(self.ref_designs), -1)
         flattened = [np.asarray(spaces.flatten(self.problem.design_space, design)) for design in self.ref_designs]
         return np.asarray(flattened)
+
+    @cached_property
+    def train_designs(self) -> npt.NDArray[Any] | None:
+        """Flattened training designs, or None when the problem has no training split."""
+        if self.copy_corpus_fn is None:
+            return None
+        train = np.asarray(self.copy_corpus_fn())
+        if not len(train):
+            return None
+        flat = train.reshape(len(train), -1)
+        return flat if flat.shape[1] == self.gen_flat.shape[1] else None
 
     @cached_property
     def copy_corpus(self) -> npt.NDArray[Any] | None:
@@ -191,7 +234,7 @@ class EvaluationContext:
     def permuted_designs(self) -> npt.NDArray[Any] | None:
         """Designs the generator produces when the conditions are shuffled between samples.
 
-        Same latent draw, same model, different brief. A model that reads its
+        Same latent draw, same model, different conditions. A model that reads its
         conditions produces something different; a model that ignores them
         produces the identical batch in a different order at best, and an
         identical batch outright at worst. Comparing the two is what turns "this
@@ -328,6 +371,7 @@ class EvaluationContext:
             results.iog.append(self.scalarize_gap(np.asarray(generated_objective) - np.asarray(reference_optimum), i))
             results.cog.append(sum(self.scalarize_gap(step_gap, i) for step_gap in gaps))
             results.fog.append(self.scalarize_gap(gaps[-1], i))
+            results.trajectories.append(np.asarray([self.scalarize_gap(step_gap, i) for step_gap in gaps], dtype=float))
         return results
 
     @cached_property
@@ -352,7 +396,7 @@ class EvaluationContext:
            This is what a new problem gets for free.
         2. The volume-fraction budget named by the spec's `volume_condition`,
            when the problem has one. Missing that target is a design failing to
-           honor its brief rather than an invalid design, and no EngiBench
+           honor its conditions rather than an invalid design, and no EngiBench
            constraint covers it.
 
         A problem with neither -- photonics2d has no volume budget -- is scored
