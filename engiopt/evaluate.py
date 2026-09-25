@@ -197,11 +197,7 @@ def _availability_label(count: int | None) -> str:
 def _print_metrics() -> None:
     """Print every registered metric grouped by the question it answers."""
     print(f"{len(METRICS)} metrics registered:\n")
-    for family in sorted({spec.family for spec in METRICS.values()}):
-        print(f"  [{family}]")
-        for spec in METRICS.select(family=family):
-            direction = {True: "higher better", False: "lower better", None: "diagnostic"}[spec.higher_is_better]
-            print(f"    {spec.name:<10} {spec.cost:<10} {direction:<14} {spec.description}")
+    print(METRICS.explain().sort_values(["family", "cost"]).to_string())
 
 
 def _resolve_generator_names(requested: tuple[str, ...], problem_id: str) -> list[str]:

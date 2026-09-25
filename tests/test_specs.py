@@ -24,6 +24,14 @@ from engiopt.evaluation.spec import SPEC_ROOT
 SPEC_PATHS = sorted(SPEC_ROOT.glob("*/*.json"))
 SPEC_IDS = [f"{path.parent.name}/{path.stem}" for path in SPEC_PATHS]
 
+CURRENT_PATHS = [
+    max(SPEC_ROOT.glob(f"{problem}/*.json"), key=lambda p: p.stem)
+    for problem in sorted({p.parent.name for p in SPEC_PATHS})
+]
+CURRENT_IDS = [f"{path.parent.name}/{path.stem}" for path in CURRENT_PATHS]
+"""The newest spec per problem. Older versions stay committed so published rows can
+be read under the protocol that produced them, and may name metrics since retired."""
+
 
 class _FakeConditions:
     """A stand-in for the sampled-conditions dataset the digest hashes."""
@@ -50,9 +58,9 @@ def test_committed_spec_loads_and_round_trips(path: Any) -> None:
     assert dataclasses.asdict(spec) == dataclasses.asdict(EvalSpec(**json.loads(path.read_text())))
 
 
-@pytest.mark.parametrize("path", SPEC_PATHS, ids=SPEC_IDS)
+@pytest.mark.parametrize("path", CURRENT_PATHS, ids=CURRENT_IDS)
 def test_committed_spec_requests_registered_metrics(path: Any) -> None:
-    """A spec asking for a metric nobody registered would fail at evaluation time."""
+    """A current spec asking for a metric nobody registered would fail at evaluation time."""
     for metric in EvalSpec.load(str(path)).metrics:
         assert metric in METRICS, f"{path.name} requests unregistered metric {metric!r}"
 

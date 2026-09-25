@@ -63,10 +63,7 @@ def test_a_generator_returning_the_reference_designs_is_caught(fake_problem: Any
     ref = rng.random((10, *fake_problem.design_space.shape))
     ctx = _context(fake_problem, ref.copy(), ref)
 
-    scores = METRICS["novelty"].fn(ctx)
-
-    assert scores["copy_rate"] == 1.0
-    assert scores["novelty"] == pytest.approx(0.0, abs=1e-12)
+    assert METRICS["copy_rate"].fn(ctx) == 1.0
     # And it does indeed post a perfect distribution score, which is the point.
     assert METRICS["mmd"].fn(ctx) == pytest.approx(0.0, abs=1e-9)
 
@@ -77,10 +74,7 @@ def test_a_generator_producing_its_own_designs_is_not_flagged(fake_problem: Any)
     ref = rng.random((10, *fake_problem.design_space.shape))
     ctx = _context(fake_problem, rng.random((10, *fake_problem.design_space.shape)), ref)
 
-    scores = METRICS["novelty"].fn(ctx)
-
-    assert scores["copy_rate"] == 0.0
-    assert scores["novelty"] > 0
+    assert METRICS["copy_rate"].fn(ctx) == 0.0
 
 
 def test_copying_the_training_split_is_caught_too(fake_problem: Any) -> None:
@@ -95,7 +89,8 @@ def test_copying_the_training_split_is_caught_too(fake_problem: Any) -> None:
     train = rng.random((20, *fake_problem.design_space.shape))
     ctx = _context(fake_problem, train[:6].copy(), ref, copy_corpus_fn=lambda: train)
 
-    assert METRICS["novelty"].fn(ctx)["copy_rate"] == 1.0
+    assert METRICS["copy_rate"].fn(ctx) == 1.0
+    assert METRICS["train_distance"].fn(ctx) == pytest.approx(0.0, abs=1e-12)
 
 
 def test_near_copies_count_as_copies(fake_problem: Any) -> None:
@@ -108,21 +103,20 @@ def test_near_copies_count_as_copies(fake_problem: Any) -> None:
     ref = rng.random((8, *fake_problem.design_space.shape))
     barely_perturbed = ref + rng.normal(scale=1e-4, size=ref.shape)
 
-    scores = METRICS["novelty"].fn(_context(fake_problem, barely_perturbed, ref, copy_tol=0.01))
-
-    assert scores["copy_rate"] == 1.0
+    assert METRICS["copy_rate"].fn(_context(fake_problem, barely_perturbed, ref, copy_tol=0.01)) == 1.0
 
 
-def test_novelty_is_diagnostic_and_cannot_be_ranked_on() -> None:
-    """Ranking on novelty would put pure noise in first place.
+def test_memorization_metrics_are_diagnostic_and_cannot_be_ranked_on() -> None:
+    """Ranking on distance-to-training-data would put pure noise in first place.
 
     The metric has no good direction -- zero means retrieval, large means only
     "unlike the data", which is what a broken model also achieves. Registering a
     direction would have created a new thing to game while closing an old one.
     """
-    assert METRICS["novelty"].higher_is_better is None
+    assert METRICS["train_distance"].higher_is_better is None
+    assert METRICS["copy_rate"].higher_is_better is None
     with pytest.raises(ValueError, match="diagnostic"):
-        rank(pd.DataFrame([{"problem_id": "p", "algo_id": "a", "novelty": 0.5}]), "novelty")
+        rank(pd.DataFrame([{"problem_id": "p", "algo_id": "a", "train_distance": 0.5}]), "train_distance")
 
 
 # ----------------------------------------------------------------------
@@ -404,7 +398,7 @@ def test_the_evaluator_detects_a_lookup_table_end_to_end(fake_problem: Any) -> N
     through the evaluator rather than against a hand-built context -- a metric
     that works but is never fed would pass every other test in this file.
     """
-    spec = EvalSpec(problem_id="fake", n_samples=4, metrics=("mmd", "novelty"))
+    spec = EvalSpec(problem_id="fake", n_samples=4, metrics=("mmd", "copy_rate"))
     ref = np.stack([np.full(fake_problem.design_space.shape, v) for v in (0.4, 0.5, 0.6, 0.7)])
     conditions = fake_problem.dataset["train"].select([0, 1, 2, 0])
 
@@ -419,7 +413,7 @@ def test_the_evaluator_detects_a_lookup_table_end_to_end(fake_problem: Any) -> N
 
 def test_the_evaluator_leaves_an_honest_model_unflagged(fake_problem: Any) -> None:
     """The same path, for a model that generates rather than retrieves."""
-    spec = EvalSpec(problem_id="fake", n_samples=4, metrics=("mmd", "novelty", "cond_sens"))
+    spec = EvalSpec(problem_id="fake", n_samples=4, metrics=("mmd", "copy_rate", "cond_sens"))
     ref = np.stack([np.full(fake_problem.design_space.shape, v) for v in (0.4, 0.5, 0.6, 0.7)])
     conditions = fake_problem.dataset["train"].select([0, 1, 2, 0])
     rng = np.random.default_rng(7)
@@ -484,7 +478,7 @@ def test_the_copy_corpus_is_drawn_once_for_a_whole_sweep(fake_problem: Any) -> N
     Both halves matter: a per-model corpus would be slow, and a corpus that
     varied between models would make their `copy_rate` values incomparable.
     """
-    spec = EvalSpec(problem_id="fake", n_samples=4, metrics=("novelty",))
+    spec = EvalSpec(problem_id="fake", n_samples=4, metrics=("copy_rate",))
     ref = np.stack([np.full(fake_problem.design_space.shape, v) for v in (0.4, 0.5, 0.6, 0.7)])
     conditions = fake_problem.dataset["train"].select([0, 1, 2, 0])
     evaluator = _evaluator(fake_problem, spec, ref, conditions)

@@ -134,7 +134,7 @@ class EvalSpec:
     """
 
     problem_id: str
-    version: str = "v1"
+    version: str = "v2"
     n_samples: int = 50
     condition_seed: int = 1
     metrics: tuple[str, ...] = ("mmd", "dpp", "novelty", "cond_sens", "viol", "iog", "cog", "fog")
@@ -184,7 +184,7 @@ class EvalSpec:
         if path.suffix == ".json" and path.exists():
             return cls(**json.loads(path.read_text()))
         problem_id, _, version = reference.partition("/")
-        version = version or "v1"
+        version = version or "v2"
         spec_path = (root or SPEC_ROOT) / problem_id / f"{version}.json"
         if not spec_path.exists():
             raise FileNotFoundError(

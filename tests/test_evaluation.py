@@ -89,12 +89,34 @@ def test_builtin_metrics_declare_their_cost() -> None:
     judged by a constraint check rather than by running the optimizer.
 
     The two integrity metrics are cheap too, and that matters more than it
-    sounds: `novelty` and `cond_sens` decide whether a row can be ranked at all,
+    sounds: `copy_rate` and `cond_sens` decide whether a row can be ranked at all,
     so a board that could only afford the cheap pass would otherwise have to
     rank models it had never checked for memorization.
     """
-    assert {spec.name for spec in METRICS.select(cost="cheap")} == {"mmd", "dpp", "viol", "novelty", "cond_sens"}
-    assert {spec.name for spec in METRICS.select(cost="expensive")} == {"iog", "cog", "fog"}
+    assert {spec.name for spec in METRICS.select(cost="cheap")} == {
+        "mmd",
+        "dpp",
+        "viol",
+        "train_distance",
+        "copy_rate",
+        "cond_sens",
+        "per_condition_distance",
+        "volume_error",
+        "coverage",
+        "vendi",
+        "generation_seconds",
+        "n_parameters",
+        "train_minutes",
+    }
+    assert {spec.name for spec in METRICS.select(cost="expensive")} == {
+        "iog",
+        "cog",
+        "fog",
+        "calls_to_settle",
+        "gap_after_calls",
+        "reaches_reference_rate",
+        "first_call_gain",
+    }
 
 
 def test_cheap_metrics_never_touch_the_solver(fake_problem: Any) -> None:
