@@ -178,6 +178,7 @@ class Evaluator:
             objective_weight_condition=self.spec.objective_weight_condition,
             copy_corpus_fn=self.copy_corpus,
             copy_tol=self.spec.copy_tol,
+            aggregation=self.spec.aggregation,
             resample_permuted=self._permuted_sampler(generator),
         )
 
@@ -302,6 +303,7 @@ class Evaluator:
             "seed": getattr(generator, "seed", None),
             "spec_version": self.spec.version,
             "n_samples": ctx.n_samples,
+            "aggregation": ctx.aggregation,
             "sample_seconds": ctx.sample_seconds,
             "checkpoint_repo": getattr(generator, "checkpoint_repo", None),
             "checkpoint_path": getattr(generator, "checkpoint_path", None),

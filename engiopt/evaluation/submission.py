@@ -105,7 +105,7 @@ def integrity_flags(row: dict[str, Any], spec: EvalSpec | None = None) -> list[s
 
 
 def _declares_conditioning_it_does_not_use(row: dict[str, Any]) -> bool:
-    """Whether a model claiming to be conditional produced identical output for different briefs.
+    """Whether a model claiming to be conditional produced identical output for different conditions.
 
     No tolerance to choose here, and deliberately so: the comparison holds the
     latent draw fixed, so a model that genuinely reads its conditions cannot

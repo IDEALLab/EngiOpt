@@ -32,7 +32,7 @@ if TYPE_CHECKING:
     family="distribution",
     cost="cheap",
     higher_is_better=False,
-    description="Maximum Mean Discrepancy between generated and reference designs (pixel space).",
+    description="Taken as a set, how different are the generated designs from the reference optimal designs?",
 )
 def mmd(ctx: EvaluationContext) -> float:
     """Maximum Mean Discrepancy between generated and reference designs."""
@@ -48,8 +48,8 @@ def mmd(ctx: EvaluationContext) -> float:
     "dpp",
     family="diversity",
     cost="cheap",
-    higher_is_better=True,
-    description="Determinantal Point Process diversity of the generated set.",
+    higher_is_better=None,
+    description="How spread out are the generated designs, measured as the volume their similarity kernel spans?",
 )
 def dpp(ctx: EvaluationContext) -> float:
     """Determinantal Point Process diversity of the generated designs."""
@@ -63,11 +63,12 @@ def dpp(ctx: EvaluationContext) -> float:
 
 @register_metric(
     "novelty",
+    pixel_only=True,
     family="memorization",
     cost="cheap",
     higher_is_better=None,
+    description="How close is each generated design to the nearest design it could have copied (a training design or a reference optimum)?",
     outputs=("novelty", "copy_rate"),
-    description="Distance from generated designs to the nearest design the model could have memorized.",
 )
 def novelty(ctx: EvaluationContext) -> dict[str, float]:
     """How far the generated designs sit from the corpus a model could copy from.
@@ -98,28 +99,29 @@ def novelty(ctx: EvaluationContext) -> dict[str, float]:
     if distances is None:
         return {"novelty": float("nan"), "copy_rate": float("nan")}
     return {
-        "novelty": float(np.mean(distances)),
+        "novelty": ctx.reduce(distances),
         "copy_rate": float(np.mean(distances < ctx.copy_tol)),
     }
 
 
 # ----------------------------------------------------------------------
-# Conditions: does the model actually read the brief it was given?
+# Conditions: does the model actually use the conditions it was given?
 # ----------------------------------------------------------------------
 
 
 @register_metric(
     "cond_sens",
+    pixel_only=True,
     family="conditions",
     cost="cheap",
     higher_is_better=None,
-    description="How much the generated design changes when the conditions are shuffled.",
+    description="When the same model is given different conditions, does its output change?",
 )
 def cond_sens(ctx: EvaluationContext) -> float:
     """Mean per-element RMS change in output when each sample is given another's conditions.
 
     Sampled from the same seed, so the latent draw is held fixed and the only
-    thing that varies is the brief. A model that ignores its conditions returns
+    thing that varies is the conditions. A model that ignores them returns
     the identical batch and scores 0; a model that responds to them scores the
     size of that response.
 
@@ -143,7 +145,7 @@ def cond_sens(ctx: EvaluationContext) -> float:
     if permuted is None:
         return float("nan")
     deltas = np.linalg.norm(ctx.gen_flat - permuted, axis=1) / np.sqrt(ctx.gen_flat.shape[1])
-    return float(np.mean(deltas))
+    return ctx.reduce(deltas)
 
 
 # ----------------------------------------------------------------------
@@ -153,10 +155,11 @@ def cond_sens(ctx: EvaluationContext) -> float:
 
 @register_metric(
     "viol",
+    pixel_only=True,
     family="feasibility",
     cost="cheap",
     higher_is_better=False,
-    description="Fraction of designs violating the problem's constraints or their volume budget.",
+    description="What fraction of the generated designs violate the problem's constraints?",
 )
 def viol(ctx: EvaluationContext) -> float:
     """Fraction of infeasible designs; see `EvaluationContext.is_infeasible`.
@@ -184,11 +187,11 @@ def viol(ctx: EvaluationContext) -> float:
     family="performance",
     cost="expensive",
     higher_is_better=False,
-    description="Mean initial optimality gap: how far generated designs start from the reference optimum.",
+    description="How much worse than the reference optimum is the generated design, exactly as generated?",
 )
 def iog(ctx: EvaluationContext) -> float:
     """Mean initial optimality gap, before any re-optimization."""
-    return float(np.mean(ctx.optimization.iog))
+    return ctx.reduce(ctx.optimization.iog)
 
 
 @register_metric(
@@ -196,11 +199,21 @@ def iog(ctx: EvaluationContext) -> float:
     family="performance",
     cost="expensive",
     higher_is_better=False,
-    description="Mean cumulative optimality gap over re-optimization from each generated design.",
+    description="Starting the optimizer from the generated design, how much worse than optimal is it, summed over every optimizer step?",
 )
 def cog(ctx: EvaluationContext) -> float:
-    """Mean cumulative optimality gap."""
-    return float(np.mean(ctx.optimization.cog))
+    """Mean cumulative optimality gap.
+
+    For each generated design, the optimizer is started from that design and
+    `objective(step) - objective(reference optimum)` is summed over every step it
+    takes; that sum is the area under the design's optimality-gap curve. The
+    column is the mean of those sums over the generated designs.
+
+    Because it sums a whole trajectory it mixes two things: how far from optimal
+    the start was, and how many steps the optimizer needed. `iog` isolates the
+    first and `fog` the end point; read `cog` beside both.
+    """
+    return ctx.reduce(ctx.optimization.cog)
 
 
 @register_metric(
@@ -208,8 +221,8 @@ def cog(ctx: EvaluationContext) -> float:
     family="performance",
     cost="expensive",
     higher_is_better=False,
-    description="Mean final optimality gap after re-optimization.",
+    description="Starting the optimizer from the generated design, how much worse than optimal is it once the optimizer finishes?",
 )
 def fog(ctx: EvaluationContext) -> float:
     """Mean final optimality gap."""
-    return float(np.mean(ctx.optimization.fog))
+    return ctx.reduce(ctx.optimization.fog)
