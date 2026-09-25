@@ -175,12 +175,16 @@ python -m engiopt.evaluate --list-generators              # your model should ap
 python -m engiopt.evaluate --problem-id beams2d --generators my_model --hf-entity my-hf-username
 ```
 
-The default pass runs the cheap metrics: `mmd`, `dpp`, `viol`, and the two
-integrity checks (`novelty`, `cond_sens`). Feasibility is among them because it
-describes the design as generated, so it is a constraint check rather than a
-solver run. `--include-expensive` adds the optimality gaps (`iog`, `cog`,
-`fog`), which do run the optimizer and are slow — leave them off while
-iterating.
+The default pass runs every metric that needs no simulator: the set-level
+ones (`mmd`, `coverage`, `vendi`, `dpp`), the per-condition ones
+(`per_condition_distance`, `volume_error`), feasibility (`viol`), the two
+integrity checks (`copy_rate`, `cond_sens`) with `train_distance`, and the cost
+columns. `--include-expensive` adds the columns that re-optimize from each
+generated design — the optimality gaps `iog`, `cog`, `fog` and the
+call-budget metrics `calls_to_settle`, `gap_after_calls`,
+`reaches_reference_rate`, `first_call_gain` — which run the optimizer and are
+slow; leave them off while iterating. `python -m engiopt.evaluate
+--list-metrics` prints the question each column answers.
 
 Watch two columns while you develop:
 
@@ -193,7 +197,7 @@ Watch two columns while you develop:
 
 `cond_sens` draws the batch a second time, under shuffled conditions, so it
 doubles sampling cost. That is nothing for a GAN and noticeable for a diffusion
-model — pass `--metrics mmd dpp viol` while iterating if it slows you down, then
+model — pass `--metrics mmd viol` while iterating if it slows you down, then
 run the full list before publishing.
 
 ## 5. Publish it
@@ -215,13 +219,19 @@ from engiopt.evaluation import register_metric
 
 @register_metric("my_metric", family="diversity", cost="cheap", higher_is_better=True)
 def my_metric(ctx) -> float:
-    """One line, shown by --list-metrics."""
-    return float(...)  # ctx.gen_flat, ctx.ref_flat, ctx.conditions, ...
+    """What question does the number answer? This line is what readers see."""
+    return ctx.reduce(...)  # one value per design -> the caller's aggregation (mean or median)
 ```
 
-Declare `cost="expensive"` if it touches `ctx.optimization` (the simulator or
-optimizer). The registry enforces the split, so a cheap run can never
-accidentally launch a simulation.
+Five declarations: the name, the family (which question it belongs to), the
+cost, the direction — `None` for a diagnostic that is read but never ranked on —
+and, when the metric needs the actual designs rather than codes in some space
+(a constraint check, a copy corpus), `pixel_only=True`. Declare
+`cost="expensive"` if it touches `ctx.optimization` (the simulator or
+optimizer); the registry enforces the split, so a cheap run can never
+accidentally launch a simulation. Where the metric is computed (`space=`) and
+how per-design values collapse to one number (`aggregation=`) are chosen when a
+board is evaluated, not by the metric.
 
 Importing the module is what registers it — which means you can define a metric
 in a notebook cell and it will appear in the next leaderboard you build.

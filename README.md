@@ -166,7 +166,7 @@ python -m engiopt.verify --board ... --verifier ideallab-ci --publish    # the o
 
 Because the row carries the full address, that audit is not privileged — anyone can run the same command and get the same answer.
 
-**Two integrity metrics decide whether a score means what it looks like.** The evaluation protocol is public, so a lookup table keyed on the condition vector returns the dataset-optimal designs and posts a perfect `mmd` and a zero `viol` — measured on beams2d, it beats a trained cGAN on every headline metric. `novelty` / `copy_rate` catch it (`copy_rate=1.00`), and `cond_sens` catches a model that ignores the conditions it claims to use. Both are diagnostic rather than ranked, because ranking on them would just reward the opposite extreme. Flagged rows are published and left out of the ordering.
+**Two integrity metrics decide whether a score means what it looks like.** The evaluation protocol is public, so a lookup table keyed on the condition vector returns the dataset-optimal designs and posts a perfect `mmd` and a zero `viol` — measured on beams2d, it beats a trained cGAN on every headline metric. `copy_rate` catches it (`copy_rate=1.00`), and `cond_sens` catches a model that ignores the conditions it claims to use. Both are diagnostic rather than ranked, because ranking on them would just reward the opposite extreme. Flagged rows are published and left out of the ordering. The whole suite — what each column measures, which way is better, how to change the space or the aggregation, and how to add a metric — is in [`example_metrics_suite.ipynb`](example_metrics_suite.ipynb).
 
 See **[LEADERBOARD.md](LEADERBOARD.md)** for the submission path, the flags, and what would actually close the copying hole.
 
