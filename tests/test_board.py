@@ -65,7 +65,7 @@ def test_rank_refuses_a_diagnostic(fake_problem: Any, designs: Any) -> None:
 def test_space_is_an_argument_not_a_metric(fake_problem: Any, designs: Any) -> None:
     """The same metric, asked in PCA space, gets a suffixed column; pixel-only metrics are skipped."""
     models, ref, train = designs
-    frame = Board(fake_problem, reference=ref, train=train).evaluate(models, space="pca", pca_dims=3)
+    frame = Board(fake_problem, reference=ref, train=train).evaluate(models, space="pca", width=3)
     assert "mmd@pca" in frame.columns
     assert "viol@pca" not in frame.columns, "a constraint check on PCA codes would be meaningless"
     assert frame.loc["copier", "mmd@pca"] == pytest.approx(0.0)
@@ -81,3 +81,14 @@ def test_aggregation_is_a_policy_on_the_context(fake_problem: Any) -> None:
     )
     assert mean_ctx.reduce(values) == pytest.approx(25.075)
     assert median_ctx.reduce(values) == pytest.approx(0.1)
+
+
+def test_the_default_bandwidth_lets_diversity_metrics_see_anything(fake_problem: Any, designs: Any) -> None:
+    """At a fixed sigma=10 every design looks identical to every other; the median heuristic does not."""
+    models, ref, _ = designs
+    collapsed = np.repeat(models["honest"][:1], len(ref), axis=0)
+    frame = Board(fake_problem, reference=ref).evaluate({"collapsed": collapsed, "spread": models["honest"]})
+    assert frame.loc["collapsed", "vendi"] == pytest.approx(1.0)
+    assert frame.loc["spread", "vendi"] > 3.0
+    saturated = Board(fake_problem, reference=ref, sigma=10.0).evaluate({"spread": models["honest"]})
+    assert saturated.loc["spread", "vendi"] < 1.5, "a pinned, too-wide kernel is still honored"
