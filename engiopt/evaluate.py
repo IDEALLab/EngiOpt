@@ -370,11 +370,11 @@ def main(args: Args) -> int:
     print(f"\n{board.to_string(index=False)}\n")
     print(f"Wrote {len(board)} rows to {destination}")
 
-    _publish(args, evaluator, board)
+    _publish(args, board)
     return 0
 
 
-def _publish(args: Args, evaluator: Evaluator, board: pd.DataFrame) -> None:
+def _publish(args: Args, board: pd.DataFrame) -> None:
     """Push the results wherever the flags asked, then print the ranking comparison."""
     if args.push_to:
         merged = push_to_hub(board, args.push_to)
