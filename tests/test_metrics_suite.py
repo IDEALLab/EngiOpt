@@ -167,14 +167,32 @@ def test_the_reference_row_leaves_per_condition_metrics_blank(fake_problem: Any,
     assert not np.isnan(frame.loc["m", "per_condition_distance"])
 
 
-def test_from_generators_scores_through_an_evaluator() -> None:
-    class StubEvaluator:
-        def score(self, generator: Any, *, only: Any, include_expensive: bool) -> dict[str, float]:
-            return {"mmd": generator, "iog": 1.0 if include_expensive else float("nan")}
+def test_from_evaluator_scores_models_and_saved_designs_under_one_spec() -> None:
+    class StubContext:
+        def __init__(self, designs: Any) -> None:
+            self.gen_designs = designs
 
-    board = Board.from_generators(StubEvaluator(), {"a": 0.2, "b": 0.1}, expensive=True)
+    class StubEvaluator:
+        problem = None
+        spec = type("Spec", (), {"sigma": 1.0})()
+        resolved = type("Resolved", (), {"ref_designs": np.zeros((2, 3))})()
+
+        def context_for(self, generator: Any) -> StubContext:
+            return StubContext(generator)
+
+        def context_for_designs(self, designs: Any) -> StubContext:
+            return StubContext(designs)
+
+        def score_context(self, ctx: Any, *, only: Any, include_expensive: bool) -> dict[str, float]:
+            return {"mmd": float(np.mean(ctx.gen_designs)), "iog": 1.0 if include_expensive else float("nan")}
+
+    board = Board.from_evaluator(
+        StubEvaluator(), {"a": np.full(3, 0.2), "b": np.full(3, 0.1)}, designs={"probe": np.full(3, 0.3)}, expensive=True
+    )
+    assert list(board.frame.index) == ["a", "b", "probe"]
     assert board.rank("mmd").index[0] == "b"
-    assert board.frame.loc["a", "iog"] == 1.0
+    assert board.frame.loc["probe", "iog"] == 1.0
+    assert set(board.designs) == {"a", "b", "probe"}
 
 
 # -------------------------------------------------------------------- specs

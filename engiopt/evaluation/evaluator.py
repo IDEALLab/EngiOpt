@@ -11,6 +11,7 @@ so everything else lives here once::
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from dataclasses import field
 import datetime as dt
@@ -163,25 +164,43 @@ class Evaluator:
                 f"{generator.algo_id!r} supports {generator.design_kinds} design spaces, "
                 f"but {self.problem_id!r} is {kind!r}."
             )
-        designs = self._sample(generator)
+        ctx = self.context_for_designs(self._sample(generator))
+        return dataclasses.replace(
+            ctx,
+            sample_seconds=generator.last_sample_seconds,
+            model_params=_parameter_count(generator),
+            train_minutes=getattr(generator, "train_minutes", None),
+            resample_permuted=self._permuted_sampler(generator),
+        )
+
+    def context_for_designs(self, designs: npt.NDArray[Any]) -> EvaluationContext:
+        """Wrap designs that did not come from a generator in the context a generator would get.
+
+        A construction built from the dataset, or a batch saved earlier, is scored
+        against the same reference designs, conditions, kernel bandwidth and copy
+        corpus as a live model, so its row is comparable. Only the metrics that
+        must re-run a model (`cond_sens`) and the cost columns stay blank.
+
+        Args:
+            designs: One design per spec condition, in the spec's condition order.
+
+        Returns:
+            An `EvaluationContext` ready for `score_context`.
+        """
         return EvaluationContext(
             problem=self.problem,
             problem_id=self.problem_id,
-            gen_designs=designs,
+            gen_designs=np.asarray(designs),
             ref_designs=self.resolved.ref_designs,
             conditions=self.resolved.conditions,
             sigma=self.spec.sigma,
             volfrac_tol=self.spec.volfrac_tol,
             volume_condition=self.spec.volume_condition,
-            sample_seconds=generator.last_sample_seconds,
             objective_weights=self.spec.objective_weights,
             objective_weight_condition=self.spec.objective_weight_condition,
             copy_corpus_fn=self.copy_corpus,
             copy_tol=self.spec.copy_tol,
             aggregation=self.spec.aggregation,
-            model_params=_parameter_count(generator),
-            train_minutes=getattr(generator, "train_minutes", None),
-            resample_permuted=self._permuted_sampler(generator),
         )
 
     def _sample(self, generator: Generator, order: npt.NDArray[Any] | None = None) -> npt.NDArray[Any]:

@@ -15,10 +15,10 @@ need -- use `Evaluator.score`.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from dataclasses import field
-from typing import Any, Literal, TYPE_CHECKING
+from typing import Any, Literal
 
 import numpy as np
 import pandas as pd
@@ -27,9 +27,6 @@ from engiopt import metrics as metrics_mod
 from engiopt.evaluation.context import EvaluationContext
 from engiopt.evaluation.registry import MetricRegistry
 from engiopt.evaluation.registry import METRICS
-
-if TYPE_CHECKING:
-    from collections.abc import Mapping
 
 SpaceFit = Callable[[np.ndarray, int], Callable[[np.ndarray], np.ndarray]]
 """Given the reference designs and a width, return a function projecting designs into the space."""
@@ -71,6 +68,7 @@ class Board:
             in whichever space is being scored, so the kernel is neither saturated
             nor empty on a problem it has never seen. A published spec pins a value.
         frame: The most recent `evaluate` result.
+        designs: The designs behind each row of `frame`, when the board sampled them itself.
     """
 
     problem: Any
@@ -79,6 +77,7 @@ class Board:
     sigma: float | None = None
     registry: MetricRegistry = field(default_factory=lambda: METRICS)
     frame: pd.DataFrame = field(default_factory=pd.DataFrame)
+    designs: dict[str, Any] = field(default_factory=dict)
 
     def evaluate(
         self,
@@ -149,73 +148,87 @@ class Board:
         return frame
 
     @classmethod
-    def from_generators(
+    def from_evaluator(
         cls,
         evaluator: Any,
-        generators: Mapping[str, Any],
+        models: Mapping[str, Any],
         *,
+        designs: Mapping[str, Any] | None = None,
         expensive: bool = False,
         metrics: list[str] | None = None,
     ) -> Board:
-        """Score loaded models through an `Evaluator`, which is what the live-model metrics need.
+        """Score loaded models, and optionally saved designs, under one evaluation spec.
 
-        `cond_sens` re-samples the model, the cost columns read its network, and
-        the physics columns run the simulator; none of that is possible from
-        saved designs. The evaluator supplies the spec, the reference designs
-        and the conditions, so there is no reference row here -- the spec's own
-        reference designs already are the comparison.
+        The evaluator supplies the spec, the reference designs, the conditions and
+        the copy corpus, so every row is comparable. Live models get every column;
+        `cond_sens` and the cost columns need a model to re-run or inspect, so they
+        stay blank for the `designs` rows. The designs each model produced are kept
+        on `Board.designs`, so they can be re-scored in another space or saved.
 
         Args:
-            evaluator: An `Evaluator` (anything with `.score(generator, only=, include_expensive=)`).
-            generators: Label -> loaded `Generator`.
+            evaluator: An `Evaluator` for the problem.
+            models: Label -> loaded `Generator`.
+            designs: Label -> one design per spec condition, e.g. a construction
+                built from the dataset.
             expensive: Whether to run the simulator-backed metrics.
             metrics: Metric names; defaults to the spec's list.
 
         Returns:
-            A `Board` with one row per generator.
+            A `Board` with one row per model and per designs entry, in that order.
         """
-        rows = {
-            label: evaluator.score(generator, only=metrics, include_expensive=expensive)
-            for label, generator in generators.items()
-        }
-        frame = pd.DataFrame.from_dict(rows, orient="index")
-        board = cls(problem=getattr(evaluator, "problem", None), reference=getattr(evaluator, "resolved", None))
-        board.frame = frame
+        rows: dict[str, dict[str, float]] = {}
+        sampled: dict[str, Any] = {}
+        for label, generator in models.items():
+            ctx = evaluator.context_for(generator)
+            rows[label] = evaluator.score_context(ctx, only=metrics, include_expensive=expensive)
+            sampled[label] = ctx.gen_designs
+        for label, batch in (designs or {}).items():
+            ctx = evaluator.context_for_designs(batch)
+            rows[label] = evaluator.score_context(ctx, only=metrics, include_expensive=expensive)
+            sampled[label] = ctx.gen_designs
+        board = cls(problem=evaluator.problem, reference=evaluator.resolved.ref_designs, sigma=evaluator.spec.sigma)
+        board.frame = pd.DataFrame.from_dict(rows, orient="index")
+        board.designs = sampled
         return board
 
     @classmethod
     def load(
         cls,
         problem_id: str,
-        models: list[str],
+        models: list[str] | Mapping[str, str | None],
         *,
+        designs: Mapping[str, Any] | None = None,
         seed: int = 1,
-        spec: str | None = None,
+        spec: Any = None,
         expensive: bool = False,
     ) -> Board:
         """Pull published checkpoints by name and score them: the workshop in one call.
 
         Args:
             problem_id: An EngiBench problem id, e.g. `"beams2d"`.
-            models: Generator names from `BUILTIN_GENERATORS`, e.g. `["cgan_cnn_2d", "vqgan"]`.
+            models: Generator names, e.g. `["diffusion_2d_cond", "vqgan"]`. A model
+                whose default configuration was never trained needs its config
+                fingerprint, given as a mapping: `{"cgan_cnn_2d": "825831f6"}`.
+            designs: Extra rows of saved designs, one per spec condition; see `from_evaluator`.
             seed: Training seed of the checkpoints to load.
-            spec: Spec reference such as `"beams2d/v2"`; defaults to the problem's current spec.
+            spec: Spec reference such as `"beams2d/v2"`, or an `EvalSpec`; defaults to the current spec.
             expensive: Whether to run the simulator-backed metrics.
 
         Returns:
-            A `Board` with one row per model, labelled `name/seed`.
+            A `Board` with one row per model, labelled by name.
         """
         from engiopt.evaluation.evaluator import Evaluator
         from engiopt.utils.all_generators import BUILTIN_GENERATORS
 
         evaluator = Evaluator.for_problem(problem_id, spec=spec)
+        requested = models if isinstance(models, Mapping) else dict.fromkeys(models)
         generators = {
-            f"{name}/seed{seed}": BUILTIN_GENERATORS[name].from_pretrained(
-                evaluator.problem, problem_id=problem_id, seed=seed
+            name: BUILTIN_GENERATORS[name].from_pretrained(
+                evaluator.problem, problem_id=problem_id, seed=seed, config_fingerprint=fingerprint
             )
-            for name in models
+            for name, fingerprint in requested.items()
         }
-        return cls.from_generators(evaluator, generators, expensive=expensive)
+        return cls.from_evaluator(evaluator, generators, designs=designs, expensive=expensive)
 
     def explain(self) -> pd.DataFrame:
         """Read every column of the last evaluation.
