@@ -377,7 +377,7 @@ def main(args: Args) -> int:
 def _publish(args: Args, evaluator: Evaluator, board: pd.DataFrame) -> None:
     """Push the results wherever the flags asked, then print the ranking comparison."""
     if args.push_to:
-        merged = push_to_hub(board, args.push_to, eval_spec=evaluator.spec)
+        merged = push_to_hub(board, args.push_to)
         print(f"Published {len(board)} row(s) to {args.push_to}; board now holds {len(merged)} rows.")
         print(
             "These rows are unverified. They will not be ranked until a runner re-fetches the "
