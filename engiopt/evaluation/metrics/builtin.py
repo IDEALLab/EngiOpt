@@ -34,7 +34,7 @@ if TYPE_CHECKING:
     higher_is_better=False,
 )
 def mmd(ctx: EvaluationContext) -> float:
-    """Taken as a set, how different are the generated designs from the reference optimal designs?"""
+    """Distance between the generated designs and the reference optima, compared as whole sets. Zero means the two sets are indistinguishable."""
     return float(metrics_mod.mmd(ctx.gen_flat, ctx.ref_flat, sigma=ctx.sigma))
 
 
@@ -50,7 +50,7 @@ def mmd(ctx: EvaluationContext) -> float:
     higher_is_better=True,
 )
 def dpp(ctx: EvaluationContext) -> float:
-    """How spread out are the generated designs, on a 0-to-1 scale where 1 is a perfectly diverse set?
+    """Spread of the generated set, as the geometric mean of its similarity-kernel eigenvalues. One is perfectly spread, near zero is collapsed.
 
     The n-th root of the DPP kernel determinant, i.e. the geometric mean of the
     kernel's eigenvalues. The raw determinant that earlier boards published under
@@ -78,7 +78,7 @@ def dpp(ctx: EvaluationContext) -> float:
     pixel_only=True,
 )
 def train_distance(ctx: EvaluationContext) -> float:
-    """How far is each generated design from the nearest design the model was trained on?
+    """Per-element distance from each generated design to the nearest design in the training set. Zero means the model reproduces its training data.
 
     Per-element RMS distance to the closest training design, so one tolerance
     means the same thing on problems of different resolution. Zero means the
@@ -104,7 +104,7 @@ def train_distance(ctx: EvaluationContext) -> float:
     pixel_only=True,
 )
 def copy_rate(ctx: EvaluationContext) -> float:
-    """What fraction of the generated designs are copies of a design the model could have seen?
+    """Fraction of the generated designs within the copy tolerance of a design the model could have seen. One means pure retrieval.
 
     A design counts as a copy when it sits within `copy_tol` (per-element RMS) of
     any design in the corpus a model could reproduce: the training split *and*
@@ -131,7 +131,7 @@ def copy_rate(ctx: EvaluationContext) -> float:
     higher_is_better=None,
 )
 def cond_sens(ctx: EvaluationContext) -> float:
-    """When the same model is given different conditions, does its output change?
+    """How much each design changes, per element, when the model is re-run under another sample's conditions. Zero means the conditions are ignored.
 
     Mean per-element RMS change in output when each sample is given another's conditions.
 
@@ -176,7 +176,7 @@ def cond_sens(ctx: EvaluationContext) -> float:
     higher_is_better=False,
 )
 def viol(ctx: EvaluationContext) -> float:
-    """What fraction of the generated designs violate the problem's constraints?
+    """Fraction of the generated designs that break a constraint of the problem. Zero means every design is admissible.
 
     Defined for every problem: `problem.check_constraints` always applies, and
     the spec's `volume_condition` adds the volume-fraction budget for problems
@@ -203,7 +203,7 @@ def viol(ctx: EvaluationContext) -> float:
     higher_is_better=False,
 )
 def iog(ctx: EvaluationContext) -> float:
-    """How much worse than the reference optimum is the generated design, exactly as generated?"""
+    """Optimality gap of each generated design as generated, before any re-optimization. Zero means already optimal."""
     return ctx.reduce(ctx.optimization.iog)
 
 
@@ -214,7 +214,7 @@ def iog(ctx: EvaluationContext) -> float:
     higher_is_better=False,
 )
 def cog(ctx: EvaluationContext) -> float:
-    """Starting the optimizer from the generated design, how much worse than optimal is it, summed over every optimizer step?
+    """Optimality gap summed over every optimizer step when re-optimizing from each generated design, the area under its gap curve. Zero means no optimizer effort was wasted.
 
     For each generated design, the optimizer is started from that design and
     `objective(step) - objective(reference optimum)` is summed over every step it
@@ -235,7 +235,7 @@ def cog(ctx: EvaluationContext) -> float:
     higher_is_better=False,
 )
 def fog(ctx: EvaluationContext) -> float:
-    """Starting the optimizer from the generated design, how much worse than optimal is it once the optimizer finishes?"""
+    """Optimality gap of each design once re-optimization from it has finished. Zero means the warm start reached the reference optimum."""
     return ctx.reduce(ctx.optimization.fog)
 
 
@@ -251,7 +251,7 @@ def fog(ctx: EvaluationContext) -> float:
     higher_is_better=False,
 )
 def per_condition_distance(ctx: EvaluationContext) -> float:
-    """For each set of conditions, how far is the generated design from the reference optimum for those same conditions?
+    """Per-element distance from each generated design to the reference optimum for its own conditions. Zero means every design matches its own optimum.
 
     Design `i` is compared with reference design `i`, which answers the same
     conditions. That is a sharper question than any set-level metric can ask:
@@ -273,7 +273,7 @@ def per_condition_distance(ctx: EvaluationContext) -> float:
     pixel_only=True,
 )
 def volume_error(ctx: EvaluationContext) -> float:
-    """How far is each design's material fraction from the one its conditions requested?
+    """Gap between each design's material fraction and the fraction its conditions requested. Zero means every design hit its volume target.
 
     The volume fraction of a density field is its mean, so this needs nothing
     fitted: it is the exact error on the one condition that can be read straight
@@ -304,7 +304,7 @@ nearest-neighbor spacing, at this upper quantile, so it adapts to the space."""
     higher_is_better=True,
 )
 def coverage(ctx: EvaluationContext) -> float:
-    """What fraction of the reference optima have a generated design nearby?
+    """Fraction of the reference optima that have at least one generated design close to them. One means every reference design is reached.
 
     Distribution distance can look healthy while whole regions go unvisited, so
     this counts reference designs directly: a mode the generator never produces
@@ -326,7 +326,7 @@ def coverage(ctx: EvaluationContext) -> float:
     higher_is_better=True,
 )
 def vendi(ctx: EvaluationContext) -> float:
-    """How many genuinely distinct designs are in the generated set, as an effective count?
+    """Effective number of distinct designs in the generated set. One means all identical, the sample size means all mutually distinct.
 
     The exponential of the entropy of the similarity kernel's eigenvalues, so it
     reads as a count: n identical designs score 1, n mutually dissimilar ones
@@ -371,7 +371,7 @@ def _calls_to_settle(path: np.ndarray, band: float = SETTLE_BAND) -> float:
     higher_is_better=False,
 )
 def calls_to_settle(ctx: EvaluationContext) -> float:
-    """How many optimizer calls until the objective stays within 5% of where it ends up?
+    """Optimizer calls from each generated design until the objective stays within five percent of its final value. Fewer means a faster settle.
 
     Settling time in the control-theory sense: last exit from the band, so a
     trajectory that dips in and leaves again is not credited. Zero means the
@@ -390,7 +390,7 @@ def calls_to_settle(ctx: EvaluationContext) -> float:
     outputs=tuple(f"gap_after_{k}_calls" for k in GAP_AFTER_CALLS),
 )
 def gap_after_calls(ctx: EvaluationContext) -> dict[str, float]:
-    """How much optimality gap remains after the optimizer's first 1, 2, 5 and 10 calls?
+    """Optimality gap remaining after one, two, five and ten optimizer calls from each generated design. Zero means the defect was repaired within that budget.
 
     A path shorter than the budget has converged early, so its final value is
     carried forward: the optimizer would have spent the remaining calls and
@@ -411,7 +411,7 @@ def gap_after_calls(ctx: EvaluationContext) -> dict[str, float]:
     higher_is_better=True,
 )
 def reaches_reference_rate(ctx: EvaluationContext) -> float:
-    """What fraction of the generated designs, once re-optimized, reach or beat the reference optimum?
+    """Fraction of generated designs whose re-optimization reaches or beats the reference optimum. One means every warm start gets there.
 
     The gap is measured against the reference optimum, so reaching it means the
     gap touches zero at some call. A rate rather than a call count, because a
@@ -431,7 +431,7 @@ def reaches_reference_rate(ctx: EvaluationContext) -> float:
     higher_is_better=True,
 )
 def first_call_gain(ctx: EvaluationContext) -> float:
-    """What fraction of the whole re-optimization's improvement does the first optimizer call deliver?
+    """Share of the total re-optimization improvement delivered by the first optimizer call. Near one means the defects clear in a single step.
 
     Near 1 means the design's defects clear immediately and the rest is
     refinement; near 0 means the warm start bought nothing. Designs with nothing
@@ -461,7 +461,7 @@ def first_call_gain(ctx: EvaluationContext) -> float:
     pixel_only=True,
 )
 def generation_seconds(ctx: EvaluationContext) -> float:
-    """How many seconds did the model take to generate this batch of designs?
+    """Wall-clock seconds the model took to generate the evaluation batch. Comparable only between models run on the same machine.
 
     Wall-clock, so it compares models within one run on one machine, not across
     machines. NaN when the designs did not come from a timed `Generator.sample`.
@@ -477,7 +477,7 @@ def generation_seconds(ctx: EvaluationContext) -> float:
     pixel_only=True,
 )
 def n_parameters(ctx: EvaluationContext) -> float:
-    """How many trainable parameters does the model have?
+    """Number of trainable parameters in the model. Blank for a model with no network.
 
     The hardware-independent companion to `generation_seconds`. Neither is a
     complete account of cost alone: a small diffusion model can be slower than
@@ -494,7 +494,7 @@ def n_parameters(ctx: EvaluationContext) -> float:
     pixel_only=True,
 )
 def train_minutes(ctx: EvaluationContext) -> float:
-    """How many minutes did the model take to train?
+    """Wall-clock minutes the model took to train, when the checkpoint records it. Blank where no checkpoint does.
 
     Prices the decision to adopt the method rather than a forward pass; it is
     where a lookup table and a diffusion model differ by orders of magnitude.
