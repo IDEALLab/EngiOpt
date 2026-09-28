@@ -101,16 +101,6 @@ class EvalSpec:
             submitter running one seed -- it does not stop them running twenty
             and publishing their best three, which produces a median over a
             maximum. Fixing *which* seeds removes the choice.
-        copy_tol: Per-element RMS distance below which a generated design counts
-            as a copy of a design the model could have memorized. See the
-            `novelty` metric.
-        max_copy_rate: The share of copied designs above which an entry is
-            flagged and left out of the ranking. Set to 1.0 to disable the gate
-            and report `copy_rate` without acting on it.
-        copy_corpus_size: How many dataset designs to draw as the memorization
-            corpus. The scored reference designs are always included on top of
-            these, since the public spec names them and they are the most
-            attractive thing to copy.
         condition_digest: Hash of the drawn indices, condition values, and
             reference designs. Recomputed at evaluation time and compared, so an
             upstream dataset change is caught instead of silently shifting every
@@ -150,9 +140,6 @@ class EvalSpec:
     objective_weights: tuple[float, ...] | None = None
     objective_weight_condition: str | None = None
     required_seeds: tuple[int, ...] = (1, 2, 3)
-    copy_tol: float = 0.01
-    max_copy_rate: float = 0.5
-    copy_corpus_size: int = 512
     condition_digest: str | None = None
     dataset_id: str | None = None
     dataset_revision: str | None = None
@@ -463,9 +450,6 @@ def freeze_spec(
     objective_weights: tuple[float, ...] | None = None,
     objective_weight_condition: str | None = None,
     required_seeds: tuple[int, ...] = EvalSpec.required_seeds,
-    copy_tol: float = EvalSpec.copy_tol,
-    max_copy_rate: float = EvalSpec.max_copy_rate,
-    copy_corpus_size: int = EvalSpec.copy_corpus_size,
     notes: str = "",
 ) -> Path:
     """Draw a problem's test conditions once and commit them as a spec.
@@ -499,9 +483,6 @@ def freeze_spec(
         objective_weights=objective_weights,
         objective_weight_condition=objective_weight_condition,
         required_seeds=required_seeds,
-        copy_tol=copy_tol,
-        max_copy_rate=max_copy_rate,
-        copy_corpus_size=copy_corpus_size,
         notes=notes,
     ).freeze(problem)
     path = spec.save()

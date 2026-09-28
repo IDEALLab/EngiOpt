@@ -198,8 +198,7 @@ class Evaluator:
             volume_condition=self.spec.volume_condition,
             objective_weights=self.spec.objective_weights,
             objective_weight_condition=self.spec.objective_weight_condition,
-            copy_corpus_fn=self.copy_corpus,
-            copy_tol=self.spec.copy_tol,
+            train_designs_fn=self.train_designs,
             aggregation=self.spec.aggregation,
         )
 
@@ -234,37 +233,29 @@ class Evaluator:
         return lambda order: self._sample(generator, order)
 
     @functools.cached_property
-    def copy_corpus(self) -> Callable[[], npt.NDArray[Any]]:
-        """Designs from the training split that a model on this problem could have memorized.
+    def train_designs(self) -> Callable[[], npt.NDArray[Any]]:
+        """The training split's designs, for the memorization metrics.
 
-        Built once per evaluator and shared by every model in a sweep, and
+        Fetched once per evaluator and shared by every model in a sweep, and
         deferred behind a callable so a run that selects no memorization metric
-        never pays for the fetch.
+        never pays for the fetch. The whole split, not a sample of it: a
+        lookup table over the training data must read as distance zero, and a
+        subsample would let most of its designs through.
         """
 
         @functools.cache
-        def corpus() -> npt.NDArray[Any]:
-            return self._draw_copy_corpus()
+        def designs() -> npt.NDArray[Any]:
+            return self._load_train_designs()
 
-        return corpus
+        return designs
 
-    def _draw_copy_corpus(self) -> npt.NDArray[Any]:
-        """Subsample the training split's optimal designs, deterministically.
-
-        Drawn with the spec's own `condition_seed`, so the corpus a model is
-        checked against is as reproducible as the conditions it is scored on --
-        an audit that drew a different corpus could reach a different verdict.
-        """
+    def _load_train_designs(self) -> npt.NDArray[Any]:
+        """The training split's optimal designs, or an empty array for a problem without one."""
         try:
             train = self.problem.dataset["train"]
-            designs = np.asarray(train["optimal_design"])
-        # A problem with no training split simply has no wider corpus; the
-        # reference designs still are one, and they are the case that matters.
+            return np.asarray(train["optimal_design"])
         except (KeyError, TypeError, AttributeError):
             return np.empty((0, 0))
-        size = min(self.spec.copy_corpus_size, len(designs))
-        rng = np.random.default_rng(self.spec.condition_seed)
-        return designs[rng.choice(len(designs), size, replace=False)]
 
     def score(
         self,

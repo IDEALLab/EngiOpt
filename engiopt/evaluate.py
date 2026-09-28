@@ -32,7 +32,6 @@ from engiopt.evaluation.leaderboard import load_from_hub
 from engiopt.evaluation.leaderboard import push_to_hub
 from engiopt.evaluation.registry import METRICS
 from engiopt.evaluation.submission import FLAG_IGNORES_CONDITIONS
-from engiopt.evaluation.submission import FLAG_MEMORIZED
 from engiopt.evaluation.submission import FLAG_UNVERIFIED
 from engiopt.evaluation.submission import integrity_flags
 from engiopt.utils.all_generators import BUILTIN_GENERATORS
@@ -412,12 +411,6 @@ def _print_integrity_warnings(board: pd.DataFrame) -> None:
         if not flags:
             continue
         label = f"{row.get('algo_id')} seed {row.get('seed')}"
-        if FLAG_MEMORIZED in flags:
-            print(
-                f"\n  [{label}] copy_rate={row.get('copy_rate'):.2f}: most of this batch reproduces designs "
-                "from the dataset rather than generating them. Its distribution and performance scores "
-                "measure retrieval, and it will be published but not ranked."
-            )
         if FLAG_IGNORES_CONDITIONS in flags:
             print(
                 f"\n  [{label}] cond_sens=0: output did not change at all when the conditions were shuffled, "

@@ -245,17 +245,11 @@ def test_freeze_spec_carries_every_contract_field(monkeypatch: pytest.MonkeyPatc
         volume_condition="volfrac",
         volfrac_tol=0.05,
         required_seeds=(1, 2, 3, 4),
-        copy_tol=0.02,
-        max_copy_rate=0.25,
-        copy_corpus_size=64,
     )
 
     assert captured["volume_condition"] == "volfrac"
     assert captured["volfrac_tol"] == 0.05
     assert captured["required_seeds"] == (1, 2, 3, 4)
-    assert captured["copy_tol"] == 0.02
-    assert captured["max_copy_rate"] == 0.25
-    assert captured["copy_corpus_size"] == 64
 
 
 def test_freeze_spec_defaults_track_the_dataclass() -> None:
@@ -270,5 +264,5 @@ def test_freeze_spec_defaults_track_the_dataclass() -> None:
     from engiopt.evaluation import spec as spec_mod
 
     parameters = inspect.signature(spec_mod.freeze_spec).parameters
-    for field_name in ("metrics", "volfrac_tol", "required_seeds", "copy_tol", "max_copy_rate", "copy_corpus_size"):
+    for field_name in ("metrics", "volfrac_tol", "required_seeds"):
         assert parameters[field_name].default == getattr(EvalSpec, field_name), field_name

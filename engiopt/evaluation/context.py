@@ -97,13 +97,10 @@ class EvaluationContext:
         objective_weight_condition: Name of a per-sample condition carrying the
             trade-off instead. thermoelastic2d's `weight` splits the first two
             objectives as `(w, 1 - w)`; any remaining objectives get zero.
-        copy_corpus_fn: Returns the designs a model could plausibly have copied
-            -- the dataset designs it may have trained on, plus the reference
-            optima it is being scored against. Deferred behind a callable so
-            that fetching a training split is paid for only when a memorization
-            metric actually runs, and shared across every model in a sweep.
-        copy_tol: RMS per-element distance below which a generated design counts
-            as a copy of something in the corpus.
+        train_designs_fn: Returns the training split's designs. Deferred behind
+            a callable so that fetching the split is paid for only when a
+            memorization metric actually runs, and shared across every model
+            in a sweep.
         resample_permuted: Re-runs the generator on a permutation of the same
             conditions, with the same latent draw. `None` when the comparison is
             unavailable -- an unconditional problem, or a context built directly
@@ -121,8 +118,7 @@ class EvaluationContext:
     sample_seconds: float | None = None
     objective_weights: tuple[float, ...] | None = None
     objective_weight_condition: str | None = None
-    copy_corpus_fn: Callable[[], npt.NDArray[Any]] | None = None
-    copy_tol: float = 0.01
+    train_designs_fn: Callable[[], npt.NDArray[Any]] | None = None
     aggregation: Literal["mean", "median"] = "mean"
     model_params: int | None = None
     """Trainable parameter count of the generator, when it is a network."""
@@ -151,7 +147,7 @@ class EvaluationContext:
         So the choice is declared once (`EvalSpec.aggregation`), recorded in the
         row, and applied here rather than hard-coded metric by metric.
 
-        Rates such as `viol` and `copy_rate` are fractions, not per-design
+        Rates such as `viol` are fractions, not per-design
         averages, and do not pass through this.
 
         Args:
@@ -180,55 +176,32 @@ class EvaluationContext:
 
     @cached_property
     def train_designs(self) -> npt.NDArray[Any] | None:
-        """Flattened training designs, or None when the problem has no training split."""
-        if self.copy_corpus_fn is None:
+        """Flattened training designs, or None when the problem has no training split.
+
+        Fetched once, through `train_designs_fn`, and only when a memorization
+        metric asks. A split whose flattened width does not match the generated
+        designs is treated as absent rather than raising: it makes the check
+        unavailable, which is not a reason to fail an evaluation.
+        """
+        if self.train_designs_fn is None:
             return None
-        train = np.asarray(self.copy_corpus_fn())
+        train = np.asarray(self.train_designs_fn())
         if not len(train):
             return None
         flat = train.reshape(len(train), -1)
         return flat if flat.shape[1] == self.gen_flat.shape[1] else None
 
-    @cached_property
-    def copy_corpus(self) -> npt.NDArray[Any] | None:
-        """Flattened designs a generator could have memorized, or None if there are none.
+    def nearest_train_distance(self, designs: npt.NDArray[Any]) -> npt.NDArray[Any]:
+        """Per-design RMS distance from each of `designs` to the closest training design.
 
-        The scored reference designs are always in here, even though they are
-        also `mmd`'s comparison target. They are the single most attractive
-        thing to copy precisely *because* the protocol is public and names them,
-        so a memorization check that omitted them would miss the easiest attack
-        on this board. `copy_corpus_fn` widens the corpus to the training split
-        the model was actually fitted on.
-
-        Parts whose flattened width does not match the generated designs are
-        dropped rather than raising: a mismatched corpus makes the check
-        unavailable, and that is not a reason to fail an evaluation.
+        Divided by the square root of the design dimension so it reads as a
+        per-element deviation, the same on a 50 by 100 grid as on an 8 by 10 one.
+        Requires `train_designs`.
         """
-        width = self.gen_flat.shape[1]
-        parts = [part for part in (self.ref_flat,) if part.shape[1] == width]
-        if self.copy_corpus_fn is not None:
-            extra = np.asarray(self.copy_corpus_fn())
-            if len(extra):
-                flattened = extra.reshape(len(extra), -1)
-                if flattened.shape[1] == width:
-                    parts.append(flattened)
-        return np.concatenate(parts) if parts else None
-
-    @cached_property
-    def nearest_corpus_distance(self) -> npt.NDArray[Any] | None:
-        """Per-design RMS distance to the closest design in `copy_corpus`.
-
-        Normalized by the square root of the design dimension so the number is a
-        *per-element* deviation. That makes one tolerance meaningful across
-        problems of different resolution, where a raw L2 norm would not be.
-        """
-        corpus = self.copy_corpus
-        if corpus is None or not len(corpus):
-            return None
         from scipy.spatial.distance import cdist
 
-        distances = cdist(self.gen_flat, corpus, "euclidean")
-        return np.asarray(distances.min(axis=1) / np.sqrt(self.gen_flat.shape[1]))
+        distances = cdist(designs, self.train_designs, "euclidean")
+        return np.asarray(distances.min(axis=1) / np.sqrt(designs.shape[1]))
 
     @cached_property
     def permuted_designs(self) -> npt.NDArray[Any] | None:

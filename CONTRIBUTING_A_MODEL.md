@@ -178,7 +178,7 @@ python -m engiopt.evaluate --problem-id beams2d --generators my_model --hf-entit
 The default pass runs every metric that needs no simulator: the set-level
 ones (`mmd`, `coverage`, `vendi`, `dpp`), the per-condition ones
 (`per_condition_distance`, `volume_error`), feasibility (`viol`), the two
-integrity checks (`copy_rate`, `cond_sens`) with `train_distance`, and the cost
+integrity checks (`train_distance`, `cond_sens`), and the cost
 columns. `--include-expensive` adds the columns that re-optimize from each
 generated design — the optimality gaps `iog`, `cog`, `fog` and the
 call-budget metrics `calls_to_settle`, `gap_after_calls`,
@@ -191,9 +191,9 @@ Watch two columns while you develop:
 - **`cond_sens`** should be greater than zero if you declared `conditional =
   True`. Exactly zero means your conditions are not reaching the network, which
   is a wiring bug far more often than a modeling choice.
-- **`copy_rate`** should be near zero. High means your model is reproducing
-  training designs rather than generating, and the board will publish it without
-  ranking it.
+- **`train_distance_ratio`** should be near one. Near zero means your model is
+  reproducing training designs rather than generating; the board shows it and
+  leaves the reading to people.
 
 `cond_sens` draws the batch a second time, under shuffled conditions, so it
 doubles sampling cost. That is nothing for a GAN and noticeable for a diffusion

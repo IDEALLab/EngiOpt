@@ -76,46 +76,29 @@ def dpp(ctx: EvaluationContext) -> float:
     cost="cheap",
     higher_is_better=None,
     pixel_only=True,
+    outputs=("train_distance", "train_distance_ratio"),
 )
-def train_distance(ctx: EvaluationContext) -> float:
+def train_distance(ctx: EvaluationContext) -> dict[str, float]:
     """Per-element distance from each generated design to the nearest design in the training set. Zero means the model reproduces its training data.
 
-    Per-element RMS distance to the closest training design, so one tolerance
-    means the same thing on problems of different resolution. Zero means the
-    model reproduces its training set; large means only that the output is far
-    from the data, which noise also achieves. Read beside `mmd` and `viol`,
-    never alone -- which is why it declares no direction.
+    Two readings of one measurement. `train_distance` is the distance itself,
+    per element, so the number means the same thing on problems of different
+    resolution. `train_distance_ratio` divides it by the same measurement taken
+    on the withheld reference designs, which is how far real optima the model
+    never saw sit from the training sweep: one means the model's designs are as
+    far from its training data as real unseen designs are, near zero means it
+    reproduces the training set, and well above one means further from the data
+    than real designs, which noise also achieves. No tolerance anywhere; the
+    reference designs supply the scale and nothing else.
 
-    NaN when the problem has no training split to compare against.
+    Diagnostic, with no direction: zero is retrieval, but large is not good.
+    Read beside `mmd` and `viol`. NaN when the problem has no training split.
     """
     if ctx.train_designs is None:
-        return float("nan")
-    from scipy.spatial.distance import cdist
-
-    nearest = cdist(ctx.gen_flat, ctx.train_designs).min(axis=1) / np.sqrt(ctx.gen_flat.shape[1])
-    return ctx.reduce(nearest)
-
-
-@register_metric(
-    "copy_rate",
-    family="memorization",
-    cost="cheap",
-    higher_is_better=None,
-    pixel_only=True,
-)
-def copy_rate(ctx: EvaluationContext) -> float:
-    """Fraction of the generated designs within the copy tolerance of a design the model could have seen. One means pure retrieval.
-
-    A design counts as a copy when it sits within `copy_tol` (per-element RMS) of
-    any design in the corpus a model could reproduce: the training split *and*
-    the scored reference optima, because the evaluation protocol is public and a
-    lookup table keyed on the conditions can return exactly those. This is the
-    column that gates a submission. NaN when no corpus is available.
-    """
-    distances = ctx.nearest_corpus_distance
-    if distances is None:
-        return float("nan")
-    return float(np.mean(distances < ctx.copy_tol))
+        return {"train_distance": float("nan"), "train_distance_ratio": float("nan")}
+    generated = ctx.reduce(ctx.nearest_train_distance(ctx.gen_flat))
+    reference = ctx.reduce(ctx.nearest_train_distance(ctx.ref_flat))
+    return {"train_distance": generated, "train_distance_ratio": generated / reference if reference > 0 else float("nan")}
 
 
 # ----------------------------------------------------------------------

@@ -32,7 +32,6 @@ from engiopt.evaluation.registry import METRICS
 from engiopt.evaluation.spec import EvalSpec
 from engiopt.evaluation.submission import admission_problems
 from engiopt.evaluation.submission import FLAG_IGNORES_CONDITIONS
-from engiopt.evaluation.submission import FLAG_MEMORIZED
 from engiopt.evaluation.submission import FLAG_UNVERIFIED
 from engiopt.evaluation.submission import integrity_flags
 from engiopt.evaluation.submission import prepare_submission
@@ -52,58 +51,47 @@ def _context(problem: Any, gen: np.ndarray, ref: np.ndarray, **kwargs: Any) -> E
 
 
 def test_a_generator_returning_the_reference_designs_is_caught(fake_problem: Any) -> None:
-    """The attack this metric exists for.
+    """A lookup table over the training split reads as distance zero.
 
-    A lookup table keyed on the condition vector returns the dataset-optimal
-    design for each scored condition. That is the *definition* of a perfect
-    `mmd` and a near-zero `iog`, so no amount of care in those metrics can
-    distinguish it from a model that learned the problem. This one can.
+    A lookup table keyed on the condition vector returns a training design for
+    each scored condition. Its distribution score is as good as the data's, so
+    no amount of care in those metrics can distinguish it from a model that
+    learned the problem. The distance to the nearest training design can.
     """
     rng = np.random.default_rng(0)
     ref = rng.random((10, *fake_problem.design_space.shape))
-    ctx = _context(fake_problem, ref.copy(), ref)
+    train = rng.random((20, *fake_problem.design_space.shape))
+    ctx = _context(fake_problem, train[:10].copy(), ref, train_designs_fn=lambda: train)
 
-    assert METRICS["copy_rate"].fn(ctx) == 1.0
-    # And it does indeed post a perfect distribution score, which is the point.
-    assert METRICS["mmd"].fn(ctx) == pytest.approx(0.0, abs=1e-9)
+    scores = METRICS["train_distance"].fn(ctx)
+    assert scores["train_distance"] == pytest.approx(0.0, abs=1e-12)
+    assert scores["train_distance_ratio"] == pytest.approx(0.0, abs=1e-9)
 
 
-def test_a_generator_producing_its_own_designs_is_not_flagged(fake_problem: Any) -> None:
-    """The check must not fire on a model that merely resembles the data."""
+def test_a_generator_producing_its_own_designs_reads_like_real_data(fake_problem: Any) -> None:
+    """The ratio's reference point: real unseen designs score about one, and so does a model that generates."""
     rng = np.random.default_rng(1)
     ref = rng.random((10, *fake_problem.design_space.shape))
-    ctx = _context(fake_problem, rng.random((10, *fake_problem.design_space.shape)), ref)
-
-    assert METRICS["copy_rate"].fn(ctx) == 0.0
-
-
-def test_copying_the_training_split_is_caught_too(fake_problem: Any) -> None:
-    """Not only the scored references are copyable -- the whole public dataset is.
-
-    A model that memorized the training split and emits rows of it under
-    whatever conditions it is given never touches a reference design, so a check
-    that looked only at those would report it as perfectly novel.
-    """
-    rng = np.random.default_rng(2)
-    ref = rng.random((6, *fake_problem.design_space.shape))
     train = rng.random((20, *fake_problem.design_space.shape))
-    ctx = _context(fake_problem, train[:6].copy(), ref, copy_corpus_fn=lambda: train)
+    ctx = _context(fake_problem, rng.random((10, *fake_problem.design_space.shape)), ref, train_designs_fn=lambda: train)
 
-    assert METRICS["copy_rate"].fn(ctx) == 1.0
-    assert METRICS["train_distance"].fn(ctx) == pytest.approx(0.0, abs=1e-12)
+    assert METRICS["train_distance"].fn(ctx)["train_distance_ratio"] == pytest.approx(1.0, abs=0.25)
 
 
-def test_near_copies_count_as_copies(fake_problem: Any) -> None:
+def test_near_copies_stay_near_zero(fake_problem: Any) -> None:
     """Adding imperceptible noise to a retrieved design must not launder it.
 
-    Otherwise the defense is defeated by one line, and the tolerance is what
-    decides how much perturbation counts as having generated something.
+    There is no tolerance to game: the distance simply stays tiny, and the ratio
+    against real held-out designs stays near zero.
     """
     rng = np.random.default_rng(3)
     ref = rng.random((8, *fake_problem.design_space.shape))
-    barely_perturbed = ref + rng.normal(scale=1e-4, size=ref.shape)
+    train = rng.random((20, *fake_problem.design_space.shape))
+    barely_perturbed = train[:8] + rng.normal(scale=1e-4, size=(8, *fake_problem.design_space.shape))
 
-    assert METRICS["copy_rate"].fn(_context(fake_problem, barely_perturbed, ref, copy_tol=0.01)) == 1.0
+    scores = METRICS["train_distance"].fn(_context(fake_problem, barely_perturbed, ref, train_designs_fn=lambda: train))
+    assert scores["train_distance"] < 1e-3
+    assert scores["train_distance_ratio"] < 0.01
 
 
 def test_memorization_metrics_are_diagnostic_and_cannot_be_ranked_on() -> None:
@@ -114,7 +102,6 @@ def test_memorization_metrics_are_diagnostic_and_cannot_be_ranked_on() -> None:
     direction would have created a new thing to game while closing an old one.
     """
     assert METRICS["train_distance"].higher_is_better is None
-    assert METRICS["copy_rate"].higher_is_better is None
     with pytest.raises(ValueError, match="diagnostic"):
         rank(pd.DataFrame([{"problem_id": "p", "algo_id": "a", "train_distance": 0.5}]), "train_distance")
 
@@ -243,18 +230,6 @@ def test_every_rejected_row_is_reported_at_once() -> None:
     assert len(excinfo.value.problems_by_row) == 2
 
 
-def test_a_memorizing_row_is_published_but_flagged() -> None:
-    """Published, because hiding it throws away what the board just learned.
-
-    Flagged, because calling it first place would be the board endorsing the
-    thing it exists to detect.
-    """
-    prepared = prepare_submission(pd.DataFrame([_publishable(copy_rate=0.9)]), EvalSpec(problem_id="beams2d"))
-
-    assert len(prepared) == 1
-    assert FLAG_MEMORIZED in prepared["flags"].iloc[0]
-
-
 # ----------------------------------------------------------------------
 # Eligibility: what gets ranked, as distinct from what gets published
 # ----------------------------------------------------------------------
@@ -274,8 +249,8 @@ def test_unverified_rows_are_published_but_never_ranked() -> None:
 
 
 def test_flagged_rows_stay_on_the_board_and_out_of_the_ranking() -> None:
-    """A retrieval system belongs in the table and not in the ordering."""
-    frame = pd.DataFrame([_scored(algo_id="honest"), _scored(algo_id="copier", flags=FLAG_MEMORIZED)])
+    """A model that ignores the conditions it declares belongs in the table and not in the ordering."""
+    frame = pd.DataFrame([_scored(algo_id="honest"), _scored(algo_id="blind", flags=FLAG_IGNORES_CONDITIONS)])
 
     eligible = eligible_rows(frame)
 
@@ -392,28 +367,28 @@ def _generator(problem: Any, produce: Any, *, algo_id: str = "demo", conditional
 
 
 def test_the_evaluator_detects_a_lookup_table_end_to_end(fake_problem: Any) -> None:
-    """The full path: sample, build the corpus, score, and report `copy_rate`.
+    """The full path: sample, fetch the training split, score, and report `train_distance`.
 
-    This is the claim the whole memorization defense rests on, so it is asserted
+    This is the claim the memorization column rests on, so it is asserted
     through the evaluator rather than against a hand-built context -- a metric
     that works but is never fed would pass every other test in this file.
     """
-    spec = EvalSpec(problem_id="fake", n_samples=4, metrics=("mmd", "copy_rate"))
+    spec = EvalSpec(problem_id="fake", n_samples=4, metrics=("mmd", "train_distance"))
     ref = np.stack([np.full(fake_problem.design_space.shape, v) for v in (0.4, 0.5, 0.6, 0.7)])
     conditions = fake_problem.dataset["train"].select([0, 1, 2, 0])
+    train = np.asarray(fake_problem.dataset["train"]["optimal_design"])
 
     evaluator = _evaluator(fake_problem, spec, ref, conditions)
-    lookup_table = _generator(fake_problem, lambda _conditions, _n: ref)
+    lookup_table = _generator(fake_problem, lambda _conditions, n: train[np.arange(n) % len(train)])
     row = evaluator.score(lookup_table)
 
-    assert row["copy_rate"] == 1.0
-    assert row["mmd"] == pytest.approx(0.0, abs=1e-9)
-    assert FLAG_MEMORIZED in integrity_flags(row, spec)
+    assert row["train_distance"] == pytest.approx(0.0, abs=1e-12)
+    assert row["train_distance_ratio"] == pytest.approx(0.0, abs=1e-9)
 
 
 def test_the_evaluator_leaves_an_honest_model_unflagged(fake_problem: Any) -> None:
     """The same path, for a model that generates rather than retrieves."""
-    spec = EvalSpec(problem_id="fake", n_samples=4, metrics=("mmd", "copy_rate", "cond_sens"))
+    spec = EvalSpec(problem_id="fake", n_samples=4, metrics=("mmd", "train_distance", "cond_sens"))
     ref = np.stack([np.full(fake_problem.design_space.shape, v) for v in (0.4, 0.5, 0.6, 0.7)])
     conditions = fake_problem.dataset["train"].select([0, 1, 2, 0])
     rng = np.random.default_rng(7)
@@ -429,9 +404,9 @@ def test_the_evaluator_leaves_an_honest_model_unflagged(fake_problem: Any) -> No
     )
     row = evaluator.score(honest)
 
-    assert row["copy_rate"] == 0.0
+    assert row["train_distance"] > 0.0
     assert row["cond_sens"] > 0
-    assert not [flag for flag in integrity_flags(row, spec) if flag != FLAG_UNVERIFIED]
+    assert not [flag for flag in integrity_flags(row) if flag != FLAG_UNVERIFIED]
 
 
 def test_the_evaluator_catches_a_conditional_model_that_ignores_conditions(fake_problem: Any) -> None:
@@ -472,26 +447,26 @@ def test_the_permuted_re_sample_holds_the_latent_draw_fixed(fake_problem: Any) -
     assert row["cond_sens"] == pytest.approx(0.0, abs=1e-12)
 
 
-def test_the_copy_corpus_is_drawn_once_for_a_whole_sweep(fake_problem: Any) -> None:
-    """Every model in a sweep is checked against the same corpus, fetched once.
+def test_the_training_split_is_fetched_once_for_a_whole_sweep(fake_problem: Any) -> None:
+    """Every model in a sweep is checked against the same training designs, fetched once.
 
-    Both halves matter: a per-model corpus would be slow, and a corpus that
-    varied between models would make their `copy_rate` values incomparable.
+    Both halves matter: a per-model fetch would be slow, and a split that varied
+    between models would make their `train_distance` values incomparable.
     """
-    spec = EvalSpec(problem_id="fake", n_samples=4, metrics=("copy_rate",))
+    spec = EvalSpec(problem_id="fake", n_samples=4, metrics=("train_distance",))
     ref = np.stack([np.full(fake_problem.design_space.shape, v) for v in (0.4, 0.5, 0.6, 0.7)])
     conditions = fake_problem.dataset["train"].select([0, 1, 2, 0])
     evaluator = _evaluator(fake_problem, spec, ref, conditions)
 
     draws = 0
-    original = evaluator._draw_copy_corpus
+    original = evaluator._load_train_designs
 
     def _counting_draw() -> Any:
         nonlocal draws
         draws += 1
         return original()
 
-    evaluator._draw_copy_corpus = _counting_draw  # type: ignore[method-assign]
+    evaluator._load_train_designs = _counting_draw  # type: ignore[method-assign]
     for _ in range(3):
         evaluator.score(_generator(fake_problem, lambda _c, n: np.zeros((n, *fake_problem.design_space.shape))))
 

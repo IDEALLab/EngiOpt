@@ -81,16 +81,19 @@ def test_volume_error_reads_the_material_fraction_off_the_design(fake_problem: A
 # ------------------------------------------------------------- memorization
 
 
-def test_train_distance_and_copy_rate_ask_different_questions(fake_problem: Any, sets: Any) -> None:
+def test_train_distance_reads_zero_for_copies_and_one_for_data_like_designs(fake_problem: Any, sets: Any) -> None:
+    """The ratio's scale comes from the reference designs, so a real held-out design scores about one."""
     gen, ref = sets
     train = np.random.default_rng(3).random((20, *fake_problem.design_space.shape))
-    copies_train = _ctx(fake_problem, train[:12], ref, copy_corpus_fn=lambda: train)
-    assert METRICS["train_distance"].fn(copies_train) == pytest.approx(0.0)
-    assert METRICS["copy_rate"].fn(copies_train) == pytest.approx(1.0)
-    copies_reference = _ctx(fake_problem, ref.copy(), ref, copy_corpus_fn=lambda: train)
-    assert METRICS["train_distance"].fn(copies_reference) > 0.1, "the withheld optima are not training designs"
-    assert METRICS["copy_rate"].fn(copies_reference) == pytest.approx(1.0), "but they are in the copyable corpus"
-    assert np.isnan(METRICS["train_distance"].fn(_ctx(fake_problem, gen, ref)))
+    copies = METRICS["train_distance"].fn(_ctx(fake_problem, train[:12], ref, train_designs_fn=lambda: train))
+    assert copies["train_distance"] == pytest.approx(0.0)
+    assert copies["train_distance_ratio"] == pytest.approx(0.0)
+    fresh = METRICS["train_distance"].fn(_ctx(fake_problem, gen, ref, train_designs_fn=lambda: train))
+    assert fresh["train_distance"] > 0.1
+    assert fresh["train_distance_ratio"] == pytest.approx(1.0, abs=0.25), "as far from training as real unseen designs"
+    without_split = METRICS["train_distance"].fn(_ctx(fake_problem, gen, ref))
+    assert np.isnan(without_split["train_distance"])
+    assert np.isnan(without_split["train_distance_ratio"])
 
 
 # -------------------------------------------------------------- performance

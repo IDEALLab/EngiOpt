@@ -1,12 +1,9 @@
 {
   "condition_digest": "818d93c2a2d5ac25",
   "condition_seed": 1,
-  "copy_corpus_size": 512,
-  "copy_tol": 0.01,
   "dataset_id": "IDEALLab/thermoelastic_2d_v1",
   "dataset_revision": "7d5b4a694bd1a8f3f25fd745ac9f669764e29ea5",
   "engibench_version": "0.2.0+0a028c03d02b",
-  "max_copy_rate": 0.5,
   "metrics": [
     "mmd",
     "coverage",
@@ -17,7 +14,6 @@
     "per_condition_distance",
     "cond_sens",
     "train_distance",
-    "copy_rate",
     "generation_seconds",
     "n_parameters",
     "train_minutes",

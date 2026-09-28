@@ -17,7 +17,6 @@ import pytest
 
 from engiopt.evaluation import verify as verify_mod
 from engiopt.evaluation.spec import EvalSpec
-from engiopt.evaluation.submission import FLAG_MEMORIZED
 from engiopt.evaluation.verify import verify_board
 from engiopt.evaluation.verify import verify_row
 
@@ -38,7 +37,7 @@ class _FakeEvaluator:
 
     def __init__(self, scores: dict[str, Any] | None = None):
         self.spec = EvalSpec(problem_id="beams2d")
-        self.scores = scores or {"mmd": 0.04, "copy_rate": 0.0}
+        self.scores = scores or {"mmd": 0.04, "train_distance": 0.5}
         self.calls = 0
 
     def score(self, generator: Any, *, include_expensive: bool = False) -> dict[str, Any]:
@@ -139,7 +138,7 @@ def test_the_verified_row_carries_the_runners_numbers(loads_fake_generator: None
     fudging. Re-scoring sidesteps that: the runner's number is the number, and
     the submitted one becomes a claim reported as corroborated or not.
     """
-    evaluator = _FakeEvaluator({"mmd": 0.42, "copy_rate": 0.0})
+    evaluator = _FakeEvaluator({"mmd": 0.42, "train_distance": 0.5})
 
     result = verify_row(_row(mmd=0.001), verifier="ideallab-ci", evaluator=evaluator)
 
@@ -172,16 +171,6 @@ def test_a_reproduced_claim_says_so(loads_fake_generator: None) -> None:
 
     assert not result.uncorroborated
     assert "corroborated" in result.detail
-
-
-def test_verification_re_derives_the_flags_rather_than_trusting_them(loads_fake_generator: None) -> None:
-    """A submitter who cleared their own `memorized` flag must not keep it cleared."""
-    evaluator = _FakeEvaluator({"mmd": 0.04, "copy_rate": 0.95})
-
-    result = verify_row(_row(flags=""), verifier="ci", evaluator=evaluator)
-
-    assert result.row is not None
-    assert FLAG_MEMORIZED in result.row["flags"]
 
 
 # ----------------------------------------------------------------------

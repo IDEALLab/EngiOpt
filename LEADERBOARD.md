@@ -132,7 +132,6 @@ to an entry covering every required seed.
 | Flag | Trips when |
 |---|---|
 | `unverified` | No runner has reproduced it yet. |
-| `memorized` | `copy_rate` exceeds the spec's `max_copy_rate`. |
 | `ignores_conditions` | `cond_sens` is exactly zero for a model registered as conditional. |
 
 ## The copying problem
@@ -152,15 +151,17 @@ scored: the whole dataset is public, so a memorizer memorizes all of it.
 
 So the board measures retrieval instead:
 
-- **`copy_rate`** — the share of the batch within `copy_tol` (per-element RMS)
-  of any design the model could have copied: the training split it was fitted
-  on, plus the reference designs the protocol names. This is the one that flags
-  an entry.
 - **`train_distance`** — how far each generated design sits from the nearest
-  design in the training split. Zero means the model reproduces what it was
-  trained on.
+  design in the training split, per element. Zero means the model reproduces
+  what it was trained on.
+- **`train_distance_ratio`** — the same distance divided by what the withheld
+  reference designs score against the training split. One means the model's
+  designs are as far from its training data as real unseen optima are; near zero
+  means retrieval. There is no tolerance to set: the reference designs supply
+  the scale and nothing else.
 
 Both are diagnostic, with no ranking direction, and that is not an oversight.
+No row is flagged for memorization; the columns are read, not enforced.
 Ranking on `train_distance` would put pure noise in first place — zero means retrieval,
 but large means only "unlike the data", which a broken model also achieves.
 Closing one gaming vector by opening another is not progress. The same reasoning

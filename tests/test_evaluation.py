@@ -89,7 +89,7 @@ def test_builtin_metrics_declare_their_cost() -> None:
     judged by a constraint check rather than by running the optimizer.
 
     The two integrity metrics are cheap too, and that matters more than it
-    sounds: `copy_rate` and `cond_sens` decide whether a row can be ranked at all,
+    sounds: `train_distance` and `cond_sens` decide whether a row can be ranked at all,
     so a board that could only afford the cheap pass would otherwise have to
     rank models it had never checked for memorization.
     """
@@ -98,7 +98,6 @@ def test_builtin_metrics_declare_their_cost() -> None:
         "dpp",
         "viol",
         "train_distance",
-        "copy_rate",
         "cond_sens",
         "per_condition_distance",
         "volume_error",

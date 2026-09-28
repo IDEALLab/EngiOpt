@@ -97,7 +97,7 @@ class Board:
             space: `pixel` scores the designs themselves. Any other name in
                 `SPACES` (`pca` is built in) projects every design into that
                 space first and appends `@space` to each column; metrics that
-                need the actual designs (`viol`, `copy_rate`) are skipped there.
+                need the actual designs (`viol`, `train_distance`) are skipped there.
             aggregation: How metrics with one value per design collapse to one number.
             width: Dimension of the space, for spaces that have one (`pca`).
             reference_row: Also score one random half of the reference designs
@@ -124,7 +124,7 @@ class Board:
                 ref_designs=project(np.asarray(against)),
                 sigma=sigma,
                 aggregation=aggregation,
-                copy_corpus_fn=(lambda: np.asarray(self.train)) if self.train is not None else None,
+                train_designs_fn=(lambda: np.asarray(self.train)) if self.train is not None else None,
             )
             row: dict[str, float] = {}
             for spec in chosen:
@@ -160,7 +160,7 @@ class Board:
         """Score loaded models, and optionally saved designs, under one evaluation spec.
 
         The evaluator supplies the spec, the reference designs, the conditions and
-        the copy corpus, so every row is comparable. Live models get every column;
+        the training split, so every row is comparable. Live models get every column;
         `cond_sens` and the cost columns need a model to re-run or inspect, so they
         stay blank for the `designs` rows. The designs each model produced are kept
         on `Board.designs`, so they can be re-scored in another space or saved.

@@ -30,7 +30,7 @@ def test_evaluate_scores_every_model_on_the_cheap_metrics(fake_problem: Any, des
     models, ref, train = designs
     frame = Board(fake_problem, reference=ref, train=train).evaluate(models)
     assert list(frame.index) == ["honest", "copier", REFERENCE_ROW]
-    assert {"mmd", "copy_rate", "viol"} <= set(frame.columns)
+    assert {"mmd", "train_distance", "viol"} <= set(frame.columns)
 
 
 def test_explain_names_a_pick_only_for_ranked_columns(fake_problem: Any, designs: Any) -> None:
@@ -39,7 +39,7 @@ def test_explain_names_a_pick_only_for_ranked_columns(fake_problem: Any, designs
     board.evaluate(models)
     explained = board.explain()
     assert explained.loc["mmd", "picks"] == "copier", "identical sets score the best MMD"
-    assert explained.loc["copy_rate", "picks"] == "", "a diagnostic picks nobody"
+    assert explained.loc["train_distance", "picks"] == "", "a diagnostic picks nobody"
     assert explained.loc["mmd", "question"] == METRICS["mmd"].description
     assert explained.loc["mmd", "real designs score"] == board.frame.loc[REFERENCE_ROW, "mmd"]
 
@@ -59,7 +59,7 @@ def test_rank_refuses_a_diagnostic(fake_problem: Any, designs: Any) -> None:
     board.evaluate(models)
     assert board.rank("mmd").index[0] == "copier"
     with pytest.raises(ValueError, match="diagnostic"):
-        board.rank("copy_rate")
+        board.rank("train_distance")
 
 
 def test_space_is_an_argument_not_a_metric(fake_problem: Any, designs: Any) -> None:
