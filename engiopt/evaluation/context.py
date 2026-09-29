@@ -66,6 +66,11 @@ class OptimizationResults:
 
     trajectories: list[npt.NDArray[Any]] = field(default_factory=list)
     """Per design, the optimality gap at every optimizer call of its re-optimization."""
+    reference_objectives: list[float] = field(default_factory=list)
+    """Per design, the reference optimum's objective for its conditions, scalarized like the gaps.
+
+    The scale a gap is read against: five percent of this is what "near optimal" means.
+    """
     iog: list[float] = field(default_factory=list)
     """Initial optimality gap: how far each generated design starts from the reference optimum."""
     cog: list[float] = field(default_factory=list)
@@ -84,7 +89,8 @@ class EvaluationContext:
         gen_designs: Generated designs, `(n_samples, *design_shape)`.
         ref_designs: Reference (dataset-optimal) designs for the same conditions.
         conditions: The conditions each design was asked to satisfy.
-        sigma: Gaussian-kernel bandwidth for MMD and DPP.
+        sigma: Gaussian-kernel bandwidth for the kernel metrics, or None to use
+            the median pairwise distance of the training designs; see `kernel_sigma`.
         volfrac_tol: Tolerance used by the volume-fraction violation check.
         volume_condition: Name of the condition holding the volume-fraction
             budget a design must hit, when the problem has one. Declared by the
@@ -112,7 +118,7 @@ class EvaluationContext:
     gen_designs: npt.NDArray[Any]
     ref_designs: npt.NDArray[Any]
     conditions: Dataset | None = None
-    sigma: float = 10.0
+    sigma: float | None = None
     volfrac_tol: float = 0.01
     volume_condition: str | None = None
     sample_seconds: float | None = None
@@ -190,6 +196,22 @@ class EvaluationContext:
             return None
         flat = train.reshape(len(train), -1)
         return flat if flat.shape[1] == self.gen_flat.shape[1] else None
+
+    @cached_property
+    def kernel_sigma(self) -> float:
+        """The bandwidth the kernel metrics use.
+
+        The value the spec pinned, if it pinned one. Otherwise the median
+        pairwise distance of the training designs, in whatever space this
+        context holds, so the kernel is neither saturated nor empty on any
+        problem; the reference designs stand in when there is no training split.
+        Subsampled with a fixed seed, so the value is reproducible, and recorded
+        in every published row.
+        """
+        if self.sigma is not None:
+            return float(self.sigma)
+        basis = self.train_designs if self.train_designs is not None and len(self.train_designs) > 1 else self.ref_flat
+        return metrics_mod.compute_median_sigma(basis)
 
     def nearest_train_distance(self, designs: npt.NDArray[Any]) -> npt.NDArray[Any]:
         """Per-design RMS distance from each of `designs` to the closest training design.
@@ -345,6 +367,7 @@ class EvaluationContext:
             results.cog.append(sum(self.scalarize_gap(step_gap, i) for step_gap in gaps))
             results.fog.append(self.scalarize_gap(gaps[-1], i))
             results.trajectories.append(np.asarray([self.scalarize_gap(step_gap, i) for step_gap in gaps], dtype=float))
+            results.reference_objectives.append(self.scalarize_gap(np.asarray(reference_optimum), i))
         return results
 
     @cached_property

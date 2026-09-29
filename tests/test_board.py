@@ -84,7 +84,7 @@ def test_aggregation_is_a_policy_on_the_context(fake_problem: Any) -> None:
 
 
 def test_the_default_bandwidth_lets_diversity_metrics_see_anything(fake_problem: Any, designs: Any) -> None:
-    """At a fixed sigma=10 every design looks identical to every other; the median heuristic does not."""
+    """At a fixed sigma=10 every design looks identical to every other; the training-data median does not."""
     models, ref, _ = designs
     collapsed = np.repeat(models["honest"][:1], len(ref), axis=0)
     frame = Board(fake_problem, reference=ref).evaluate({"collapsed": collapsed, "spread": models["honest"]})

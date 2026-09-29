@@ -181,8 +181,8 @@ ones (`mmd`, `coverage`, `vendi`, `dpp`), the per-condition ones
 integrity checks (`train_distance`, `cond_sens`), and the cost
 columns. `--include-expensive` adds the columns that re-optimize from each
 generated design — the optimality gaps `iog`, `cog`, `fog` and the
-call-budget metrics `calls_to_settle`, `gap_after_calls`,
-`reaches_reference_rate`, `first_call_gain` — which run the optimizer and are
+call-budget metrics `calls_to_near_optimum`, `gap_after_calls` and
+`reaches_reference_rate` — which run the optimizer and are
 slow; leave them off while iterating. `python -m engiopt.evaluate
 --list-metrics` prints the question each column answers.
 

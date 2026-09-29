@@ -35,7 +35,7 @@ if TYPE_CHECKING:
 )
 def mmd(ctx: EvaluationContext) -> float:
     """Distance between the generated designs and the reference optima, compared as whole sets. Zero means the two sets are indistinguishable."""
-    return float(metrics_mod.mmd(ctx.gen_flat, ctx.ref_flat, sigma=ctx.sigma))
+    return float(metrics_mod.mmd(ctx.gen_flat, ctx.ref_flat, sigma=ctx.kernel_sigma))
 
 
 # ----------------------------------------------------------------------
@@ -62,7 +62,7 @@ def dpp(ctx: EvaluationContext) -> float:
     A determinant still rises when a collapsed set is jittered, so it rewards
     noise as diversity. `vendi` does not, and is the column to prefer.
     """
-    return float(metrics_mod.dpp_geometric_mean(ctx.gen_flat, sigma=ctx.sigma))
+    return float(metrics_mod.dpp_geometric_mean(ctx.gen_flat, sigma=ctx.kernel_sigma))
 
 
 # ----------------------------------------------------------------------
@@ -317,7 +317,7 @@ def vendi(ctx: EvaluationContext) -> float:
     jittered, which is why it is the diversity column to prefer.
     Friedman & Dieng (2023), The Vendi Score.
     """
-    return float(metrics_mod.vendi_score(ctx.gen_flat, sigma=ctx.sigma))
+    return float(metrics_mod.vendi_score(ctx.gen_flat, sigma=ctx.kernel_sigma))
 
 
 # ----------------------------------------------------------------------
@@ -330,39 +330,48 @@ def vendi(ctx: EvaluationContext) -> float:
 # below price a defect in the currency an engineer pays, which is optimizer
 # calls, and read the same trajectory `iog`, `cog` and `fog` summarize.
 
-SETTLE_BAND = 0.05
-"""Fraction of a design's own achievable improvement within which it counts as settled."""
+NEAR_OPTIMUM_FRACTION = 0.05
+"""A gap within this fraction of the reference optimum's objective counts as near optimal."""
 
 GAP_AFTER_CALLS = (1, 2, 5, 10)
 """Call budgets to report the remaining gap at: is a defect gone immediately, or not?"""
 
 
-def _calls_to_settle(path: np.ndarray, band: float = SETTLE_BAND) -> float:
-    """Calls after which `path` stays within `band` of its final value (last exit, not first touch)."""
-    if path.size < 2:  # noqa: PLR2004 - a one-step path has no convergence to measure
-        return 0.0
-    final = float(path[-1])
-    reach = max(abs(float(path[0]) - final), abs(final), 1e-12)
-    outside = np.flatnonzero(np.abs(path - final) > band * reach)
+def _calls_to_near_optimum(path: np.ndarray, reference_objective: float) -> float:
+    """Calls after which the gap stays within five percent of the reference optimum's objective.
+
+    Last exit rather than first touch, so a path that dips into the band and
+    leaves again is not credited. Zero means the design was near optimal from
+    its first call. A path still outside the band at its last call never got
+    there and counts as one more than the budget, so a design that never
+    arrives ranks worse than one that is merely slow.
+    """
+    band = NEAR_OPTIMUM_FRACTION * max(abs(reference_objective), 1e-12)
+    if float(path[-1]) > band:
+        return float(path.size + 1)
+    outside = np.flatnonzero(path > band)
     return float(outside[-1] + 1) if outside.size else 0.0
 
 
 @register_metric(
-    "calls_to_settle",
+    "calls_to_near_optimum",
     family="performance",
     cost="expensive",
     higher_is_better=False,
 )
-def calls_to_settle(ctx: EvaluationContext) -> float:
-    """Optimizer calls from each generated design until the objective stays within five percent of its final value. Fewer means a faster settle.
+def calls_to_near_optimum(ctx: EvaluationContext) -> float:
+    """Optimizer calls from each generated design until its gap stays within five percent of the reference optimum for its conditions. Fewer is faster; one more than the budget means it never got there.
 
-    Settling time in the control-theory sense: last exit from the band, so a
-    trajectory that dips in and leaves again is not credited. Zero means the
-    design started already settled. Each call is one simulate plus one
-    sensitivity evaluation.
+    The band is set by the optimum for the design's own conditions, not by the
+    design's starting point, so a design that starts absurdly far away is not
+    credited with settling merely because its first call removed most of the
+    absurdity. Each call is one simulate plus one sensitivity evaluation.
     """
-    paths = ctx.optimization.trajectories
-    return ctx.reduce([_calls_to_settle(path) for path in paths]) if paths else float("nan")
+    results = ctx.optimization
+    if not results.trajectories:
+        return float("nan")
+    calls = [_calls_to_near_optimum(path, scale) for path, scale in zip(results.trajectories, results.reference_objectives)]
+    return ctx.reduce(calls)
 
 
 @register_metric(
@@ -405,30 +414,6 @@ def reaches_reference_rate(ctx: EvaluationContext) -> float:
     if not paths:
         return float("nan")
     return float(np.mean([bool(np.any(np.asarray(path) <= 0.0)) for path in paths]))
-
-
-@register_metric(
-    "first_call_gain",
-    family="performance",
-    cost="expensive",
-    higher_is_better=True,
-)
-def first_call_gain(ctx: EvaluationContext) -> float:
-    """Share of the total re-optimization improvement delivered by the first optimizer call. Near one means the defects clear in a single step.
-
-    Near 1 means the design's defects clear immediately and the rest is
-    refinement; near 0 means the warm start bought nothing. Designs with nothing
-    to gain are skipped, since the fraction is undefined there.
-    """
-    gains = []
-    for path in ctx.optimization.trajectories:
-        if path.size < 2:  # noqa: PLR2004 - needs a first step to have a first-step gain
-            continue
-        achievable = float(path[0]) - float(path[-1])
-        if abs(achievable) < 1e-12:  # noqa: PLR2004 - nothing to improve, so no fraction of it exists
-            continue
-        gains.append((float(path[0]) - float(path[1])) / achievable)
-    return ctx.reduce(gains) if gains else float("nan")
 
 
 # ----------------------------------------------------------------------

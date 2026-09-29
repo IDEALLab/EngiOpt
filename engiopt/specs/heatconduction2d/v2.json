@@ -20,10 +20,9 @@
     "iog",
     "cog",
     "fog",
-    "calls_to_settle",
+    "calls_to_near_optimum",
     "gap_after_calls",
-    "reaches_reference_rate",
-    "first_call_gain"
+    "reaches_reference_rate"
   ],
   "n_samples": 50,
   "notes": "Feasibility = EngiBench constraints plus the volume budget. v2: the full metric suite on the one-decorator contract; `dpp` is now the n-th-root (geometric-mean) form and is not comparable with v1's raw determinant; `novelty` became `train_distance`; aggregation is declared here and recorded in every row.",
@@ -39,7 +38,7 @@
     2,
     3
   ],
-  "sigma": 10.0,
+  "sigma": null,
   "version": "v2",
   "volfrac_tol": 0.01,
   "volume_condition": "volume",

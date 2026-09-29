@@ -111,10 +111,9 @@ def test_builtin_metrics_declare_their_cost() -> None:
         "iog",
         "cog",
         "fog",
-        "calls_to_settle",
+        "calls_to_near_optimum",
         "gap_after_calls",
         "reaches_reference_rate",
-        "first_call_gain",
     }
 
 

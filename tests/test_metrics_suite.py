@@ -96,6 +96,23 @@ def test_train_distance_reads_zero_for_copies_and_one_for_data_like_designs(fake
     assert np.isnan(without_split["train_distance_ratio"])
 
 
+def test_the_bandwidth_defaults_to_the_training_designs_median(fake_problem: Any, sets: Any) -> None:
+    """No number anywhere: the kernel scale comes from the training split, or the reference set without one."""
+    from engiopt import metrics as metrics_mod
+
+    gen, ref = sets
+    train = np.random.default_rng(5).random((30, *fake_problem.design_space.shape))
+    with_train = _ctx(fake_problem, gen, ref, train_designs_fn=lambda: train)
+    assert with_train.kernel_sigma == pytest.approx(metrics_mod.compute_median_sigma(train.reshape(30, -1)))
+    without = _ctx(fake_problem, gen, ref)
+    assert without.kernel_sigma == pytest.approx(metrics_mod.compute_median_sigma(ref.reshape(len(ref), -1)))
+    assert _ctx(fake_problem, gen, ref, sigma=3.0).kernel_sigma == 3.0, "a pinned value wins"
+
+
+def test_the_v2_specs_pin_no_bandwidth() -> None:
+    assert EvalSpec.load("beams2d/v2").sigma is None
+
+
 # -------------------------------------------------------------- performance
 
 
@@ -106,13 +123,23 @@ def trajectories(fake_problem: Any, sets: Any) -> EvaluationContext:
     ctx = _ctx(fake_problem, gen[:2], ref[:2])
     reaches = np.array([5.0, 4.0, 3.0, 0.0, 0.0])
     never = np.array([5.0, 4.0, 3.0, 2.0, 1.0])
-    ctx.__dict__["optimization"] = OptimizationResults(trajectories=[reaches, never])
+    # Reference objective 10 for both, so "near optimal" means a gap of 0.5 or less.
+    ctx.__dict__["optimization"] = OptimizationResults(trajectories=[reaches, never], reference_objectives=[10.0, 10.0])
     return ctx
 
 
-def test_calls_to_settle_is_last_exit_from_the_band(trajectories: EvaluationContext) -> None:
-    # reaches: settles after call 3 (band 0.25 around 0); never: after call 4 (band 0.2 around 1).
-    assert METRICS["calls_to_settle"].fn(trajectories) == pytest.approx(3.5)
+def test_calls_to_near_optimum_is_set_by_the_optimum_not_the_start(trajectories: EvaluationContext) -> None:
+    # reaches: last outside the 0.5 band at call 3; never: still outside at its last call, so budget + 1 = 6.
+    assert METRICS["calls_to_near_optimum"].fn(trajectories) == pytest.approx((3 + 6) / 2)
+
+
+def test_an_absurd_start_is_not_credited_with_settling(fake_problem: Any, sets: Any) -> None:
+    """A gap of 1e9 that drops to 1e3 in one call has not arrived; the old relative band said it had."""
+    gen, ref = sets
+    ctx = _ctx(fake_problem, gen[:1], ref[:1])
+    path = np.array([1e9, 1e3, 1e2, 10.0, 3.0])
+    ctx.__dict__["optimization"] = OptimizationResults(trajectories=[path], reference_objectives=[10.0])
+    assert METRICS["calls_to_near_optimum"].fn(ctx) == pytest.approx(6.0), "never within 0.5 of the optimum"
 
 
 def test_gap_after_calls_carries_a_short_path_forward(trajectories: EvaluationContext) -> None:
@@ -127,13 +154,9 @@ def test_reaches_reference_rate_is_a_rate_not_a_censored_count(trajectories: Eva
     assert METRICS["reaches_reference_rate"].fn(trajectories) == pytest.approx(0.5)
 
 
-def test_first_call_gain_is_the_first_step_over_the_whole_improvement(trajectories: EvaluationContext) -> None:
-    assert METRICS["first_call_gain"].fn(trajectories) == pytest.approx((0.2 + 0.25) / 2)
-
-
 def test_trajectory_metrics_respect_the_aggregation_policy(trajectories: EvaluationContext) -> None:
     trajectories.aggregation = "median"
-    assert METRICS["calls_to_settle"].fn(trajectories) == pytest.approx(3.5), "median of two equals their mean"
+    assert METRICS["calls_to_near_optimum"].fn(trajectories) == pytest.approx(4.5), "median of two equals their mean"
 
 
 # --------------------------------------------------------------------- cost

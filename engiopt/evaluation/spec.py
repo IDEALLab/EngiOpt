@@ -82,7 +82,9 @@ class EvalSpec:
         n_samples: Number of conditions each model is scored on.
         condition_seed: Seed used to draw the test conditions.
         metrics: Metric names to compute, in leaderboard column order.
-        sigma: Gaussian-kernel bandwidth for MMD and DPP.
+        sigma: Gaussian-kernel bandwidth for the kernel metrics. None, the
+            default, means the median pairwise distance of the training designs,
+            resolved at evaluation time and recorded in every row.
         volfrac_tol: Tolerance for the volume-fraction violation check.
         volume_condition: Name of the condition holding the volume-fraction
             budget a design must hit, e.g. beams2d's `volfrac`. Feasibility is
@@ -128,7 +130,7 @@ class EvalSpec:
     n_samples: int = 50
     condition_seed: int = 1
     metrics: tuple[str, ...] = ("mmd", "dpp", "novelty", "cond_sens", "viol", "iog", "cog", "fog")
-    sigma: float = 10.0
+    sigma: float | None = None
     aggregation: Literal["mean", "median"] = "mean"
     """How per-design metrics (`iog`, `cog`, `fog`, distances) collapse to one number.
 
@@ -444,7 +446,7 @@ def freeze_spec(
     n_samples: int = 50,
     condition_seed: int = 1,
     metrics: tuple[str, ...] = EvalSpec.metrics,
-    sigma: float = 10.0,
+    sigma: float | None = None,
     volume_condition: str | None = None,
     volfrac_tol: float = EvalSpec.volfrac_tol,
     objective_weights: tuple[float, ...] | None = None,

@@ -23,7 +23,6 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
-from engiopt import metrics as metrics_mod
 from engiopt.evaluation.context import EvaluationContext
 from engiopt.evaluation.registry import MetricRegistry
 from engiopt.evaluation.registry import METRICS
@@ -64,9 +63,10 @@ class Board:
         reference: The withheld optimal designs the models are scored against.
         train: The training designs, for the memorization metrics. Optional.
         sigma: Kernel bandwidth for the distribution and diversity metrics. None,
-            the default, uses the median pairwise distance of the reference designs
-            in whichever space is being scored, so the kernel is neither saturated
-            nor empty on a problem it has never seen. A published spec pins a value.
+            the default, uses the median pairwise distance of the training designs
+            in whichever space is being scored, or of the reference designs when no
+            training split was given, so the kernel is neither saturated nor empty
+            on a problem it has never seen.
         frame: The most recent `evaluate` result.
         designs: The designs behind each row of `frame`, when the board sampled them itself.
     """
@@ -113,8 +113,6 @@ class Board:
         if space not in SPACES:
             raise KeyError(f"Unknown space {space!r}. Registered: {', '.join(SPACES)}")
         project = SPACES[space](reference, width)
-        reference_codes = project(reference)
-        sigma = self.sigma if self.sigma is not None else metrics_mod.compute_median_sigma(reference_codes)
 
         def score(generated: Any, against: Any, chosen: list[Any]) -> dict[str, float]:
             ctx = EvaluationContext(
@@ -122,9 +120,9 @@ class Board:
                 problem_id=getattr(self.problem, "problem_id", type(self.problem).__name__),
                 gen_designs=project(np.asarray(generated)),
                 ref_designs=project(np.asarray(against)),
-                sigma=sigma,
+                sigma=self.sigma,
                 aggregation=aggregation,
-                train_designs_fn=(lambda: np.asarray(self.train)) if self.train is not None else None,
+                train_designs_fn=(lambda: project(np.asarray(self.train))) if self.train is not None else None,
             )
             row: dict[str, float] = {}
             for spec in chosen:
