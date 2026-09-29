@@ -46,10 +46,12 @@ def register_space(name: str, fit: SpaceFit) -> None:
 
 
 REFERENCE_ROW = "reference (split-half)"
-"""Label of the row scoring half of the reference designs against the other half.
+"""Label of the row scoring one random half of the reference designs against the other.
 
-It is what real, correct designs score on every column, measured on this problem
-rather than assumed, and it is the row every other row is read against.
+A scale reference, not a competitor: it shows where real, correct designs land on
+each column on this problem. It is half the sample size of a model row, and the
+set-level metrics move with sample size, so read it as the order of magnitude a
+good model should reach rather than as a number to beat. Never ranked.
 """
 
 
@@ -61,6 +63,10 @@ class Board:
         problem: The problem the designs answer; needs `design_space` and
             `check_constraints`, which every EngiBench problem has.
         reference: The withheld optimal designs the models are scored against.
+        conditions: The conditions each reference design answers, one row per
+            design, as anything indexable by condition name and by row. Needed
+            by `viol` on problems whose constraint check reads the conditions,
+            and by `volume_error`; without them those columns are blank.
         train: The training designs, for the memorization metrics. Optional.
         sigma: Kernel bandwidth for the distribution and diversity metrics. None,
             the default, uses the median pairwise distance of the training designs
@@ -73,6 +79,7 @@ class Board:
 
     problem: Any
     reference: Any
+    conditions: Any | None = None
     train: Any | None = None
     sigma: float | None = None
     registry: MetricRegistry = field(default_factory=lambda: METRICS)
@@ -120,6 +127,7 @@ class Board:
                 problem_id=getattr(self.problem, "problem_id", type(self.problem).__name__),
                 gen_designs=project(np.asarray(generated)),
                 ref_designs=project(np.asarray(against)),
+                conditions=self.conditions if against is reference else None,
                 sigma=self.sigma,
                 aggregation=aggregation,
                 train_designs_fn=(lambda: project(np.asarray(self.train))) if self.train is not None else None,
@@ -184,7 +192,13 @@ class Board:
             ctx = evaluator.context_for_designs(batch)
             rows[label] = evaluator.score_context(ctx, only=metrics, include_expensive=expensive)
             sampled[label] = ctx.gen_designs
-        board = cls(problem=evaluator.problem, reference=evaluator.resolved.ref_designs, sigma=evaluator.spec.sigma)
+        board = cls(
+            problem=evaluator.problem,
+            reference=evaluator.resolved.ref_designs,
+            conditions=evaluator.resolved.conditions,
+            sigma=evaluator.spec.sigma,
+            registry=evaluator.registry,
+        )
         board.frame = pd.DataFrame.from_dict(rows, orient="index")
         board.designs = sampled
         return board
@@ -234,7 +248,7 @@ class Board:
         Returns:
             One row per column: the question it answers, which way is better, the
             model it picks (blank for a diagnostic, `tie` when the best is shared),
-            and what real designs scored on it.
+            and the split-half reference value when the board carries that row.
         """
         models = self.frame.drop(index=REFERENCE_ROW, errors="ignore")
         rows = {}
@@ -252,7 +266,9 @@ class Board:
                 "question": spec.description,
                 "direction": spec.direction,
                 "picks": picks,
-                "real designs score": self.frame.loc[REFERENCE_ROW, column] if REFERENCE_ROW in self.frame.index else None,
+                "split-half reference": self.frame.loc[REFERENCE_ROW, column]
+                if REFERENCE_ROW in self.frame.index
+                else None,
             }
         return pd.DataFrame.from_dict(rows, orient="index")
 
@@ -270,7 +286,8 @@ class Board:
                 f"{column!r} is a diagnostic: it says whether the other columns mean what they look like. "
                 f"Read it beside them; do not rank on it."
             )
-        return self.frame.sort_values(column, ascending=not spec.higher_is_better)
+        models = self.frame.drop(index=REFERENCE_ROW, errors="ignore")
+        return models.sort_values(column, ascending=not spec.higher_is_better)
 
     def _spec_for(self, column: str) -> Any:
         base = column.split("@", maxsplit=1)[0]

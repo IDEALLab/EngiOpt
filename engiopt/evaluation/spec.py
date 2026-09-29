@@ -129,7 +129,26 @@ class EvalSpec:
     version: str = "v2"
     n_samples: int = 50
     condition_seed: int = 1
-    metrics: tuple[str, ...] = ("mmd", "dpp", "novelty", "cond_sens", "viol", "iog", "cog", "fog")
+    metrics: tuple[str, ...] = (
+        "mmd",
+        "coverage",
+        "vendi",
+        "dpp",
+        "viol",
+        "volume_error",
+        "per_condition_distance",
+        "cond_sens",
+        "train_distance",
+        "generation_seconds",
+        "n_parameters",
+        "train_minutes",
+        "iog",
+        "cog",
+        "fog",
+        "calls_to_near_optimum",
+        "gap_after_calls",
+        "reaches_reference_rate",
+    )
     sigma: float | None = None
     aggregation: Literal["mean", "median"] = "mean"
     """How per-design metrics (`iog`, `cog`, `fog`, distances) collapse to one number.

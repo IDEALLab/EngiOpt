@@ -200,8 +200,9 @@ def test_from_evaluator_scores_models_and_saved_designs_under_one_spec() -> None
 
     class StubEvaluator:
         problem = None
+        registry = METRICS
         spec = type("Spec", (), {"sigma": 1.0})()
-        resolved = type("Resolved", (), {"ref_designs": np.zeros((2, 3))})()
+        resolved = type("Resolved", (), {"ref_designs": np.zeros((2, 3)), "conditions": None})()
 
         def context_for(self, generator: Any) -> StubContext:
             return StubContext(generator)
@@ -219,6 +220,41 @@ def test_from_evaluator_scores_models_and_saved_designs_under_one_spec() -> None
     assert board.rank("mmd").index[0] == "b"
     assert board.frame.loc["probe", "iog"] == 1.0
     assert set(board.designs) == {"a", "b", "probe"}
+
+
+def test_from_evaluator_keeps_the_evaluators_registry() -> None:
+    """A custom metric the evaluator scored must be readable and rankable on the returned board."""
+    from engiopt.evaluation.registry import MetricRegistry
+    from engiopt.evaluation.registry import register_metric
+
+    custom = MetricRegistry()
+    register_metric("mine", family="diversity", cost="cheap", higher_is_better=True, registry=custom)(lambda ctx: 0.0)
+
+    class StubEvaluator:
+        problem = None
+        registry = custom
+        spec = type("Spec", (), {"sigma": None})()
+        resolved = type("Resolved", (), {"ref_designs": np.zeros((2, 3)), "conditions": None})()
+
+        def context_for(self, generator: Any) -> Any:
+            return type("Ctx", (), {"gen_designs": generator})()
+
+        def score_context(self, ctx: Any, *, only: Any, include_expensive: bool) -> dict[str, float]:
+            return {"mine": float(np.mean(ctx.gen_designs))}
+
+    board = Board.from_evaluator(StubEvaluator(), {"a": np.full(3, 0.2), "b": np.full(3, 0.4)})
+    assert board.rank("mine").index[0] == "b"
+    assert "mine" in board.explain().index
+
+
+def test_viol_is_blank_without_the_designs_conditions(fake_problem: Any, sets: Any) -> None:
+    """A constraint check that reads the conditions cannot run on bare designs; blank beats raising."""
+    gen, ref = sets
+    assert np.isnan(METRICS["viol"].fn(_ctx(fake_problem, gen, ref)))
+
+
+def test_the_default_spec_metrics_are_all_registered() -> None:
+    assert set(EvalSpec(problem_id="beams2d").metrics) <= set(METRICS)
 
 
 # -------------------------------------------------------------------- specs

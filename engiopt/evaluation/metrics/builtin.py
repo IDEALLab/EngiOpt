@@ -159,7 +159,7 @@ def cond_sens(ctx: EvaluationContext) -> float:
     higher_is_better=False,
 )
 def viol(ctx: EvaluationContext) -> float:
-    """Fraction of the generated designs that break a constraint of the problem. Zero means every design is admissible.
+    """Fraction of the generated designs that break a constraint of the problem. Zero means every design is admissible; blank when the designs' conditions were not supplied.
 
     Defined for every problem: `problem.check_constraints` always applies, and
     the spec's `volume_condition` adds the volume-fraction budget for problems
@@ -170,6 +170,8 @@ def viol(ctx: EvaluationContext) -> float:
     the optimizer refuses to start from an invalid design, the case where the
     answer matters most.
     """
+    if ctx.conditions is None:
+        return float("nan")
     values = ctx.feasibility
     return float(np.mean(values)) if values else float("nan")
 

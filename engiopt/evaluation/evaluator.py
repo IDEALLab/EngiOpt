@@ -135,7 +135,7 @@ class Evaluator:
         from engibench.utils.all_problems import BUILTIN_PROBLEMS
 
         problem = BUILTIN_PROBLEMS[problem_id]()
-        eval_spec = spec if isinstance(spec, EvalSpec) else EvalSpec.load(spec or f"{problem_id}/v1")
+        eval_spec = spec if isinstance(spec, EvalSpec) else EvalSpec.load(spec or problem_id)
         if eval_spec.problem_id != problem_id:
             raise ValueError(f"Spec is for {eval_spec.problem_id!r}, not {problem_id!r}.")
         device = device or pick_device()
@@ -369,7 +369,6 @@ class Evaluator:
         return order_columns(pd.DataFrame(rows))
 
 
-@functools.cache
 def _parameter_count(generator: Any) -> int | None:
     """Trainable parameters of the generator's network, or None for a model with none."""
     from torch import nn

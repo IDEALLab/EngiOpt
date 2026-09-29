@@ -41,7 +41,7 @@ def test_explain_names_a_pick_only_for_ranked_columns(fake_problem: Any, designs
     assert explained.loc["mmd", "picks"] == "copier", "identical sets score the best MMD"
     assert explained.loc["train_distance", "picks"] == "", "a diagnostic picks nobody"
     assert explained.loc["mmd", "question"] == METRICS["mmd"].description
-    assert explained.loc["mmd", "real designs score"] == board.frame.loc[REFERENCE_ROW, "mmd"]
+    assert explained.loc["mmd", "split-half reference"] == board.frame.loc[REFERENCE_ROW, "mmd"]
 
 
 def test_the_reference_row_is_measured_and_never_picked(fake_problem: Any, designs: Any) -> None:
@@ -50,6 +50,7 @@ def test_the_reference_row_is_measured_and_never_picked(fake_problem: Any, desig
     board.evaluate(models)
     assert board.frame.loc[REFERENCE_ROW, "mmd"] > 0.0, "half of the data against the other half is not identical"
     assert REFERENCE_ROW not in set(board.explain()["picks"])
+    assert REFERENCE_ROW not in board.rank("mmd").index, "a scale reference is never ranked"
     assert REFERENCE_ROW not in board.evaluate(models, reference_row=False).index
 
 
