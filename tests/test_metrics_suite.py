@@ -261,12 +261,12 @@ def test_the_default_spec_metrics_are_all_registered() -> None:
 
 
 @pytest.mark.parametrize("problem_id", ["beams2d", "heatconduction2d", "photonics2d", "thermoelastic2d"])
-def test_every_v2_spec_names_only_registered_metrics(problem_id: str) -> None:
-    spec = EvalSpec.load(f"{problem_id}/v2")
-    assert spec.version == "v2"
+def test_every_current_spec_names_only_registered_metrics(problem_id: str) -> None:
+    spec = EvalSpec.load(problem_id)
     assert spec.aggregation == "mean"
     assert set(spec.metrics) <= set(METRICS)
 
 
-def test_the_default_spec_is_v2() -> None:
+def test_the_default_spec_is_the_newest_committed_for_the_problem() -> None:
     assert EvalSpec.load("beams2d").version == "v2"
+    assert EvalSpec.load("thermoelastic2d").version == "v3"

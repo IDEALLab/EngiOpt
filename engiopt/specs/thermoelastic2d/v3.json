@@ -1,9 +1,10 @@
 {
-  "condition_digest": "818d93c2a2d5ac25",
+  "aggregation": "mean",
+  "condition_digest": "3665bcd7e957e3e6",
   "condition_seed": 1,
-  "dataset_id": "IDEALLab/thermoelastic_2d_v1",
-  "dataset_revision": "7d5b4a694bd1a8f3f25fd745ac9f669764e29ea5",
-  "engibench_version": "0.2.0+0a028c03d02b",
+  "dataset_id": "IDEALLab/thermoelastic_2d_v2",
+  "dataset_revision": "cead6df28c96dabb53dd89714c779dff24bcdf49",
+  "engibench_version": "0.2.0+27055ae4248f",
   "metrics": [
     "mmd",
     "coverage",
@@ -25,7 +26,7 @@
     "reaches_reference_rate"
   ],
   "n_samples": 50,
-  "notes": "Objectives combined per-sample by the `weight` condition. Feasibility = EngiBench constraints plus the volume_fraction_target budget. v2: the full metric suite on the one-decorator contract; `dpp` is now the n-th-root (geometric-mean) form and is not comparable with v1's raw determinant; `novelty` became `train_distance`; aggregation is declared here and recorded in every row.",
+  "notes": "Objectives combined per-sample by the `weight` condition. Feasibility = EngiBench constraints plus the volfrac budget. v3: v2 on thermoelastic_2d_v2, where the volume target is named volfrac and the volume-fraction error is no longer an objective. Same rows, same draws, same metrics as v2.",
   "objective_weight_condition": "weight",
   "objective_weights": null,
   "problem_conditions": [
@@ -33,7 +34,7 @@
     "force_elements_x",
     "force_elements_y",
     "heatsink_elements",
-    "volume_fraction_target",
+    "volfrac",
     "rmin",
     "weight"
   ],
@@ -44,8 +45,7 @@
     3
   ],
   "sigma": null,
-  "version": "v2",
+  "version": "v3",
   "volfrac_tol": 0.01,
-  "volume_condition": "volume_fraction_target",
-  "aggregation": "mean"
+  "volume_condition": "volfrac"
 }

@@ -26,11 +26,11 @@ THERMOELASTIC_KEYS = (
     "force_elements_x",
     "force_elements_y",
     "heatsink_elements",
-    "volume_fraction_target",
+    "volfrac",
     "rmin",
     "weight",
 )
-THERMOELASTIC_SCALARS = ("volume_fraction_target", "rmin", "weight")
+THERMOELASTIC_SCALARS = ("volfrac", "rmin", "weight")
 
 
 class _EchoGenerator(Generator):
