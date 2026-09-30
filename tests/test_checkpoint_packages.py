@@ -214,10 +214,10 @@ def test_condition_schema_travels_with_the_checkpoint(monkeypatch: pytest.Monkey
         seed=1,
         checkpoint_files={},
         run_config={},
-        condition_keys=["volume_fraction_target", "rmin", "weight"],
+        condition_keys=["volfrac", "rmin", "weight"],
     )
 
-    assert uploads[0]["condition_keys"] == ["volume_fraction_target", "rmin", "weight"]
+    assert uploads[0]["condition_keys"] == ["volfrac", "rmin", "weight"]
 
 
 def test_recorded_schema_survives_the_problem_gaining_a_condition(tmp_path: Path) -> None:
