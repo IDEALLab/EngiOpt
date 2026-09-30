@@ -4,7 +4,7 @@ This replaces the per-model `evaluate_*.py` scripts. Those differed only in how
 they loaded and called their model -- which is now the `Generator` contract --
 so everything else lives here once::
 
-    ev = Evaluator.for_problem("beams2d", spec="beams2d/v1")
+    ev = Evaluator.for_problem("beams2d", spec="beams2d/v2")
     row = ev.score(generator)  # cheap metrics only
     board = ev.leaderboard(zoo)  # a DataFrame, one row per model
 """
@@ -128,7 +128,7 @@ class Evaluator:
         Args:
             problem_id: EngiBench problem registry key.
             spec: `"<problem_id>/<version>"`, an `EvalSpec`, or None to load
-                `"<problem_id>/v1"`.
+                the problem's current spec version.
             device: Torch device; auto-selected when omitted.
             registry: Metric registry override, useful in tests.
         """

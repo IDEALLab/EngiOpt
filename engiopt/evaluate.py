@@ -64,7 +64,8 @@ class Args:
     cgan_cnn_2d:023dd1fb gan_cnn_2d:06d9a9a1` asks for exactly the two that
     exist."""
     spec: str | None = None
-    """Eval spec reference, e.g. `beams2d/v1`. Defaults to `<problem_id>/v1`."""
+    """Eval spec reference, e.g. `beams2d/v2`. Omitted, the problem's current spec loads;
+    `EvalSpec.load` owns that default, so the CLI cannot drift from the library."""
     metrics: tuple[str, ...] = ()
     """Metric names; defaults to the spec's list."""
     include_expensive: bool = False
@@ -341,8 +342,7 @@ def main(args: Args) -> int:
     if args.list_generators or args.list_metrics:
         return 0
 
-    spec = args.spec or f"{args.problem_id}/v1"
-    evaluator = Evaluator.for_problem(args.problem_id, spec=spec)
+    evaluator = Evaluator.for_problem(args.problem_id, spec=args.spec)
     print(f"Problem {args.problem_id} | spec {evaluator.spec.version} | n={evaluator.spec.n_samples}")
 
     generators = _load_generators(args, evaluator)

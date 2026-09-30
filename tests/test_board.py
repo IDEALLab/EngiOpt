@@ -84,6 +84,39 @@ def test_aggregation_is_a_policy_on_the_context(fake_problem: Any) -> None:
     assert median_ctx.reduce(values) == pytest.approx(0.1)
 
 
+def test_volume_error_reaches_saved_designs(fake_problem: Any, designs: Any) -> None:
+    """A board told which condition is the volume budget scores it; one not told leaves it blank."""
+    models, ref, _ = designs
+    conditions = {"volfrac": [float(design.mean()) for design in ref]}
+    told = Board(fake_problem, reference=ref, conditions=conditions, volume_condition="volfrac")
+    frame = told.evaluate({"exact": ref.copy()}, metrics=["volume_error"])
+    assert frame.loc["exact", "volume_error"] == pytest.approx(0.0), "designs at their own budgets have no error"
+    untold = Board(fake_problem, reference=ref, conditions=conditions)
+    assert np.isnan(untold.evaluate(models, metrics=["volume_error"]).loc["honest", "volume_error"])
+
+
+def test_every_row_shares_one_inferred_bandwidth(fake_problem: Any, designs: Any, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The split-half row must not size its kernel from its own half.
+
+    Left to each context, a half landing in one cluster of the reference set
+    infers a degenerate bandwidth (the 1e-6 floor), so its kernel columns would
+    differ from the model rows in bandwidth as well as in sample size.
+    """
+    from engiopt import metrics as metrics_mod
+
+    models, ref, _ = designs
+    calls: list[int] = []
+    real = metrics_mod.compute_median_sigma
+
+    def spy(x: Any, y: Any = None) -> float:
+        calls.append(len(x))
+        return real(x, y)
+
+    monkeypatch.setattr(metrics_mod, "compute_median_sigma", spy)
+    Board(fake_problem, reference=ref).evaluate(models)
+    assert calls == [len(ref)], "one bandwidth, sized from the full reference set, for every row"
+
+
 def test_the_default_bandwidth_lets_diversity_metrics_see_anything(fake_problem: Any, designs: Any) -> None:
     """At a fixed sigma=10 every design looks identical to every other; the training-data median does not."""
     models, ref, _ = designs

@@ -3,7 +3,7 @@
     from engiopt.evaluation import Evaluator
     from engiopt.utils.all_generators import BUILTIN_GENERATORS
 
-    ev = Evaluator.for_problem("beams2d", spec="beams2d/v1")
+    ev = Evaluator.for_problem("beams2d", spec="beams2d/v2")
     gen = BUILTIN_GENERATORS["cgan_cnn_2d"].from_pretrained(ev.problem, problem_id="beams2d", seed=1)
     ev.score(gen)
 

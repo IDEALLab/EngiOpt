@@ -201,7 +201,7 @@ def test_from_evaluator_scores_models_and_saved_designs_under_one_spec() -> None
     class StubEvaluator:
         problem = None
         registry = METRICS
-        spec = type("Spec", (), {"sigma": 1.0})()
+        spec = type("Spec", (), {"sigma": 1.0, "volume_condition": "volfrac"})()
         resolved = type("Resolved", (), {"ref_designs": np.zeros((2, 3)), "conditions": None})()
 
         def context_for(self, generator: Any) -> StubContext:
@@ -220,6 +220,7 @@ def test_from_evaluator_scores_models_and_saved_designs_under_one_spec() -> None
     assert board.rank("mmd").index[0] == "b"
     assert board.frame.loc["probe", "iog"] == 1.0
     assert set(board.designs) == {"a", "b", "probe"}
+    assert board.volume_condition == "volfrac", "re-scoring the kept designs must still see the volume budget"
 
 
 def test_from_evaluator_keeps_the_evaluators_registry() -> None:
@@ -233,7 +234,7 @@ def test_from_evaluator_keeps_the_evaluators_registry() -> None:
     class StubEvaluator:
         problem = None
         registry = custom
-        spec = type("Spec", (), {"sigma": None})()
+        spec = type("Spec", (), {"sigma": None, "volume_condition": None})()
         resolved = type("Resolved", (), {"ref_designs": np.zeros((2, 3)), "conditions": None})()
 
         def context_for(self, generator: Any) -> Any:

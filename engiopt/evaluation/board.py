@@ -23,6 +23,7 @@ from typing import Any, Literal
 import numpy as np
 import pandas as pd
 
+from engiopt import metrics as metrics_mod
 from engiopt.evaluation.context import EvaluationContext
 from engiopt.evaluation.registry import MetricRegistry
 from engiopt.evaluation.registry import METRICS
@@ -67,12 +68,18 @@ class Board:
             design, as anything indexable by condition name and by row. Needed
             by `viol` on problems whose constraint check reads the conditions,
             and by `volume_error`; without them those columns are blank.
+        volume_condition: Name of the condition holding the volume-fraction
+            budget, e.g. beams2d's `volfrac`. Declared rather than guessed, as
+            on `EvalSpec`; without it `volume_error` is blank even when the
+            conditions carry a budget.
         train: The training designs, for the memorization metrics. Optional.
         sigma: Kernel bandwidth for the distribution and diversity metrics. None,
             the default, uses the median pairwise distance of the training designs
             in whichever space is being scored, or of the reference designs when no
             training split was given, so the kernel is neither saturated nor empty
-            on a problem it has never seen.
+            on a problem it has never seen. Resolved once per `evaluate`, so every
+            row, the split-half reference row included, is scored under the same
+            bandwidth.
         frame: The most recent `evaluate` result.
         designs: The designs behind each row of `frame`, when the board sampled them itself.
     """
@@ -80,6 +87,7 @@ class Board:
     problem: Any
     reference: Any
     conditions: Any | None = None
+    volume_condition: str | None = None
     train: Any | None = None
     sigma: float | None = None
     registry: MetricRegistry = field(default_factory=lambda: METRICS)
@@ -121,6 +129,15 @@ class Board:
             raise KeyError(f"Unknown space {space!r}. Registered: {', '.join(SPACES)}")
         project = SPACES[space](reference, width)
 
+        # One bandwidth for the whole board. Each context would otherwise infer
+        # its own from whatever reference set it holds, and the split-half row
+        # holds half the designs, so its kernel columns would differ from the
+        # model rows in bandwidth as well as in sample size.
+        sigma = self.sigma
+        if sigma is None:
+            basis = project(np.asarray(self.train if self.train is not None else reference))
+            sigma = metrics_mod.compute_median_sigma(basis.reshape(len(basis), -1))
+
         def score(generated: Any, against: Any, chosen: list[Any]) -> dict[str, float]:
             ctx = EvaluationContext(
                 problem=self.problem,
@@ -128,7 +145,8 @@ class Board:
                 gen_designs=project(np.asarray(generated)),
                 ref_designs=project(np.asarray(against)),
                 conditions=self.conditions if against is reference else None,
-                sigma=self.sigma,
+                volume_condition=self.volume_condition,
+                sigma=sigma,
                 aggregation=aggregation,
                 train_designs_fn=(lambda: project(np.asarray(self.train))) if self.train is not None else None,
             )
@@ -196,6 +214,7 @@ class Board:
             problem=evaluator.problem,
             reference=evaluator.resolved.ref_designs,
             conditions=evaluator.resolved.conditions,
+            volume_condition=evaluator.spec.volume_condition,
             sigma=evaluator.spec.sigma,
             registry=evaluator.registry,
         )
