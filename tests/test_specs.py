@@ -25,12 +25,13 @@ SPEC_PATHS = sorted(SPEC_ROOT.glob("*/*.json"))
 SPEC_IDS = [f"{path.parent.name}/{path.stem}" for path in SPEC_PATHS]
 
 CURRENT_PATHS = [
-    max(SPEC_ROOT.glob(f"{problem}/*.json"), key=lambda p: p.stem)
+    max(SPEC_ROOT.glob(f"{problem}/*.json"), key=lambda p: int(p.stem[1:]))
     for problem in sorted({p.parent.name for p in SPEC_PATHS})
 ]
 CURRENT_IDS = [f"{path.parent.name}/{path.stem}" for path in CURRENT_PATHS]
-"""The newest spec per problem. Older versions stay committed so published rows can
-be read under the protocol that produced them, and may name metrics since retired."""
+"""The newest spec per problem. Older versions stay committed only while the pinned
+EngiBench still reproduces them. When EngiBench redefines a problem, its old spec
+versions are deleted and git history keeps them."""
 
 
 class _FakeConditions:
@@ -108,7 +109,7 @@ def test_digest_changes_when_a_condition_is_renamed() -> None:
     indices = np.array([0, 1, 2])
     designs = np.zeros((3, 4))
     before = _digest(indices, _FakeConditions({"volfrac": [0.3, 0.4, 0.5]}), designs)
-    after = _digest(indices, _FakeConditions({"volume": [0.3, 0.4, 0.5]}), designs)
+    after = _digest(indices, _FakeConditions({"target_volume": [0.3, 0.4, 0.5]}), designs)
     assert before != after
 
 
@@ -169,22 +170,21 @@ def test_a_differently_defined_problem_reports_itself() -> None:
     """
 
     class _Problem:
-        conditions_keys: ClassVar[list[str]] = ["volfrac", "rmin", "weight"]
-        dataset_id = "IDEALLab/thermoelastic_2d_v0"
+        conditions_keys: ClassVar[list[str]] = ["volfrac", "rmin", "forcedist"]
+        dataset_id = "IDEALLab/beams_2d_50_100_v1"
 
     spec = EvalSpec(
-        problem_id="thermoelastic2d",
-        problem_conditions=("volume_fraction_target", "rmin", "weight"),
-        dataset_id="IDEALLab/thermoelastic_2d_v1",
+        problem_id="beams2d",
+        problem_conditions=("volfrac", "rmin"),
+        dataset_id="IDEALLab/beams_2d_50_100_v0",
         engibench_version="0.2.0",
     )
     with pytest.raises(ProblemDefinitionMismatchError) as caught:
         spec.check_problem_definition(_Problem())
 
     message = str(caught.value)
-    assert "volume_fraction_target" in message
-    assert "volfrac" in message
-    assert "thermoelastic_2d_v0" in message
+    assert "forcedist" in message
+    assert "beams_2d_50_100_v1" in message
 
 
 def test_a_matching_problem_definition_passes() -> None:

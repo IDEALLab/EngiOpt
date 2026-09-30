@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, TYPE_CHECKING
 
 import numpy as np
 import pytest
@@ -17,6 +17,9 @@ from engiopt.evaluation.spec import EvalSpec
 
 # Importing the metrics package registers the built-ins.
 import engiopt.evaluation.metrics  # noqa: F401  # isort: skip
+
+if TYPE_CHECKING:
+    from pathlib import Path
 
 
 def _ctx(problem: Any, gen: np.ndarray, ref: np.ndarray, **kwargs: Any) -> EvaluationContext:
@@ -262,12 +265,19 @@ def test_the_default_spec_metrics_are_all_registered() -> None:
 
 
 @pytest.mark.parametrize("problem_id", ["beams2d", "heatconduction2d", "photonics2d", "thermoelastic2d"])
-def test_every_v2_spec_names_only_registered_metrics(problem_id: str) -> None:
-    spec = EvalSpec.load(f"{problem_id}/v2")
-    assert spec.version == "v2"
+def test_every_current_spec_names_only_registered_metrics(problem_id: str) -> None:
+    spec = EvalSpec.load(problem_id)
     assert spec.aggregation == "mean"
     assert set(spec.metrics) <= set(METRICS)
 
 
-def test_the_default_spec_is_v2() -> None:
+def test_the_default_spec_is_the_newest_committed_for_the_problem() -> None:
     assert EvalSpec.load("beams2d").version == "v2"
+    assert EvalSpec.load("thermoelastic2d").version == "v3"
+
+
+def test_the_newest_spec_is_chosen_by_number_and_skips_custom_slices(tmp_path: Path) -> None:
+    """v10 is newer than v9, and a saved custom-slice spec is never the default."""
+    for version in ["v9", "v10", "v10+custom-rows"]:
+        EvalSpec(problem_id="fake2d", version=version).save(root=tmp_path)
+    assert EvalSpec.load("fake2d", root=tmp_path).version == "v10"

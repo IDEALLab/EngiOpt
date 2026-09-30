@@ -187,12 +187,17 @@ class EvalSpec:
 
     @classmethod
     def load(cls, reference: str, *, root: Path | None = None) -> EvalSpec:
-        """Load a spec from `"<problem_id>/<version>"` or a path to a JSON file."""
+        """Load a spec from `"<problem_id>/<version>"`, `"<problem_id>"` for the newest version, or a JSON path."""
         path = Path(reference)
         if path.suffix == ".json" and path.exists():
             return cls(**json.loads(path.read_text()))
         problem_id, _, version = reference.partition("/")
-        version = version or "v2"
+        if not version:
+            # No version given: use the newest spec committed for this problem.
+            # Only plain `v<number>` files count, so a custom-slice spec saved beside them is never picked.
+            numbered = [p for p in (root or SPEC_ROOT).glob(f"{problem_id}/v*.json") if p.stem[1:].isdigit()]
+            committed = sorted(numbered, key=lambda p: int(p.stem[1:]))
+            version = committed[-1].stem if committed else "v1"
         spec_path = (root or SPEC_ROOT) / problem_id / f"{version}.json"
         if not spec_path.exists():
             raise FileNotFoundError(

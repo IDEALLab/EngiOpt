@@ -64,7 +64,7 @@ class Args:
     cgan_cnn_2d:023dd1fb gan_cnn_2d:06d9a9a1` asks for exactly the two that
     exist."""
     spec: str | None = None
-    """Eval spec reference, e.g. `beams2d/v2`. Omitted, the problem's current spec loads;
+    """Eval spec reference, e.g. `beams2d/v2`. Omitted, the newest spec committed for the problem loads;
     `EvalSpec.load` owns that default, so the CLI cannot drift from the library."""
     metrics: tuple[str, ...] = ()
     """Metric names; defaults to the spec's list."""
