@@ -155,7 +155,7 @@ def verify_row(
         }
     )
     uncorroborated = _uncorroborated(row, rescored)
-    rescored["flags"] = ",".join(integrity_flags(rescored, evaluator.spec))
+    rescored["flags"] = ",".join(integrity_flags(rescored))
     return VerificationResult(
         key=key,
         status="verified",

@@ -20,12 +20,9 @@ statement about what the number measures. Only the second scales.
 from __future__ import annotations
 
 import math
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
 import pandas as pd
-
-if TYPE_CHECKING:
-    from engiopt.evaluation.spec import EvalSpec
 
 CHECKPOINT_ADDRESS_COLUMNS = ("checkpoint_repo", "checkpoint_path", "checkpoint_revision", "checkpoint_hash")
 """What it takes to fetch the exact weights a row was scored on.
@@ -38,16 +35,13 @@ anyway.
 IDENTITY_COLUMNS = ("problem_id", "algo_id", "config_fingerprint", "seed", "spec_version")
 """What it takes to know which model, and under which protocol, a row describes."""
 
-FLAG_MEMORIZED = "memorized"
-"""The batch is largely reproductions of designs the model could have seen."""
-
 FLAG_UNVERIFIED = "unverified"
 """No runner has re-fetched these weights and reproduced these numbers."""
 
 FLAG_IGNORES_CONDITIONS = "ignores_conditions"
 """Output did not move when the conditions did, on a problem where they vary."""
 
-DISQUALIFYING_FLAGS = frozenset({FLAG_MEMORIZED, FLAG_IGNORES_CONDITIONS})
+DISQUALIFYING_FLAGS = frozenset({FLAG_IGNORES_CONDITIONS})
 """Flags that keep a row out of the ranking while leaving it on the board.
 
 `unverified` is not among them only because ranking already requires a
@@ -85,7 +79,7 @@ def admission_problems(row: dict[str, Any]) -> list[str]:
     return problems
 
 
-def integrity_flags(row: dict[str, Any], spec: EvalSpec | None = None) -> list[str]:
+def integrity_flags(row: dict[str, Any]) -> list[str]:
     """Which integrity checks this row trips.
 
     Row-level only. Whether an entry covers the seeds the spec requires is a
@@ -93,10 +87,6 @@ def integrity_flags(row: dict[str, Any], spec: EvalSpec | None = None) -> list[s
     ranking instead -- see `leaderboard.rank`.
     """
     flags: list[str] = []
-    copy_rate = as_metric_value(row.get("copy_rate"))
-    max_copy_rate = spec.max_copy_rate if spec is not None else 0.5
-    if copy_rate is not None and copy_rate > max_copy_rate:
-        flags.append(FLAG_MEMORIZED)
     if _declares_conditioning_it_does_not_use(row):
         flags.append(FLAG_IGNORES_CONDITIONS)
     if not bool(row.get("verified")):
@@ -105,7 +95,7 @@ def integrity_flags(row: dict[str, Any], spec: EvalSpec | None = None) -> list[s
 
 
 def _declares_conditioning_it_does_not_use(row: dict[str, Any]) -> bool:
-    """Whether a model claiming to be conditional produced identical output for different briefs.
+    """Whether a model claiming to be conditional produced identical output for different conditions.
 
     No tolerance to choose here, and deliberately so: the comparison holds the
     latent draw fixed, so a model that genuinely reads its conditions cannot
@@ -124,12 +114,11 @@ def _declares_conditioning_it_does_not_use(row: dict[str, Any]) -> bool:
     return generator is not None and generator.conditional
 
 
-def prepare_submission(frame: pd.DataFrame, spec: EvalSpec | None = None) -> pd.DataFrame:
+def prepare_submission(frame: pd.DataFrame) -> pd.DataFrame:
     """Check a table of new rows and stamp their flags, ready to publish.
 
     Args:
         frame: Rows as produced by `Evaluator.leaderboard`.
-        spec: The spec they were scored under, for its gate thresholds.
 
     Returns:
         The same rows with `verified` forced False and `flags` filled in.
@@ -157,7 +146,7 @@ def prepare_submission(frame: pd.DataFrame, spec: EvalSpec | None = None) -> pd.
     prepared["verified"] = False
     prepared["verified_by"] = None
     prepared["verified_at"] = None
-    prepared["flags"] = [",".join(integrity_flags(record, spec)) for record in prepared.to_dict("records")]
+    prepared["flags"] = [",".join(integrity_flags(record)) for record in prepared.to_dict("records")]
     return prepared
 
 

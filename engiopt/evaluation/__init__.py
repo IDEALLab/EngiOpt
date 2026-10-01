@@ -3,7 +3,7 @@
     from engiopt.evaluation import Evaluator
     from engiopt.utils.all_generators import BUILTIN_GENERATORS
 
-    ev = Evaluator.for_problem("beams2d", spec="beams2d/v1")
+    ev = Evaluator.for_problem("beams2d", spec="beams2d/v2")
     gen = BUILTIN_GENERATORS["cgan_cnn_2d"].from_pretrained(ev.problem, problem_id="beams2d", seed=1)
     ev.score(gen)
 
@@ -12,6 +12,7 @@ compares a generated set against a reference set under a problem -- it is a
 property of the comparison, not of the model.
 """
 
+from engiopt.evaluation.board import Board
 from engiopt.evaluation.context import EvaluationContext
 from engiopt.evaluation.context import OptimizationResults
 from engiopt.evaluation.evaluator import Evaluator
@@ -31,6 +32,7 @@ from engiopt.evaluation.spec import ResolvedSpec
 
 __all__ = [
     "METRICS",
+    "Board",
     "EvalSpec",
     "EvaluationContext",
     "Evaluator",

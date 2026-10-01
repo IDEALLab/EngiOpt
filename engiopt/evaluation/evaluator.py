@@ -4,13 +4,14 @@ This replaces the per-model `evaluate_*.py` scripts. Those differed only in how
 they loaded and called their model -- which is now the `Generator` contract --
 so everything else lives here once::
 
-    ev = Evaluator.for_problem("beams2d", spec="beams2d/v1")
+    ev = Evaluator.for_problem("beams2d", spec="beams2d/v2")
     row = ev.score(generator)  # cheap metrics only
     board = ev.leaderboard(zoo)  # a DataFrame, one row per model
 """
 
 from __future__ import annotations
 
+import dataclasses
 from dataclasses import dataclass
 from dataclasses import field
 import datetime as dt
@@ -53,6 +54,7 @@ PROVENANCE_COLUMNS = (
     "spec_version",
     "n_samples",
     "sample_seconds",
+    "kernel_sigma",
     "checkpoint_repo",
     "checkpoint_path",
     "checkpoint_revision",
@@ -126,14 +128,14 @@ class Evaluator:
         Args:
             problem_id: EngiBench problem registry key.
             spec: `"<problem_id>/<version>"`, an `EvalSpec`, or None to load
-                `"<problem_id>/v1"`.
+                the problem's current spec version.
             device: Torch device; auto-selected when omitted.
             registry: Metric registry override, useful in tests.
         """
         from engibench.utils.all_problems import BUILTIN_PROBLEMS
 
         problem = BUILTIN_PROBLEMS[problem_id]()
-        eval_spec = spec if isinstance(spec, EvalSpec) else EvalSpec.load(spec or f"{problem_id}/v1")
+        eval_spec = spec if isinstance(spec, EvalSpec) else EvalSpec.load(spec or problem_id)
         if eval_spec.problem_id != problem_id:
             raise ValueError(f"Spec is for {eval_spec.problem_id!r}, not {problem_id!r}.")
         device = device or pick_device()
@@ -145,6 +147,64 @@ class Evaluator:
             device=device,
             registry=registry or METRICS,
         )
+
+    @classmethod
+    def for_rows(
+        cls,
+        problem_id: str,
+        rows: Any,
+        *,
+        spec: str | EvalSpec | None = None,
+        device: th.device | None = None,
+        registry: MetricRegistry | None = None,
+    ) -> Evaluator:
+        """Build an evaluator whose reference is a dataset slice you chose.
+
+        The spec's own draw is the leaderboard contract: a seeded, digest-checked
+        sample of the test split. This constructor swaps only that draw for the
+        rows you pass, a region of condition space, a harder subset, your own
+        split, and keeps everything else the spec declares: the metric list, the
+        aggregation, the volume condition, the bandwidth policy. Generators are
+        then sampled under exactly these rows' conditions and scored against
+        these rows' optimal designs, one for one.
+
+        Numbers from a custom slice are not leaderboard rows; the frozen draw is
+        what published numbers mean, so the digest is cleared rather than lied to.
+
+        Args:
+            problem_id: EngiBench problem registry key.
+            rows: A dataset slice with an `optimal_design` column and the
+                problem's condition columns, e.g. `problem.dataset["test"].select(...)`.
+            spec: `"<problem_id>/<version>"`, an `EvalSpec`, or None to load
+                the problem's current spec version.
+            device: Torch device; auto-selected when omitted.
+            registry: Metric registry override, useful in tests.
+        """
+        from engibench.utils.all_problems import BUILTIN_PROBLEMS
+        import torch as th
+
+        from engiopt.transforms import get_scalar_condition_keys
+
+        problem = BUILTIN_PROBLEMS[problem_id]()
+        eval_spec = spec if isinstance(spec, EvalSpec) else EvalSpec.load(spec or problem_id)
+        if eval_spec.problem_id != problem_id:
+            raise ValueError(f"Spec is for {eval_spec.problem_id!r}, not {problem_id!r}.")
+        device = device or pick_device()
+        problem.reset(seed=eval_spec.condition_seed)
+
+        available = [key for key in problem.conditions_keys if key in rows.column_names]
+        scalar_keys = get_scalar_condition_keys(problem, rows)
+        conditions = rows.select_columns(available)
+        tensor = th.tensor([conditions[key] for key in scalar_keys], dtype=th.float32, device=device).T
+        resolved = ResolvedSpec(
+            spec=dataclasses.replace(eval_spec, n_samples=len(rows), condition_digest=None),
+            conditions_tensor=tensor,
+            conditions=conditions,
+            ref_designs=np.asarray(rows["optimal_design"]),
+            indices=np.arange(len(rows)),
+            condition_keys=tuple(scalar_keys),
+        )
+        return cls(problem=problem, problem_id=problem_id, resolved=resolved, device=device, registry=registry or METRICS)
 
     @property
     def spec(self) -> EvalSpec:
@@ -163,22 +223,42 @@ class Evaluator:
                 f"{generator.algo_id!r} supports {generator.design_kinds} design spaces, "
                 f"but {self.problem_id!r} is {kind!r}."
             )
-        designs = self._sample(generator)
+        ctx = self.context_for_designs(self._sample(generator))
+        return dataclasses.replace(
+            ctx,
+            sample_seconds=generator.last_sample_seconds,
+            model_params=_parameter_count(generator),
+            train_minutes=getattr(generator, "train_minutes", None),
+            resample_permuted=self._permuted_sampler(generator),
+        )
+
+    def context_for_designs(self, designs: npt.NDArray[Any]) -> EvaluationContext:
+        """Wrap designs that did not come from a generator in the context a generator would get.
+
+        A construction built from the dataset, or a batch saved earlier, is scored
+        against the same reference designs, conditions, kernel bandwidth and copy
+        corpus as a live model, so its row is comparable. Only the metrics that
+        must re-run a model (`cond_sens`) and the cost columns stay blank.
+
+        Args:
+            designs: One design per spec condition, in the spec's condition order.
+
+        Returns:
+            An `EvaluationContext` ready for `score_context`.
+        """
         return EvaluationContext(
             problem=self.problem,
             problem_id=self.problem_id,
-            gen_designs=designs,
+            gen_designs=np.asarray(designs),
             ref_designs=self.resolved.ref_designs,
             conditions=self.resolved.conditions,
             sigma=self.spec.sigma,
             volfrac_tol=self.spec.volfrac_tol,
             volume_condition=self.spec.volume_condition,
-            sample_seconds=generator.last_sample_seconds,
             objective_weights=self.spec.objective_weights,
             objective_weight_condition=self.spec.objective_weight_condition,
-            copy_corpus_fn=self.copy_corpus,
-            copy_tol=self.spec.copy_tol,
-            resample_permuted=self._permuted_sampler(generator),
+            train_designs_fn=self.train_designs,
+            aggregation=self.spec.aggregation,
         )
 
     def _sample(self, generator: Generator, order: npt.NDArray[Any] | None = None) -> npt.NDArray[Any]:
@@ -212,37 +292,29 @@ class Evaluator:
         return lambda order: self._sample(generator, order)
 
     @functools.cached_property
-    def copy_corpus(self) -> Callable[[], npt.NDArray[Any]]:
-        """Designs from the training split that a model on this problem could have memorized.
+    def train_designs(self) -> Callable[[], npt.NDArray[Any]]:
+        """The training split's designs, for the memorization metrics.
 
-        Built once per evaluator and shared by every model in a sweep, and
+        Fetched once per evaluator and shared by every model in a sweep, and
         deferred behind a callable so a run that selects no memorization metric
-        never pays for the fetch.
+        never pays for the fetch. The whole split, not a sample of it: a
+        lookup table over the training data must read as distance zero, and a
+        subsample would let most of its designs through.
         """
 
         @functools.cache
-        def corpus() -> npt.NDArray[Any]:
-            return self._draw_copy_corpus()
+        def designs() -> npt.NDArray[Any]:
+            return self._load_train_designs()
 
-        return corpus
+        return designs
 
-    def _draw_copy_corpus(self) -> npt.NDArray[Any]:
-        """Subsample the training split's optimal designs, deterministically.
-
-        Drawn with the spec's own `condition_seed`, so the corpus a model is
-        checked against is as reproducible as the conditions it is scored on --
-        an audit that drew a different corpus could reach a different verdict.
-        """
+    def _load_train_designs(self) -> npt.NDArray[Any]:
+        """The training split's optimal designs, or an empty array for a problem without one."""
         try:
             train = self.problem.dataset["train"]
-            designs = np.asarray(train["optimal_design"])
-        # A problem with no training split simply has no wider corpus; the
-        # reference designs still are one, and they are the case that matters.
+            return np.asarray(train["optimal_design"])
         except (KeyError, TypeError, AttributeError):
             return np.empty((0, 0))
-        size = min(self.spec.copy_corpus_size, len(designs))
-        rng = np.random.default_rng(self.spec.condition_seed)
-        return designs[rng.choice(len(designs), size, replace=False)]
 
     def score(
         self,
@@ -302,7 +374,9 @@ class Evaluator:
             "seed": getattr(generator, "seed", None),
             "spec_version": self.spec.version,
             "n_samples": ctx.n_samples,
+            "aggregation": ctx.aggregation,
             "sample_seconds": ctx.sample_seconds,
+            "kernel_sigma": ctx.kernel_sigma,
             "checkpoint_repo": getattr(generator, "checkpoint_repo", None),
             "checkpoint_path": getattr(generator, "checkpoint_path", None),
             "checkpoint_revision": getattr(generator, "checkpoint_revision", None),
@@ -353,7 +427,16 @@ class Evaluator:
         return order_columns(pd.DataFrame(rows))
 
 
-@functools.cache
+def _parameter_count(generator: Any) -> int | None:
+    """Trainable parameters of the generator's network, or None for a model with none."""
+    from torch import nn
+
+    modules = [m for m in getattr(generator, "__dict__", {}).values() if isinstance(m, nn.Module)]
+    if not modules:
+        return None
+    return sum(p.numel() for module in modules for p in module.parameters() if p.requires_grad)
+
+
 def engibench_version() -> str:
     """Which EngiBench *ran* this evaluation, however it was installed.
 

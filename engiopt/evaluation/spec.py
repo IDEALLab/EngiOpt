@@ -18,7 +18,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
-from typing import Any, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 import numpy as np
 import torch as th
@@ -82,7 +82,9 @@ class EvalSpec:
         n_samples: Number of conditions each model is scored on.
         condition_seed: Seed used to draw the test conditions.
         metrics: Metric names to compute, in leaderboard column order.
-        sigma: Gaussian-kernel bandwidth for MMD and DPP.
+        sigma: Gaussian-kernel bandwidth for the kernel metrics. None, the
+            default, means the median pairwise distance of the training designs,
+            resolved at evaluation time and recorded in every row.
         volfrac_tol: Tolerance for the volume-fraction violation check.
         volume_condition: Name of the condition holding the volume-fraction
             budget a design must hit, e.g. beams2d's `volfrac`. Feasibility is
@@ -101,16 +103,6 @@ class EvalSpec:
             submitter running one seed -- it does not stop them running twenty
             and publishing their best three, which produces a median over a
             maximum. Fixing *which* seeds removes the choice.
-        copy_tol: Per-element RMS distance below which a generated design counts
-            as a copy of a design the model could have memorized. See the
-            `novelty` metric.
-        max_copy_rate: The share of copied designs above which an entry is
-            flagged and left out of the ranking. Set to 1.0 to disable the gate
-            and report `copy_rate` without acting on it.
-        copy_corpus_size: How many dataset designs to draw as the memorization
-            corpus. The scored reference designs are always included on top of
-            these, since the public spec names them and they are the most
-            attractive thing to copy.
         condition_digest: Hash of the drawn indices, condition values, and
             reference designs. Recomputed at evaluation time and compared, so an
             upstream dataset change is caught instead of silently shifting every
@@ -134,19 +126,41 @@ class EvalSpec:
     """
 
     problem_id: str
-    version: str = "v1"
+    version: str = "v2"
     n_samples: int = 50
     condition_seed: int = 1
-    metrics: tuple[str, ...] = ("mmd", "dpp", "novelty", "cond_sens", "viol", "iog", "cog", "fog")
-    sigma: float = 10.0
+    metrics: tuple[str, ...] = (
+        "mmd",
+        "coverage",
+        "vendi",
+        "dpp",
+        "viol",
+        "volume_error",
+        "per_condition_distance",
+        "cond_sens",
+        "train_distance",
+        "generation_seconds",
+        "n_parameters",
+        "train_minutes",
+        "iog",
+        "cog",
+        "fog",
+        "calls_to_near_optimum",
+        "gap_after_calls",
+        "reaches_reference_rate",
+    )
+    sigma: float | None = None
+    aggregation: Literal["mean", "median"] = "mean"
+    """How per-design metrics (`iog`, `cog`, `fog`, distances) collapse to one number.
+
+    Changing it changes what every performance column means, so it is part of
+    the frozen spec and is recorded in every row, not a flag on the run.
+    """
     volfrac_tol: float = 0.01
     volume_condition: str | None = None
     objective_weights: tuple[float, ...] | None = None
     objective_weight_condition: str | None = None
     required_seeds: tuple[int, ...] = (1, 2, 3)
-    copy_tol: float = 0.01
-    max_copy_rate: float = 0.5
-    copy_corpus_size: int = 512
     condition_digest: str | None = None
     dataset_id: str | None = None
     dataset_revision: str | None = None
@@ -178,7 +192,7 @@ class EvalSpec:
         if path.suffix == ".json" and path.exists():
             return cls(**json.loads(path.read_text()))
         problem_id, _, version = reference.partition("/")
-        version = version or "v1"
+        version = version or "v2"
         spec_path = (root or SPEC_ROOT) / problem_id / f"{version}.json"
         if not spec_path.exists():
             raise FileNotFoundError(
@@ -451,15 +465,12 @@ def freeze_spec(
     n_samples: int = 50,
     condition_seed: int = 1,
     metrics: tuple[str, ...] = EvalSpec.metrics,
-    sigma: float = 10.0,
+    sigma: float | None = None,
     volume_condition: str | None = None,
     volfrac_tol: float = EvalSpec.volfrac_tol,
     objective_weights: tuple[float, ...] | None = None,
     objective_weight_condition: str | None = None,
     required_seeds: tuple[int, ...] = EvalSpec.required_seeds,
-    copy_tol: float = EvalSpec.copy_tol,
-    max_copy_rate: float = EvalSpec.max_copy_rate,
-    copy_corpus_size: int = EvalSpec.copy_corpus_size,
     notes: str = "",
 ) -> Path:
     """Draw a problem's test conditions once and commit them as a spec.
@@ -493,9 +504,6 @@ def freeze_spec(
         objective_weights=objective_weights,
         objective_weight_condition=objective_weight_condition,
         required_seeds=required_seeds,
-        copy_tol=copy_tol,
-        max_copy_rate=max_copy_rate,
-        copy_corpus_size=copy_corpus_size,
         notes=notes,
     ).freeze(problem)
     path = spec.save()

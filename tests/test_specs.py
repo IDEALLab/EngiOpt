@@ -24,6 +24,14 @@ from engiopt.evaluation.spec import SPEC_ROOT
 SPEC_PATHS = sorted(SPEC_ROOT.glob("*/*.json"))
 SPEC_IDS = [f"{path.parent.name}/{path.stem}" for path in SPEC_PATHS]
 
+CURRENT_PATHS = [
+    max(SPEC_ROOT.glob(f"{problem}/*.json"), key=lambda p: p.stem)
+    for problem in sorted({p.parent.name for p in SPEC_PATHS})
+]
+CURRENT_IDS = [f"{path.parent.name}/{path.stem}" for path in CURRENT_PATHS]
+"""The newest spec per problem. Older versions stay committed so published rows can
+be read under the protocol that produced them, and may name metrics since retired."""
+
 
 class _FakeConditions:
     """A stand-in for the sampled-conditions dataset the digest hashes."""
@@ -50,9 +58,9 @@ def test_committed_spec_loads_and_round_trips(path: Any) -> None:
     assert dataclasses.asdict(spec) == dataclasses.asdict(EvalSpec(**json.loads(path.read_text())))
 
 
-@pytest.mark.parametrize("path", SPEC_PATHS, ids=SPEC_IDS)
+@pytest.mark.parametrize("path", CURRENT_PATHS, ids=CURRENT_IDS)
 def test_committed_spec_requests_registered_metrics(path: Any) -> None:
-    """A spec asking for a metric nobody registered would fail at evaluation time."""
+    """A current spec asking for a metric nobody registered would fail at evaluation time."""
     for metric in EvalSpec.load(str(path)).metrics:
         assert metric in METRICS, f"{path.name} requests unregistered metric {metric!r}"
 
@@ -237,17 +245,11 @@ def test_freeze_spec_carries_every_contract_field(monkeypatch: pytest.MonkeyPatc
         volume_condition="volfrac",
         volfrac_tol=0.05,
         required_seeds=(1, 2, 3, 4),
-        copy_tol=0.02,
-        max_copy_rate=0.25,
-        copy_corpus_size=64,
     )
 
     assert captured["volume_condition"] == "volfrac"
     assert captured["volfrac_tol"] == 0.05
     assert captured["required_seeds"] == (1, 2, 3, 4)
-    assert captured["copy_tol"] == 0.02
-    assert captured["max_copy_rate"] == 0.25
-    assert captured["copy_corpus_size"] == 64
 
 
 def test_freeze_spec_defaults_track_the_dataclass() -> None:
@@ -262,5 +264,5 @@ def test_freeze_spec_defaults_track_the_dataclass() -> None:
     from engiopt.evaluation import spec as spec_mod
 
     parameters = inspect.signature(spec_mod.freeze_spec).parameters
-    for field_name in ("metrics", "volfrac_tol", "required_seeds", "copy_tol", "max_copy_rate", "copy_corpus_size"):
+    for field_name in ("metrics", "volfrac_tol", "required_seeds"):
         assert parameters[field_name].default == getattr(EvalSpec, field_name), field_name
