@@ -131,6 +131,10 @@ class FakeDataset:
         order = list(indices)
         return FakeDataset({name: [values[i] for i in order] for name, values in self._columns.items()})
 
+    def select_columns(self, names: Any) -> FakeDataset:
+        """Keep only the named columns, as `datasets.Dataset.select_columns` does."""
+        return FakeDataset({name: self._columns[name] for name in names})
+
 
 @pytest.fixture
 def mixed_condition_dataset() -> FakeDataset:

@@ -46,6 +46,47 @@ def register_space(name: str, fit: SpaceFit) -> None:
     SPACES[name] = fit
 
 
+DESIGN_COLUMN = "optimal_design"
+"""The dataset column holding each row's optimal design, EngiBench's convention.
+A dataset slice passed as `Board(reference=...)` is split on it: this column
+becomes the reference designs, the remaining columns become the conditions."""
+
+
+class ConditionTable:
+    """A dict of condition columns, readable by column name and by row.
+
+    Metrics ask two different questions of the conditions. `volume_error` wants
+    a whole column at once (`table["volfrac"]`); `viol` wants one design's full
+    brief (`table[0]`). A HuggingFace dataset answers both, a plain dict only
+    the first, so the board wraps dicts here rather than asking every notebook
+    to build a dataset.
+    """
+
+    def __init__(self, columns: Mapping[str, Any]):
+        self.columns = dict(columns)
+
+    def __getitem__(self, key: Any) -> Any:
+        if isinstance(key, str):
+            return self.columns[key]
+        return {name: column[key] for name, column in self.columns.items()}
+
+    def __len__(self) -> int:
+        return len(next(iter(self.columns.values())))
+
+
+def _as_condition_table(conditions: Any) -> Any:
+    """Give loose condition inputs the row access the metrics need.
+
+    A dict of columns or a DataFrame is wrapped; anything else, such as a
+    HuggingFace dataset or None, already behaves and passes through.
+    """
+    if isinstance(conditions, pd.DataFrame):
+        conditions = {name: conditions[name].tolist() for name in conditions.columns}
+    if isinstance(conditions, Mapping):
+        return ConditionTable(conditions)
+    return conditions
+
+
 REFERENCE_ROW = "reference (split-half)"
 """Label of the row scoring one random half of the reference designs against the other.
 
@@ -63,11 +104,17 @@ class Board:
     Attributes:
         problem: The problem the designs answer; needs `design_space` and
             `check_constraints`, which every EngiBench problem has.
-        reference: The withheld optimal designs the models are scored against.
+        reference: The withheld optimal designs the models are scored against,
+            as an array of designs, or as the test rows themselves: a dataset
+            slice carrying an `optimal_design` column. The slice is split on
+            construction, designs out of that column and conditions out of the
+            rest, so design `i` and its brief cannot fall out of alignment.
         conditions: The conditions each reference design answers, one row per
-            design, as anything indexable by condition name and by row. Needed
-            by `viol` on problems whose constraint check reads the conditions,
-            and by `volume_error`; without them those columns are blank.
+            design: a dict of columns, a DataFrame, or anything already
+            indexable by condition name and by row, such as a dataset slice.
+            Needed by `viol` on problems whose constraint check reads the
+            conditions, and by `volume_error`; without them those columns are
+            blank. Derived automatically when `reference` is a dataset slice.
         volume_condition: Name of the condition holding the volume-fraction
             budget, e.g. beams2d's `volfrac`. Declared rather than guessed, as
             on `EvalSpec`; without it `volume_error` is blank even when the
@@ -93,6 +140,23 @@ class Board:
     registry: MetricRegistry = field(default_factory=lambda: METRICS)
     frame: pd.DataFrame = field(default_factory=pd.DataFrame)
     designs: dict[str, Any] = field(default_factory=dict)
+
+    def __post_init__(self) -> None:
+        """Split a dataset-slice reference, wrap loose conditions, check alignment."""
+        if hasattr(self.reference, "column_names") and DESIGN_COLUMN in self.reference.column_names:
+            rows = self.reference
+            self.reference = np.asarray(rows[DESIGN_COLUMN])
+            if self.conditions is None:
+                briefs = {name: rows[name] for name in rows.column_names if name != DESIGN_COLUMN}
+                self.conditions = ConditionTable(briefs)
+        self.conditions = _as_condition_table(self.conditions)
+        if self.conditions is not None and hasattr(self.conditions, "__len__"):
+            n_designs = len(np.asarray(self.reference))
+            if len(self.conditions) != n_designs:
+                raise ValueError(
+                    f"{len(self.conditions)} condition rows for {n_designs} reference designs. "
+                    f"Conditions do not select designs; row i must be the brief design i answers."
+                )
 
     def evaluate(
         self,
@@ -231,6 +295,7 @@ class Board:
         designs: Mapping[str, Any] | None = None,
         seed: int = 1,
         spec: Any = None,
+        rows: Any = None,
         expensive: bool = False,
     ) -> Board:
         """Pull published checkpoints by name and score them: the workshop in one call.
@@ -243,6 +308,9 @@ class Board:
             designs: Extra rows of saved designs, one per spec condition; see `from_evaluator`.
             seed: Training seed of the checkpoints to load.
             spec: Spec reference such as `"beams2d/v2"`, or an `EvalSpec`; defaults to the current spec.
+            rows: A dataset slice to score against instead of the spec's drawn
+                conditions; see `Evaluator.for_rows`. None, the default, keeps
+                the spec's seeded 50-row draw from the test split.
             expensive: Whether to run the simulator-backed metrics.
 
         Returns:
@@ -251,7 +319,10 @@ class Board:
         from engiopt.evaluation.evaluator import Evaluator
         from engiopt.utils.all_generators import BUILTIN_GENERATORS
 
-        evaluator = Evaluator.for_problem(problem_id, spec=spec)
+        if rows is not None:
+            evaluator = Evaluator.for_rows(problem_id, rows, spec=spec)
+        else:
+            evaluator = Evaluator.for_problem(problem_id, spec=spec)
         requested = models if isinstance(models, Mapping) else dict.fromkeys(models)
         generators = {
             name: BUILTIN_GENERATORS[name].from_pretrained(

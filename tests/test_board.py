@@ -95,6 +95,45 @@ def test_volume_error_reaches_saved_designs(fake_problem: Any, designs: Any) -> 
     assert np.isnan(untold.evaluate(models, metrics=["volume_error"]).loc["honest", "volume_error"])
 
 
+def test_dict_conditions_survive_a_full_evaluate(fake_problem: Any, designs: Any) -> None:
+    """A plain dict of columns must feed row-reading metrics too.
+
+    `viol` asks for one design's brief at a time (`conditions[0]`), which a bare
+    dict answers with `KeyError: 0`. The board wraps the dict, so the same input
+    that fed `volume_error` survives a default evaluate.
+    """
+    models, ref, _ = designs
+    conditions = {"volfrac": [float(design.mean()) for design in ref]}
+    board = Board(fake_problem, reference=ref, conditions=conditions, volume_condition="volfrac")
+    frame = board.evaluate(models)
+    assert not np.isnan(frame.loc["honest", "viol"]), "the row-access path must work, not just the column path"
+    assert not np.isnan(frame.loc["honest", "volume_error"])
+
+
+def test_a_dataset_slice_is_designs_and_briefs_at_once(fake_problem: Any) -> None:
+    """Passing the test rows keeps design i and brief i aligned by construction.
+
+    The briefs already sit beside the optimal designs in the dataset; slicing
+    the designs into an array is what loses them. Handing the board the rows
+    themselves means nothing is lost and nothing can be misaligned.
+    """
+    rows = fake_problem.dataset["train"]
+    board = Board(fake_problem, reference=rows, volume_condition="volfrac")
+    assert board.reference.shape == (3, 8, 10), "the design column became the reference array"
+    assert board.conditions is not None
+    assert board.conditions["volfrac"] == [0.5, 0.5, 0.5], "the remaining columns became the briefs"
+    frame = board.evaluate({"exact": board.reference.copy()}, metrics=["volume_error"])
+    # The dataset's designs are flat fields at 0.1, 0.2 and 0.3 against a 0.5 budget.
+    assert frame.loc["exact", "volume_error"] == pytest.approx(np.mean([0.4, 0.3, 0.2]))
+
+
+def test_misaligned_conditions_are_refused(fake_problem: Any, designs: Any) -> None:
+    """Conditions are an answer key, not a filter; a short one is wrong labels, not a subset."""
+    _, ref, _ = designs
+    with pytest.raises(ValueError, match="do not select"):
+        Board(fake_problem, reference=ref, conditions={"volfrac": [0.2, 0.3]})
+
+
 def test_every_row_shares_one_inferred_bandwidth(fake_problem: Any, designs: Any, monkeypatch: pytest.MonkeyPatch) -> None:
     """The split-half row must not size its kernel from its own half.
 

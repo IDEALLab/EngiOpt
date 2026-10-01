@@ -148,6 +148,64 @@ class Evaluator:
             registry=registry or METRICS,
         )
 
+    @classmethod
+    def for_rows(
+        cls,
+        problem_id: str,
+        rows: Any,
+        *,
+        spec: str | EvalSpec | None = None,
+        device: th.device | None = None,
+        registry: MetricRegistry | None = None,
+    ) -> Evaluator:
+        """Build an evaluator whose reference is a dataset slice you chose.
+
+        The spec's own draw is the leaderboard contract: a seeded, digest-checked
+        sample of the test split. This constructor swaps only that draw for the
+        rows you pass, a region of condition space, a harder subset, your own
+        split, and keeps everything else the spec declares: the metric list, the
+        aggregation, the volume condition, the bandwidth policy. Generators are
+        then sampled under exactly these rows' conditions and scored against
+        these rows' optimal designs, one for one.
+
+        Numbers from a custom slice are not leaderboard rows; the frozen draw is
+        what published numbers mean, so the digest is cleared rather than lied to.
+
+        Args:
+            problem_id: EngiBench problem registry key.
+            rows: A dataset slice with an `optimal_design` column and the
+                problem's condition columns, e.g. `problem.dataset["test"].select(...)`.
+            spec: `"<problem_id>/<version>"`, an `EvalSpec`, or None to load
+                the problem's current spec version.
+            device: Torch device; auto-selected when omitted.
+            registry: Metric registry override, useful in tests.
+        """
+        from engibench.utils.all_problems import BUILTIN_PROBLEMS
+        import torch as th
+
+        from engiopt.transforms import get_scalar_condition_keys
+
+        problem = BUILTIN_PROBLEMS[problem_id]()
+        eval_spec = spec if isinstance(spec, EvalSpec) else EvalSpec.load(spec or problem_id)
+        if eval_spec.problem_id != problem_id:
+            raise ValueError(f"Spec is for {eval_spec.problem_id!r}, not {problem_id!r}.")
+        device = device or pick_device()
+        problem.reset(seed=eval_spec.condition_seed)
+
+        available = [key for key in problem.conditions_keys if key in rows.column_names]
+        scalar_keys = get_scalar_condition_keys(problem, rows)
+        conditions = rows.select_columns(available)
+        tensor = th.tensor([conditions[key] for key in scalar_keys], dtype=th.float32, device=device).T
+        resolved = ResolvedSpec(
+            spec=dataclasses.replace(eval_spec, n_samples=len(rows), condition_digest=None),
+            conditions_tensor=tensor,
+            conditions=conditions,
+            ref_designs=np.asarray(rows["optimal_design"]),
+            indices=np.arange(len(rows)),
+            condition_keys=tuple(scalar_keys),
+        )
+        return cls(problem=problem, problem_id=problem_id, resolved=resolved, device=device, registry=registry or METRICS)
+
     @property
     def spec(self) -> EvalSpec:
         """The frozen evaluation contract in force."""
