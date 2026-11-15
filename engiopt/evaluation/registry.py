@@ -1,25 +1,31 @@
 """Registry of evaluation metrics.
 
-A metric belongs to the *comparison* (generated designs vs a reference set under
-a problem), not to a model -- so metrics are registered functions taking an
-`EvaluationContext`, rather than methods on a generator.
+A metric is a function of an `EvaluationContext` -- the generated designs, the
+reference designs they are scored against, and what the spec says about how to
+read them -- plus a short declaration of what the number means::
 
-Registering a metric is one decorated function::
+    @register_metric("viol", family="feasibility", cost="cheap", higher_is_better=False)
+    def viol(ctx: EvaluationContext) -> float:
+        \"\"\"What fraction of the generated designs violate the problem's constraints?\"\"\"
+        ...
 
-    @register_metric("mmd", family="distribution", cost="cheap", higher_is_better=False)
-    def mmd(ctx: EvaluationContext) -> float:
-        return engiopt.metrics.mmd(ctx.gen_designs, ctx.ref_designs, sigma=ctx.sigma)
+The docstring's first line is the metric's description: the question it answers,
+written so it makes sense without knowing the metric's name. `higher_is_better`
+says which way to rank; `None` means the metric is a diagnostic that is read but
+never ranked on. `cost` keeps metrics that touch the simulator separate from the
+ones that do not.
 
-The declaration is what lets the evaluator keep simulation-free metrics strictly
-separate from simulator-backed ones, and what lets the leaderboard know which
-direction of each column is "better".
+Where a metric is computed -- pixel space, a PCA of the reference designs, a
+learned latent space -- and how one value per design collapses to one number are
+not properties of the metric. They are chosen when a board is evaluated; see
+`engiopt.evaluation.board.Board`.
 """
 
 from __future__ import annotations
 
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass
-from typing import Literal, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 if TYPE_CHECKING:
     from engiopt.evaluation.context import EvaluationContext
@@ -41,22 +47,31 @@ MetricFn = Callable[["EvaluationContext"], "float | dict[str, float]"]
 
 @dataclass(frozen=True)
 class MetricSpec:
-    """A registered metric and everything the evaluator needs to know about it."""
+    """A registered metric and what a reader needs to know to use its column."""
 
     name: str
     fn: MetricFn
     family: MetricFamily
     cost: MetricCost
     higher_is_better: bool | None
-    """None for metrics with no intrinsic direction (e.g. a realized volume fraction)."""
+    """Ranking direction. None: a diagnostic, read beside other columns but never ranked on."""
+    description: str = ""
+    """The question the value answers, in one plain sentence. Defaults to the docstring's first line."""
     outputs: tuple[str, ...] = ()
     """Column names produced. Defaults to `(name,)` for single-valued metrics."""
-    description: str = ""
+    pixel_only: bool = False
+    """True if the metric needs the actual designs -- a constraint check, a copy corpus --
+    and so cannot be asked in a PCA or latent space."""
 
     @property
     def columns(self) -> tuple[str, ...]:
         """Leaderboard columns this metric fills."""
         return self.outputs or (self.name,)
+
+    @property
+    def direction(self) -> str:
+        """The ranking direction as a reader sees it."""
+        return {True: "higher is better", False: "lower is better", None: "diagnostic"}[self.higher_is_better]
 
 
 class MetricRegistry(Mapping[str, MetricSpec]):
@@ -78,7 +93,7 @@ class MetricRegistry(Mapping[str, MetricSpec]):
         return len(self._metrics)
 
     def add(self, spec: MetricSpec) -> None:
-        """Register a metric, rejecting duplicate names and duplicate output columns."""
+        """Register a metric, refusing a second definition under the same name or column."""
         if spec.name in self._metrics:
             raise ValueError(f"Metric {spec.name!r} is already registered.")
         taken = {col: owner.name for owner in self._metrics.values() for col in owner.columns}
@@ -94,7 +109,7 @@ class MetricRegistry(Mapping[str, MetricSpec]):
         cost: MetricCost | None = None,
         family: MetricFamily | None = None,
     ) -> list[MetricSpec]:
-        """Return specs filtered by name, cost, and/or family, in registration order."""
+        """Metrics by name, cost, or family -- every metric if nothing is given."""
         specs = [self[name] for name in names] if names is not None else list(self._metrics.values())
         if cost is not None:
             specs = [spec for spec in specs if spec.cost == cost]
@@ -105,6 +120,20 @@ class MetricRegistry(Mapping[str, MetricSpec]):
     def columns(self, specs: list[MetricSpec] | None = None) -> list[str]:
         """All leaderboard columns for the given specs (default: every metric)."""
         return [col for spec in (specs if specs is not None else self._metrics.values()) for col in spec.columns]
+
+    def explain(self) -> Any:
+        """One row per metric: the question it answers, its family, direction and cost.
+
+        Returns:
+            A `pandas.DataFrame` indexed by metric name.
+        """
+        import pandas as pd
+
+        rows = {
+            spec.name: {"question": spec.description, "family": spec.family, "direction": spec.direction, "cost": spec.cost}
+            for spec in self._metrics.values()
+        }
+        return pd.DataFrame.from_dict(rows, orient="index")
 
 
 METRICS = MetricRegistry()
@@ -117,8 +146,9 @@ def register_metric(
     family: MetricFamily,
     cost: MetricCost,
     higher_is_better: bool | None,
-    outputs: tuple[str, ...] = (),
     description: str = "",
+    outputs: tuple[str, ...] = (),
+    pixel_only: bool = False,
     registry: MetricRegistry | None = None,
 ) -> Callable[[MetricFn], MetricFn]:
     """Register an evaluation metric.
@@ -127,9 +157,10 @@ def register_metric(
         name: Unique metric name, also the default output column.
         family: Which engineering question this answers.
         cost: `cheap` if it never runs a simulator, `expensive` otherwise.
-        higher_is_better: Ranking direction, or None if the metric is diagnostic.
+        higher_is_better: Ranking direction, or None for a diagnostic.
+        description: The question the value answers; defaults to the docstring's first line.
         outputs: Column names, when the metric returns a dict of several values.
-        description: One-line explanation, surfaced by `engiopt.evaluate --list-metrics`.
+        pixel_only: True if the metric needs the actual designs rather than codes in some space.
         registry: Target registry; defaults to the global one.
 
     Returns:
@@ -137,15 +168,16 @@ def register_metric(
     """
 
     def decorator(fn: MetricFn) -> MetricFn:
-        (registry or METRICS).add(
+        (METRICS if registry is None else registry).add(
             MetricSpec(
                 name=name,
                 fn=fn,
                 family=family,
                 cost=cost,
                 higher_is_better=higher_is_better,
-                outputs=outputs,
                 description=description or (fn.__doc__ or "").strip().split("\n")[0],
+                outputs=outputs,
+                pixel_only=pixel_only,
             )
         )
         return fn

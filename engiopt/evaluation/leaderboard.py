@@ -302,7 +302,6 @@ def push_to_hub(
     private: bool = False,
     commit_message: str | None = None,
     max_attempts: int = 3,
-    eval_spec: EvalSpec | None = None,
     check_admission: bool = True,
 ) -> pd.DataFrame:
     """Merge `new_rows` into the published leaderboard and upload the result.
@@ -326,7 +325,6 @@ def push_to_hub(
         private: Create the repo private if it does not exist yet.
         commit_message: Defaults to a summary of what was added.
         max_attempts: How many times to retry after losing a race.
-        eval_spec: Spec the rows were scored under, for the flag thresholds.
         check_admission: Publish rows unchecked. Only for a verification runner
             writing back rows it produced itself, which is the one caller whose
             `verified=True` is not a self-assertion.
@@ -344,7 +342,7 @@ def push_to_hub(
     from engiopt.evaluation.submission import prepare_submission
 
     if check_admission:
-        new_rows = prepare_submission(new_rows, eval_spec)
+        new_rows = prepare_submission(new_rows)
 
     api = HfApi(token=token)
     api.create_repo(repo_id=repo_id, repo_type="dataset", private=private, exist_ok=True)

@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import field
 from functools import cached_property
-from typing import Any, TYPE_CHECKING
+from typing import Any, Literal, TYPE_CHECKING
 
 from gymnasium import spaces
 import numpy as np
@@ -64,6 +64,13 @@ class OptimizationResults:
     shared instance.
     """
 
+    trajectories: list[npt.NDArray[Any]] = field(default_factory=list)
+    """Per design, the optimality gap at every optimizer call of its re-optimization."""
+    reference_objectives: list[float] = field(default_factory=list)
+    """Per design, the reference optimum's objective for its conditions, scalarized like the gaps.
+
+    The scale a gap is read against: five percent of this is what "near optimal" means.
+    """
     iog: list[float] = field(default_factory=list)
     """Initial optimality gap: how far each generated design starts from the reference optimum."""
     cog: list[float] = field(default_factory=list)
@@ -82,7 +89,8 @@ class EvaluationContext:
         gen_designs: Generated designs, `(n_samples, *design_shape)`.
         ref_designs: Reference (dataset-optimal) designs for the same conditions.
         conditions: The conditions each design was asked to satisfy.
-        sigma: Gaussian-kernel bandwidth for MMD and DPP.
+        sigma: Gaussian-kernel bandwidth for the kernel metrics, or None to use
+            the median pairwise distance of the training designs; see `kernel_sigma`.
         volfrac_tol: Tolerance used by the volume-fraction violation check.
         volume_condition: Name of the condition holding the volume-fraction
             budget a design must hit, when the problem has one. Declared by the
@@ -95,13 +103,10 @@ class EvaluationContext:
         objective_weight_condition: Name of a per-sample condition carrying the
             trade-off instead. thermoelastic2d's `weight` splits the first two
             objectives as `(w, 1 - w)`; any remaining objectives get zero.
-        copy_corpus_fn: Returns the designs a model could plausibly have copied
-            -- the dataset designs it may have trained on, plus the reference
-            optima it is being scored against. Deferred behind a callable so
-            that fetching a training split is paid for only when a memorization
-            metric actually runs, and shared across every model in a sweep.
-        copy_tol: RMS per-element distance below which a generated design counts
-            as a copy of something in the corpus.
+        train_designs_fn: Returns the training split's designs. Deferred behind
+            a callable so that fetching the split is paid for only when a
+            memorization metric actually runs, and shared across every model
+            in a sweep.
         resample_permuted: Re-runs the generator on a permutation of the same
             conditions, with the same latent draw. `None` when the comparison is
             unavailable -- an unconditional problem, or a context built directly
@@ -113,14 +118,19 @@ class EvaluationContext:
     gen_designs: npt.NDArray[Any]
     ref_designs: npt.NDArray[Any]
     conditions: Dataset | None = None
-    sigma: float = 10.0
+    sigma: float | None = None
     volfrac_tol: float = 0.01
     volume_condition: str | None = None
     sample_seconds: float | None = None
     objective_weights: tuple[float, ...] | None = None
     objective_weight_condition: str | None = None
-    copy_corpus_fn: Callable[[], npt.NDArray[Any]] | None = None
-    copy_tol: float = 0.01
+    train_designs_fn: Callable[[], npt.NDArray[Any]] | None = None
+    aggregation: Literal["mean", "median"] = "mean"
+    model_params: int | None = None
+    """Trainable parameter count of the generator, when it is a network."""
+    train_minutes: float | None = None
+    """Wall-clock minutes the generator took to train, when the checkpoint records it."""
+    """How a metric with one value per design is collapsed into a column; see `reduce`."""
     resample_permuted: Callable[[npt.NDArray[Any]], npt.NDArray[Any]] | None = None
 
     @property
@@ -132,6 +142,30 @@ class EvaluationContext:
     def is_dict_space(self) -> bool:
         """Whether the problem uses a `spaces.Dict` design space needing flatten/unflatten."""
         return isinstance(self.problem.design_space, spaces.Dict)
+
+    def reduce(self, values: Any) -> float:
+        """Collapse one value per generated design into the column's single number.
+
+        `iog`, `cog`, `fog` and the per-design distances are each a vector with
+        one entry per generated design. Which single number that vector becomes
+        is a policy, not a measurement: a mean is pulled by one diverged design,
+        a median is not, and two boards that chose differently are not comparable.
+        So the choice is declared once (`EvalSpec.aggregation`), recorded in the
+        row, and applied here rather than hard-coded metric by metric.
+
+        Rates such as `viol` are fractions, not per-design
+        averages, and do not pass through this.
+
+        Args:
+            values: One value per generated design.
+
+        Returns:
+            The mean or median per the declared policy; NaN for no designs.
+        """
+        array = np.asarray(values, dtype=float)
+        if array.size == 0:
+            return float("nan")
+        return float(np.median(array) if self.aggregation == "median" else np.mean(array))
 
     @cached_property
     def gen_flat(self) -> npt.NDArray[Any]:
@@ -147,51 +181,55 @@ class EvaluationContext:
         return np.asarray(flattened)
 
     @cached_property
-    def copy_corpus(self) -> npt.NDArray[Any] | None:
-        """Flattened designs a generator could have memorized, or None if there are none.
+    def train_designs(self) -> npt.NDArray[Any] | None:
+        """Flattened training designs, or None when the problem has no training split.
 
-        The scored reference designs are always in here, even though they are
-        also `mmd`'s comparison target. They are the single most attractive
-        thing to copy precisely *because* the protocol is public and names them,
-        so a memorization check that omitted them would miss the easiest attack
-        on this board. `copy_corpus_fn` widens the corpus to the training split
-        the model was actually fitted on.
-
-        Parts whose flattened width does not match the generated designs are
-        dropped rather than raising: a mismatched corpus makes the check
-        unavailable, and that is not a reason to fail an evaluation.
+        Fetched once, through `train_designs_fn`, and only when a memorization
+        metric asks. A split whose flattened width does not match the generated
+        designs is treated as absent rather than raising: it makes the check
+        unavailable, which is not a reason to fail an evaluation.
         """
-        width = self.gen_flat.shape[1]
-        parts = [part for part in (self.ref_flat,) if part.shape[1] == width]
-        if self.copy_corpus_fn is not None:
-            extra = np.asarray(self.copy_corpus_fn())
-            if len(extra):
-                flattened = extra.reshape(len(extra), -1)
-                if flattened.shape[1] == width:
-                    parts.append(flattened)
-        return np.concatenate(parts) if parts else None
+        if self.train_designs_fn is None:
+            return None
+        train = np.asarray(self.train_designs_fn())
+        if not len(train):
+            return None
+        flat = train.reshape(len(train), -1)
+        return flat if flat.shape[1] == self.gen_flat.shape[1] else None
 
     @cached_property
-    def nearest_corpus_distance(self) -> npt.NDArray[Any] | None:
-        """Per-design RMS distance to the closest design in `copy_corpus`.
+    def kernel_sigma(self) -> float:
+        """The bandwidth the kernel metrics use.
 
-        Normalized by the square root of the design dimension so the number is a
-        *per-element* deviation. That makes one tolerance meaningful across
-        problems of different resolution, where a raw L2 norm would not be.
+        The value the spec pinned, if it pinned one. Otherwise the median
+        pairwise distance of the training designs, in whatever space this
+        context holds, so the kernel is neither saturated nor empty on any
+        problem; the reference designs stand in when there is no training split.
+        Subsampled with a fixed seed, so the value is reproducible, and recorded
+        in every published row.
         """
-        corpus = self.copy_corpus
-        if corpus is None or not len(corpus):
-            return None
+        if self.sigma is not None:
+            return float(self.sigma)
+        basis = self.train_designs if self.train_designs is not None and len(self.train_designs) > 1 else self.ref_flat
+        return metrics_mod.compute_median_sigma(basis)
+
+    def nearest_train_distance(self, designs: npt.NDArray[Any]) -> npt.NDArray[Any]:
+        """Per-design RMS distance from each of `designs` to the closest training design.
+
+        Divided by the square root of the design dimension so it reads as a
+        per-element deviation, the same on a 50 by 100 grid as on an 8 by 10 one.
+        Requires `train_designs`.
+        """
         from scipy.spatial.distance import cdist
 
-        distances = cdist(self.gen_flat, corpus, "euclidean")
-        return np.asarray(distances.min(axis=1) / np.sqrt(self.gen_flat.shape[1]))
+        distances = cdist(designs, self.train_designs, "euclidean")
+        return np.asarray(distances.min(axis=1) / np.sqrt(designs.shape[1]))
 
     @cached_property
     def permuted_designs(self) -> npt.NDArray[Any] | None:
         """Designs the generator produces when the conditions are shuffled between samples.
 
-        Same latent draw, same model, different brief. A model that reads its
+        Same latent draw, same model, different conditions. A model that reads its
         conditions produces something different; a model that ignores them
         produces the identical batch in a different order at best, and an
         identical batch outright at worst. Comparing the two is what turns "this
@@ -328,6 +366,8 @@ class EvaluationContext:
             results.iog.append(self.scalarize_gap(np.asarray(generated_objective) - np.asarray(reference_optimum), i))
             results.cog.append(sum(self.scalarize_gap(step_gap, i) for step_gap in gaps))
             results.fog.append(self.scalarize_gap(gaps[-1], i))
+            results.trajectories.append(np.asarray([self.scalarize_gap(step_gap, i) for step_gap in gaps], dtype=float))
+            results.reference_objectives.append(self.scalarize_gap(np.asarray(reference_optimum), i))
         return results
 
     @cached_property
@@ -352,7 +392,7 @@ class EvaluationContext:
            This is what a new problem gets for free.
         2. The volume-fraction budget named by the spec's `volume_condition`,
            when the problem has one. Missing that target is a design failing to
-           honor its brief rather than an invalid design, and no EngiBench
+           honor its conditions rather than an invalid design, and no EngiBench
            constraint covers it.
 
         A problem with neither -- photonics2d has no volume budget -- is scored

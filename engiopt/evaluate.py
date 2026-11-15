@@ -32,7 +32,6 @@ from engiopt.evaluation.leaderboard import load_from_hub
 from engiopt.evaluation.leaderboard import push_to_hub
 from engiopt.evaluation.registry import METRICS
 from engiopt.evaluation.submission import FLAG_IGNORES_CONDITIONS
-from engiopt.evaluation.submission import FLAG_MEMORIZED
 from engiopt.evaluation.submission import FLAG_UNVERIFIED
 from engiopt.evaluation.submission import integrity_flags
 from engiopt.utils.all_generators import BUILTIN_GENERATORS
@@ -65,7 +64,8 @@ class Args:
     cgan_cnn_2d:023dd1fb gan_cnn_2d:06d9a9a1` asks for exactly the two that
     exist."""
     spec: str | None = None
-    """Eval spec reference, e.g. `beams2d/v1`. Defaults to `<problem_id>/v1`."""
+    """Eval spec reference, e.g. `beams2d/v2`. Omitted, the problem's current spec loads;
+    `EvalSpec.load` owns that default, so the CLI cannot drift from the library."""
     metrics: tuple[str, ...] = ()
     """Metric names; defaults to the spec's list."""
     include_expensive: bool = False
@@ -197,11 +197,7 @@ def _availability_label(count: int | None) -> str:
 def _print_metrics() -> None:
     """Print every registered metric grouped by the question it answers."""
     print(f"{len(METRICS)} metrics registered:\n")
-    for family in sorted({spec.family for spec in METRICS.values()}):
-        print(f"  [{family}]")
-        for spec in METRICS.select(family=family):
-            direction = {True: "higher better", False: "lower better", None: "diagnostic"}[spec.higher_is_better]
-            print(f"    {spec.name:<10} {spec.cost:<10} {direction:<14} {spec.description}")
+    print(METRICS.explain().sort_values(["family", "cost"]).to_string())
 
 
 def _resolve_generator_names(requested: tuple[str, ...], problem_id: str) -> list[str]:
@@ -346,8 +342,7 @@ def main(args: Args) -> int:
     if args.list_generators or args.list_metrics:
         return 0
 
-    spec = args.spec or f"{args.problem_id}/v1"
-    evaluator = Evaluator.for_problem(args.problem_id, spec=spec)
+    evaluator = Evaluator.for_problem(args.problem_id, spec=args.spec)
     print(f"Problem {args.problem_id} | spec {evaluator.spec.version} | n={evaluator.spec.n_samples}")
 
     generators = _load_generators(args, evaluator)
@@ -375,14 +370,14 @@ def main(args: Args) -> int:
     print(f"\n{board.to_string(index=False)}\n")
     print(f"Wrote {len(board)} rows to {destination}")
 
-    _publish(args, evaluator, board)
+    _publish(args, board)
     return 0
 
 
-def _publish(args: Args, evaluator: Evaluator, board: pd.DataFrame) -> None:
+def _publish(args: Args, board: pd.DataFrame) -> None:
     """Push the results wherever the flags asked, then print the ranking comparison."""
     if args.push_to:
-        merged = push_to_hub(board, args.push_to, eval_spec=evaluator.spec)
+        merged = push_to_hub(board, args.push_to)
         print(f"Published {len(board)} row(s) to {args.push_to}; board now holds {len(merged)} rows.")
         print(
             "These rows are unverified. They will not be ranked until a runner re-fetches the "
@@ -416,12 +411,6 @@ def _print_integrity_warnings(board: pd.DataFrame) -> None:
         if not flags:
             continue
         label = f"{row.get('algo_id')} seed {row.get('seed')}"
-        if FLAG_MEMORIZED in flags:
-            print(
-                f"\n  [{label}] copy_rate={row.get('copy_rate'):.2f}: most of this batch reproduces designs "
-                "from the dataset rather than generating them. Its distribution and performance scores "
-                "measure retrieval, and it will be published but not ranked."
-            )
         if FLAG_IGNORES_CONDITIONS in flags:
             print(
                 f"\n  [{label}] cond_sens=0: output did not change at all when the conditions were shuffled, "
