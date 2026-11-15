@@ -32,6 +32,7 @@ from engiopt.evaluation.registry import MetricSpec
 from engiopt.evaluation.spec import EvalSpec
 from engiopt.evaluation.spec import ResolvedSpec
 from engiopt.evaluation.spec import source_checkout_commit
+from engiopt.evaluation.submission import CUSTOM_ROWS_MARKER
 from engiopt.utils.all_generators import design_kind_of
 
 # Importing the metrics package is what populates the registry.
@@ -169,7 +170,9 @@ class Evaluator:
         these rows' optimal designs, one for one.
 
         Numbers from a custom slice are not leaderboard rows; the frozen draw is
-        what published numbers mean, so the digest is cleared rather than lied to.
+        what published numbers mean. The digest is cleared rather than lied to,
+        and the spec version gains `CUSTOM_ROWS_MARKER`, so every row says which
+        rows it was scored on and the public board can refuse it.
 
         Args:
             problem_id: EngiBench problem registry key.
@@ -197,7 +200,12 @@ class Evaluator:
         conditions = rows.select_columns(available)
         tensor = th.tensor([conditions[key] for key in scalar_keys], dtype=th.float32, device=device).T
         resolved = ResolvedSpec(
-            spec=dataclasses.replace(eval_spec, n_samples=len(rows), condition_digest=None),
+            spec=dataclasses.replace(
+                eval_spec,
+                version=eval_spec.version + CUSTOM_ROWS_MARKER,
+                n_samples=len(rows),
+                condition_digest=None,
+            ),
             conditions_tensor=tensor,
             conditions=conditions,
             ref_designs=np.asarray(rows["optimal_design"]),

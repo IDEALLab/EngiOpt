@@ -35,6 +35,16 @@ anyway.
 IDENTITY_COLUMNS = ("problem_id", "algo_id", "config_fingerprint", "seed", "spec_version")
 """What it takes to know which model, and under which protocol, a row describes."""
 
+CUSTOM_ROWS_MARKER = "+custom-rows"
+"""Suffix on the `spec_version` of a score computed on rows the caller chose.
+
+A spec version names one frozen draw of test conditions. `Evaluator.for_rows`
+swaps that draw for a slice of the caller's choosing, so its rows report
+`v2+custom-rows` and not `v2`. Sharing the name would let a score on two
+hand-picked rows replace the official one for the same checkpoint. The public
+board refuses any row carrying this suffix.
+"""
+
 FLAG_UNVERIFIED = "unverified"
 """No runner has re-fetched these weights and reproduced these numbers."""
 
@@ -70,6 +80,12 @@ def admission_problems(row: dict[str, Any]) -> list[str]:
             f"no fetchable checkpoint ({', '.join(missing_address)} not set) -- nobody, including you, "
             "could re-run this row. Train with --checkpoint-backend hf and evaluate the published package "
             "rather than a local directory."
+        )
+    if CUSTOM_ROWS_MARKER in str(row.get("spec_version")):
+        problems.append(
+            f"scored on rows the submitter chose (spec_version={row.get('spec_version')!r}). The public board "
+            "compares models on one frozen draw of test conditions. Score with the spec's own draw, "
+            "`Evaluator.for_problem`, to publish."
         )
     if not _is_blank(row.get("verified")) and bool(row.get("verified")):
         problems.append(
