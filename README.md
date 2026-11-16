@@ -68,10 +68,11 @@ pip install -e .
 You might want to install a specific PyTorch version, e.g., with CUDA on top of it, see [PyTorch install](https://pytorch.org/get-started/locally/).
 
 **Evaluation needs EngiBench from source.** The committed evaluation specs are frozen
-against the current EngiBench, whose `photonics2d` and `thermoelastic2d` read the `v1`
-datasets; the newest PyPI release (0.2.0) still points those two at `v0`. Installing
-EngiBench from PyPI therefore draws different conditions, and the specs report a clear
-mismatch rather than scoring against the wrong data:
+against the current EngiBench, where every volume target is named `volfrac` and
+`thermoelastic2d` and `heatconduction2d` read renamed datasets. The newest PyPI release
+(0.2.0) predates that. Installing EngiBench from PyPI therefore draws different
+conditions, and the specs report a clear mismatch rather than scoring against the wrong
+data:
 ```
 git clone git@github.com:IDEALLab/EngiBench.git
 cd EngiBench/
