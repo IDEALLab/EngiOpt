@@ -78,7 +78,7 @@ def admission_problems(row: dict[str, Any]) -> list[str]:
     if missing_address:
         problems.append(
             f"no fetchable checkpoint ({', '.join(missing_address)} not set) -- nobody, including you, "
-            "could re-run this row. Train with --checkpoint-backend hf and evaluate the published package "
+            "could re-run this row. Train with --save-model and evaluate the published package "
             "rather than a local directory."
         )
     if CUSTOM_ROWS_MARKER in str(row.get("spec_version")):

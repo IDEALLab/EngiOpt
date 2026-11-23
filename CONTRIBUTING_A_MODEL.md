@@ -10,6 +10,34 @@ EngiOpt keeps training and evaluation deliberately separate:
 
 The contract is two methods and a handful of class attributes.
 
+## The whole path at a glance
+
+One directory, two files, four steps. The sections below explain each one.
+
+| Step | What you do | What you get |
+|---|---|---|
+| Add your code | Copy `engiopt/generators/_template` to `engiopt/generators/my_model`. Write the training script and fill in the adapter | Your model is listed by `--list-generators`. No registry to edit |
+| Publish checkpoints | Run the training script with `--save-model --hf-entity my-hf-username`, once per seed | One package per seed in your own HuggingFace repo |
+| Generate designs | `MyModel.from_pretrained(problem, problem_id="beams2d", hf_entity="my-hf-username").sample(conditions)` | Designs, with the conditions prepared the way training recorded |
+| Get a leaderboard row | `python -m engiopt.evaluate ... --include-expensive --push-to IDEALLab/engiopt-leaderboard` | Rows that appear at once, marked unverified |
+
+```bash
+cp -r engiopt/generators/_template engiopt/generators/my_model
+
+for seed in 1 2 3; do
+  python engiopt/generators/my_model/my_model.py \
+    --problem-id beams2d --seed $seed --save-model --hf-entity my-hf-username
+done
+
+python -m engiopt.evaluate --problem-id beams2d --generators my_model --seeds 1 2 3 \
+  --hf-entity my-hf-username --include-expensive --push-to IDEALLab/engiopt-leaderboard
+```
+
+Three steps still need a maintainer today. Your code has to be merged before a
+row can be ranked, because the runner rebuilds your model from this repository.
+`--push-to` needs write access to the board. A maintainer runs the verification.
+[#78](https://github.com/IDEALLab/EngiOpt/issues/78) tracks opening those up.
+
 ## 1. Create the package
 
 ```bash
@@ -21,8 +49,10 @@ and your HuggingFace repo. Use lowercase with underscores.
 
 ## 2. Write the training script
 
-Put it at `engiopt/generators/my_model/my_model.py`. Follow any existing model
-for the shape of it — `cgan_cnn_2d/cgan_cnn_2d.py` is a good short one.
+Put it at `engiopt/generators/my_model/my_model.py`. The template directory
+ships one under that name that is complete and small: replace its network and
+its training step. `cgan_cnn_2d/cgan_cnn_2d.py` is a good short example of a
+real model.
 
 The only requirement is how you save. Use the shared checkpoint helper so your
 model lands where the loader expects:
@@ -50,11 +80,47 @@ save_checkpoint_package(
 `checkpoint_identity(args)` is what lets many hyperparameter settings coexist.
 Each run is stored at `{problem_id}/cfg_{fingerprint}/seed_{seed}`, and a run
 using your script's *default* hyperparameters additionally claims the canonical
-`{problem_id}/seed_{seed}` — which is what the bare model name resolves to. A
+`{problem_id}/seed_{seed}`. That path is what the bare model name resolves to. A
 sweep therefore can never redefine what your model means.
 
 `run_config` matters: it is what `from_pretrained` reads to reconstruct your
 network, so every architectural hyperparameter must be in `Args`.
+
+`--save-model` is off by default, so a trial run uploads nothing. A run without
+it leaves no package, and there is then nothing to evaluate.
+
+### Record what training cost
+
+The leaderboard reports what a model costs to train, and it can only report
+what the training script recorded. Time your gradient steps with the shared
+clock and pass its fields to the save call. That is four lines:
+
+```python
+from engiopt.train_clock import TrainClock
+
+clock = TrainClock(device)
+clock.start()
+for step in range(args.n_steps):
+    ...  # one gradient step
+    if step % args.sample_interval == 0:
+        clock.pause()  # logging, images and validation are not training
+        ...
+        clock.start()
+clock.pause()
+
+save_checkpoint_package(..., metadata=clock.metadata(n_train_steps=args.n_steps))
+```
+
+The clock records three things: the number of steps, the seconds spent in
+them, and the name of the device. One pass of your training loop is one step,
+however many networks it updates. The step count is the same on any machine.
+The seconds are not, which is why the device is recorded beside them.
+
+You write nothing for the other cost columns. The time to generate a design,
+the optimizer time a generated design saves, and `designs_to_break_even` are
+all measured by the evaluator, the same way for every model. A checkpoint that
+recorded no training cost still evaluates; its `train_seconds`, `n_train_steps`
+and `designs_to_break_even` cells are blank.
 
 ### How many conditions does your model have?
 
@@ -82,7 +148,7 @@ n_conds = len(condition_keys_for(problem, resolved))
 ```
 
 That is what keeps a checkpoint loadable after a problem gains a condition, and
-what makes the evaluator refuse — with a clear message — to feed your model
+what makes the evaluator refuse, with a clear message, to feed your model
 conditions it was not trained on.
 
 Also reuse the shared helpers rather than rewriting them:
@@ -110,11 +176,11 @@ class MyModel(Generator):
 
 Then implement the two methods:
 
-- **`build(resolved, problem, device, **base)`** — rebuild the network from
+- **`build(resolved, problem, device, **base)`**: rebuild the network from
   `resolved.run_config` and `resolved.files`, then hand it to `cls(...)`.
   Fetching the package, choosing the device, and selecting the configuration
   are already done for you.
-- **`_sample(conditions, n)`** — produce `n` designs. Seeding, timing, reshaping
+- **`_sample(conditions, n)`**: produce `n` designs. Seeding, timing, reshaping
   and clamping are handled for you; return whatever shape is natural.
 
 ```python
@@ -128,8 +194,8 @@ def build(cls, resolved, problem, device, **base):
     return cls(net=net, latent_dim=config["latent_dim"], problem=problem, device=device, **base)
 ```
 
-Exactly one `Generator` subclass per adapter module — the same rule EngiBench
-applies to `Problem` classes, so the name-to-model mapping stays unambiguous.
+Exactly one `Generator` subclass per adapter module. EngiBench applies the same
+rule to `Problem` classes, so the name-to-model mapping stays unambiguous.
 
 ### Conditions
 
@@ -142,8 +208,8 @@ conditions.keys  # condition names, in column order
 ```
 
 Most models want `require_tensor`. Reach for `dataset` only for conditions that
-**cannot travel in the dense tensor at all** — thermoelastic2d's 65x65 boundary
-matrices, for instance, which `condition_keys` excludes for exactly that reason.
+**cannot travel in the dense tensor at all**. thermoelastic2d's 65x65 boundary
+matrices are one example, and `condition_keys` excludes them for exactly that reason.
 
 Do **not** use it to re-derive preprocessing. Dropping constant columns or
 re-fitting a normalizer against `dataset` at evaluation time changes the scale
@@ -165,7 +231,7 @@ content hash, so changing a bound produces a different checkpoint rather than
 inheriting the previous one's leaderboard row.
 
 Unconditional models ignore the argument entirely, which is allowed. They are
-still handed conditions so that `cond_sens` can measure it — see
+still handed conditions so that `cond_sens` can measure it. See
 [LEADERBOARD.md](LEADERBOARD.md).
 
 ## 4. Check it
@@ -180,10 +246,10 @@ ones (`mmd`, `coverage`, `vendi`, `dpp`), the per-condition ones
 (`per_condition_distance`, `volume_error`), feasibility (`viol`), the two
 integrity checks (`train_distance`, `cond_sens`), and the cost
 columns. `--include-expensive` adds the columns that re-optimize from each
-generated design — the optimality gaps `iog`, `cog`, `fog` and the
+generated design. Those are the optimality gaps `iog`, `cog` and `fog`, the
 call-budget metrics `calls_to_near_optimum`, `gap_after_calls` and
-`reaches_reference_rate` — which run the optimizer and are
-slow; leave them off while iterating. `python -m engiopt.evaluate
+`reaches_reference_rate`, and the cost column `designs_to_break_even`. They
+run the optimizer and are slow. Leave them off while iterating. `python -m engiopt.evaluate
 --list-metrics` prints the question each column answers.
 
 Watch two columns while you develop:
@@ -197,7 +263,7 @@ Watch two columns while you develop:
 
 `cond_sens` draws the batch a second time, under shuffled conditions, so it
 doubles sampling cost. That is nothing for a GAN and noticeable for a diffusion
-model — pass `--metrics mmd viol` while iterating if it slows you down, then
+model. Pass `--metrics mmd viol` while iterating if it slows you down, then
 run the full list before publishing.
 
 ## 5. Publish it
@@ -209,7 +275,7 @@ re-fetched the weights and reproduced the scores.
 
 ## 6. Adding a metric instead
 
-Metrics are registered functions, not model methods — a metric compares a
+Metrics are registered functions, not model methods. A metric compares a
 generated set against a reference set under a problem, so it belongs to the
 comparison rather than to any one model:
 
@@ -224,7 +290,7 @@ def my_metric(ctx) -> float:
 ```
 
 Five declarations: the name, the family (which question it belongs to), the
-cost, the direction — `None` for a diagnostic that is read but never ranked on —
+cost, the direction, which is `None` for a diagnostic that is read but never ranked on,
 and, when the metric needs the actual designs rather than codes in some space
 (a constraint check, a copy corpus), `pixel_only=True`. Declare
 `cost="expensive"` if it touches `ctx.optimization` (the simulator or
@@ -233,7 +299,7 @@ accidentally launch a simulation. Where the metric is computed (`space=`) and
 how per-design values collapse to one number (`aggregation=`) are chosen when a
 board is evaluated, not by the metric.
 
-Importing the module is what registers it — which means you can define a metric
+Importing the module is what registers it. You can therefore define a metric
 in a notebook cell and it will appear in the next leaderboard you build.
 
 ## 7. Where things live
@@ -246,7 +312,7 @@ in a notebook cell and it will appear in the next leaderboard you build.
 | Loss curves, sample images | Weights & Biases, when `--track` is on |
 
 HuggingFace holds everything that must be reloaded or compared; W&B holds what
-you only look at. Nothing in the evaluation path requires W&B — training with
+you only look at. Nothing in the evaluation path requires W&B. Training with
 `--track false` produces exactly the same checkpoints and scores.
 
 To attach a model's scores to its own checkpoint:
@@ -258,7 +324,7 @@ python -m engiopt.evaluate --problem-id beams2d --generators my_model --attach-m
 ## 8. Evaluation specs
 
 A leaderboard only means something if every row was measured the same way. Each
-problem has a committed spec (`engiopt/specs/<problem_id>/v1.json`) freezing the
+problem has committed specs (`engiopt/specs/<problem_id>/<version>.json`, the newest being the default) freezing the
 test conditions, sample count, metric list, and kernel bandwidth. Every result
 records the `spec_version` it came from.
 

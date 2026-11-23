@@ -13,12 +13,14 @@ solving the problem. Neither defense helps with the other.
 
 ## Submitting
 
-Publish your checkpoints to your own HuggingFace account — nothing about the
+Publish your checkpoints to your own HuggingFace account. Nothing about the
 weights needs `IDEALLab`:
 
 ```bash
-python engiopt/generators/my_model/my_model.py \
-  --problem-id beams2d --seed 1 --hf-entity my-hf-username
+for seed in 1 2 3; do
+  python engiopt/generators/my_model/my_model.py \
+    --problem-id beams2d --seed $seed --save-model --hf-entity my-hf-username
+done
 
 python -m engiopt.evaluate \
   --problem-id beams2d --generators my_model --seeds 1 2 3 \
@@ -36,15 +38,15 @@ have it. That is a real limit on how public this board is, and it is the one
 piece of the submission path that is not yet self-service; a no-access route
 (a pending manifest opened as a HuggingFace Community PR) is tracked in
 [#78](https://github.com/IDEALLab/EngiOpt/issues/78), alongside the
-safe-loading work below. Everything else above — the checkpoints, the address a
-row records, the audit command — already works from any account.
+safe-loading work below. Everything else above already works from any account: the
+checkpoints, the address a row records, and the audit command.
 
 Three things are worth knowing before you run it.
 
 **Your checkpoints must be on the Hub.** Every row records the repo, path,
 revision, and content hash of the weights it was scored on, and a row without
-that address is refused at publish time — not because it is untrusted, but
-because nobody, including you, could ever re-run it. Evaluating with
+that address is refused at publish time. That is not because it is untrusted.
+It is because nobody, including you, could ever re-run it. Evaluating with
 `--model-source local` produces exactly such a row.
 
 **Run the seeds the spec asks for.** `EvalSpec.required_seeds` is `(1, 2, 3)`,
@@ -72,8 +74,8 @@ registered adapter, and scores it again. What gets published is the runner's own
 numbers, not a verdict on yours.
 
 That distinction is deliberate. Sampling from one seed on different hardware
-genuinely produces different designs — CUDA and CPU draw different values from
-the same generator state — so a pass/fail comparison would need a tolerance loose
+genuinely produces different designs, because CUDA and CPU draw different values from
+the same generator state. A pass/fail comparison would therefore need a tolerance loose
 enough to wave through real fudging. Re-scoring sidesteps it: the runner's number
 is the number, and yours becomes a claim reported as corroborated or not.
 
@@ -82,13 +84,13 @@ Four outcomes:
 | Status | Meaning |
 |---|---|
 | `verified` | Fetched, re-scored. The row now carries the runner's numbers. |
-| `weights_moved` | The package no longer hashes to what the row recorded. Not re-scored — whatever is there now is not what earned the score. |
+| `weights_moved` | The package no longer hashes to what the row recorded. Not re-scored, since whatever is there now is not what earned the score. |
 | `unresolvable` | The address led nowhere, or the package would not load. |
 | `unknown_generator` | No registered adapter can rebuild the model. |
 
 The runner is not privileged. It is the first auditor, and because every row
 carries a full address, the same command run by anyone else produces the same
-answer — which is what keeps the runner honest too.
+answer. That is what keeps the runner honest too.
 
 ### Loading someone else's weights
 
@@ -110,7 +112,7 @@ submissions from the public without a human in the loop, the submission format
 needs to carry weights in a format with no code path at all (safetensors),
 validated JSON for reconstruction settings and preprocessing state, and
 adapter-side checks on tensor names, shapes and dtypes read from the header
-before any allocation — and the runner itself needs isolation, no credentials,
+before any allocation. The runner itself also needs isolation, no credentials,
 and time and memory limits.
 
 None of that is built here, because nothing outside `IDEALLab` can submit yet:
@@ -140,7 +142,7 @@ This is the one worth understanding before reading any number on the board.
 
 The spec is public. It names the condition seed, the sample count, and a digest
 of the drawn conditions, so anyone can recompute exactly which 50 test rows are
-scored — and the dataset supplies the optimal design for each of them. A lookup
+scored. The dataset supplies the optimal design for each of them. A lookup
 table keyed on the condition vector returns those designs and therefore posts a
 perfect `mmd` and a near-zero `iog` and `fog`.
 
@@ -151,10 +153,10 @@ scored: the whole dataset is public, so a memorizer memorizes all of it.
 
 So the board measures retrieval instead:
 
-- **`train_distance`** — how far each generated design sits from the nearest
+- **`train_distance`**: how far each generated design sits from the nearest
   design in the training split, per element. Zero means the model reproduces
   what it was trained on.
-- **`train_distance_ratio`** — the same distance divided by what the withheld
+- **`train_distance_ratio`**: the same distance divided by what the withheld
   reference designs score against the training split. One means the model's
   designs are as far from its training data as real unseen optima are; near zero
   means retrieval. There is no tolerance to set: the reference designs supply
@@ -162,7 +164,7 @@ So the board measures retrieval instead:
 
 Both are diagnostic, with no ranking direction, and that is not an oversight.
 No row is flagged for memorization; the columns are read, not enforced.
-Ranking on `train_distance` would put pure noise in first place — zero means retrieval,
+Ranking on `train_distance` would put pure noise in first place. Zero means retrieval,
 but large means only "unlike the data", which a broken model also achieves.
 Closing one gaming vector by opening another is not progress. The same reasoning
 applies to `cond_sens`: an unconditional model is a legitimate thing to build,
@@ -170,7 +172,7 @@ and responding to conditions *wrongly* also moves the output, so a large value i
 not by itself a good one.
 
 Read them next to `mmd` and `viol`, never on their own. Every column's question,
-direction and cost is one call away — `METRICS.explain()` — and
+direction and cost is one call away, `METRICS.explain()`, and
 [`example_metrics_suite.ipynb`](example_metrics_suite.ipynb) walks the whole suite,
 including the construction that scores a perfect `mmd` by returning the correct
 designs for the wrong conditions.
@@ -179,15 +181,15 @@ designs for the wrong conditions.
 
 Scoring on conditions that have no published solution. A v2 spec would draw
 conditions from the condition space rather than from dataset rows, and carry the
-reference *objective* for each — computed once by whoever freezes the spec, with
-no design released. A lookup table then has nothing to look up, and `mmd` moves
+reference *objective* for each. That objective is computed once by whoever freezes
+the spec, with no design released. A lookup table then has nothing to look up, and `mmd` moves
 to comparing against the training distribution rather than against 50 named
 designs.
 
 That is the right benchmark for a generative design model, and it is not built
 here: freezing such a spec means an optimizer run per condition. The mechanism
-already in place — flags, eligibility, and a spec version that carries its own
-thresholds — is what a v2 would plug into.
+already in place is what a v2 would plug into: flags, eligibility, and a spec
+version that carries its own thresholds.
 
 ## Reading the board
 

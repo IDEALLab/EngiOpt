@@ -1,7 +1,8 @@
 """Template `Generator` adapter -- copy this directory to add a model.
 
-Replace `my_model` throughout, point the imports at your training script, and
-you are on the leaderboard. Nothing outside this directory needs to change: the
+Replace `my_model` throughout, point the imports at your training script
+(`my_model.py` beside this file is a complete small one), and you are on the
+leaderboard. Nothing outside this directory needs to change: the
 registry finds your model by walking `engiopt/generators/`.
 
 Checklist:
