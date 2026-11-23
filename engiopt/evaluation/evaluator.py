@@ -46,6 +46,7 @@ if TYPE_CHECKING:
     import torch as th
 
     from engiopt.core import Generator
+    from engiopt.evaluation.context import OptimizationResults
 
 PROVENANCE_COLUMNS = (
     "problem_id",
@@ -231,12 +232,17 @@ class Evaluator:
                 f"{generator.algo_id!r} supports {generator.design_kinds} design spaces, "
                 f"but {self.problem_id!r} is {kind!r}."
             )
+        # One untimed draw first. The first call on a device pays for start-up
+        # work that later calls do not, and a fast model's whole batch can cost
+        # less than that start-up does.
+        self._sample(generator)
         ctx = self.context_for_designs(self._sample(generator))
         return dataclasses.replace(
             ctx,
             sample_seconds=generator.last_sample_seconds,
             model_params=_parameter_count(generator),
-            train_minutes=getattr(generator, "train_minutes", None),
+            train_seconds=generator.checkpoint_metadata.get("train_seconds"),
+            n_train_steps=generator.checkpoint_metadata.get("n_train_steps"),
             resample_permuted=self._permuted_sampler(generator),
         )
 
@@ -266,6 +272,7 @@ class Evaluator:
             objective_weights=self.spec.objective_weights,
             objective_weight_condition=self.spec.objective_weight_condition,
             train_designs_fn=self.train_designs,
+            default_start_fn=self.default_start,
             aggregation=self.spec.aggregation,
         )
 
@@ -315,6 +322,21 @@ class Evaluator:
             return self._load_train_designs()
 
         return designs
+
+    @functools.cached_property
+    def default_start(self) -> Callable[[], OptimizationResults | None]:
+        """The optimizer runs from the problem's default start, for the break-even metric.
+
+        One run per spec condition, shared by every model in a sweep and deferred
+        behind a callable, exactly as `train_designs` is. The runs do not depend
+        on any model, so the reference designs stand in for generated ones.
+        """
+
+        @functools.cache
+        def runs() -> OptimizationResults | None:
+            return self.context_for_designs(self.resolved.ref_designs).optimize_from_default_start()
+
+        return runs
 
     def _load_train_designs(self) -> npt.NDArray[Any]:
         """The training split's optimal designs, or an empty array for a problem without one."""

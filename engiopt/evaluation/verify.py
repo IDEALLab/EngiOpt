@@ -208,6 +208,7 @@ def _load_at_recorded_revision(
         checkpoint_hash=resolved.content_hash,
         checkpoint_repo=resolved.repo_id,
         checkpoint_path=resolved.package_path,
+        checkpoint_metadata=resolved.metadata,
     )
 
 

@@ -13,6 +13,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from dataclasses import field
 from functools import cached_property
+import inspect
+import time
 from typing import Any, Literal, TYPE_CHECKING
 
 from gymnasium import spaces
@@ -55,6 +57,16 @@ class MultiObjectiveScalarizationError(ValueError):
         )
 
 
+def has_default_start(problem: Any) -> bool:
+    """Whether the problem's optimizer can be run without being handed a starting design.
+
+    Read off the signature: a first argument that defaults to None is how an
+    EngiBench problem says it will build its own initial design.
+    """
+    parameters = list(inspect.signature(problem.optimize).parameters.values())
+    return bool(parameters) and parameters[0].default is None
+
+
 @dataclass
 class OptimizationResults:
     """Per-sample outputs of the simulator/optimizer pass.
@@ -77,6 +89,8 @@ class OptimizationResults:
     """Sum of the optimality gaps over each design's re-optimization history."""
     fog: list[float] = field(default_factory=list)
     """Final optimality gap at the end of re-optimization."""
+    optimizer_seconds: list[float] = field(default_factory=list)
+    """Per design, the wall-clock seconds its whole optimizer run took."""
 
 
 @dataclass
@@ -126,11 +140,20 @@ class EvaluationContext:
     objective_weight_condition: str | None = None
     train_designs_fn: Callable[[], npt.NDArray[Any]] | None = None
     aggregation: Literal["mean", "median"] = "mean"
+    """How a metric with one value per design is collapsed into a column; see `reduce`."""
     model_params: int | None = None
     """Trainable parameter count of the generator, when it is a network."""
-    train_minutes: float | None = None
-    """Wall-clock minutes the generator took to train, when the checkpoint records it."""
-    """How a metric with one value per design is collapsed into a column; see `reduce`."""
+    train_seconds: float | None = None
+    """Wall-clock seconds spent in the gradient steps of training, when the checkpoint records it."""
+    n_train_steps: int | None = None
+    """Passes of the training loop that produced the checkpoint, when it records them."""
+    default_start_fn: Callable[[], OptimizationResults | None] | None = None
+    """Returns the optimizer runs from the problem's own default start, one per condition.
+
+    Deferred behind a callable for the same reason as `train_designs_fn`: the
+    runs depend on the conditions and not on the model, so one set is shared by
+    every model in a sweep and paid for only when a metric asks.
+    """
     resample_permuted: Callable[[npt.NDArray[Any]], npt.NDArray[Any]] | None = None
 
     @property
@@ -356,7 +379,9 @@ class EvaluationContext:
             design = self.design_for_solver(i)
 
             self.problem.reset()
+            started_at = time.perf_counter()
             _, opt_history = self.problem.optimize(design, config=conditions)
+            results.optimizer_seconds.append(time.perf_counter() - started_at)
             self.problem.reset()
             reference_optimum = self.problem.simulate(self.ref_designs[i], config=conditions)
             gaps = metrics_mod.optimality_gap(opt_history, reference_optimum)
@@ -366,6 +391,35 @@ class EvaluationContext:
             results.iog.append(self.scalarize_gap(np.asarray(generated_objective) - np.asarray(reference_optimum), i))
             results.cog.append(sum(self.scalarize_gap(step_gap, i) for step_gap in gaps))
             results.fog.append(self.scalarize_gap(gaps[-1], i))
+            results.trajectories.append(np.asarray([self.scalarize_gap(step_gap, i) for step_gap in gaps], dtype=float))
+            results.reference_objectives.append(self.scalarize_gap(np.asarray(reference_optimum), i))
+        return results
+
+    def optimize_from_default_start(self) -> OptimizationResults | None:
+        """Run the optimizer from the problem's own default start, once per condition (expensive).
+
+        This is what producing a design costs with no model at all, and so the
+        price every model is compared against. The generated designs play no
+        part: only the conditions and the reference designs are read. The gaps
+        are measured against the same reference optimum as `optimization`, so
+        the two sets of paths are directly comparable.
+
+        Returns None when the problem defines no default start. beams2d and
+        heatconduction2d do, by accepting no starting point; photonics2d
+        requires one.
+        """
+        if not has_default_start(self.problem):
+            return None
+        results = OptimizationResults()
+        for i in range(self.n_samples):
+            conditions = self.condition_at(i)
+            self.problem.reset()
+            started_at = time.perf_counter()
+            _, opt_history = self.problem.optimize(None, config=conditions)
+            results.optimizer_seconds.append(time.perf_counter() - started_at)
+            self.problem.reset()
+            reference_optimum = self.problem.simulate(self.ref_designs[i], config=conditions)
+            gaps = metrics_mod.optimality_gap(opt_history, reference_optimum)
             results.trajectories.append(np.asarray([self.scalarize_gap(step_gap, i) for step_gap in gaps], dtype=float))
             results.reference_objectives.append(self.scalarize_gap(np.asarray(reference_optimum), i))
         return results

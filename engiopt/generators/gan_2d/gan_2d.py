@@ -23,6 +23,7 @@ from engiopt.core import checkpoint_identity
 from engiopt.reproducibility import enable_strict_determinism
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
+from engiopt.train_clock import TrainClock
 
 
 @dataclass
@@ -183,6 +184,9 @@ if __name__ == "__main__":
     # ----------
     #  Training
     # ----------
+    # The clock runs during the gradient steps and is paused for everything else.
+    clock = TrainClock(device)
+    clock.start()
     for epoch in tqdm.trange(args.n_epochs):
         for i, data in enumerate(dataloader):
             designs = data[0]
@@ -222,6 +226,7 @@ if __name__ == "__main__":
 
             d_loss.backward()
             optimizer_discriminator.step()
+            clock.pause()
 
             # ----------
             #  Logging
@@ -295,6 +300,8 @@ if __name__ == "__main__":
                     run_config=vars(args),
                     **checkpoint_identity(args),
                     primary_files=["generator.pth"],
+                    metadata=clock.metadata(n_train_steps=batches_done + 1),
                 )
+            clock.start()
 
     wandb.finish()

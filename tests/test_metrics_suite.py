@@ -11,6 +11,7 @@ from engiopt.evaluation.board import Board
 from engiopt.evaluation.board import register_space
 from engiopt.evaluation.board import SPACES
 from engiopt.evaluation.context import EvaluationContext
+from engiopt.evaluation.context import has_default_start
 from engiopt.evaluation.context import OptimizationResults
 from engiopt.evaluation.registry import METRICS
 from engiopt.evaluation.spec import EvalSpec
@@ -168,11 +169,100 @@ def test_trajectory_metrics_respect_the_aggregation_policy(trajectories: Evaluat
 def test_cost_metrics_are_nan_without_a_live_model(fake_problem: Any, sets: Any) -> None:
     gen, ref = sets
     ctx = _ctx(fake_problem, gen, ref)
-    assert all(np.isnan(METRICS[name].fn(ctx)) for name in ("generation_seconds", "n_parameters", "train_minutes"))
-    timed = _ctx(fake_problem, gen, ref, sample_seconds=1.5, model_params=1000, train_minutes=30.0)
-    assert METRICS["generation_seconds"].fn(timed) == 1.5
+    blank_without_a_model = (
+        "generation_seconds",
+        "n_parameters",
+        "train_seconds",
+        "n_train_steps",
+        "designs_to_break_even",
+    )
+    assert all(np.isnan(METRICS[name].fn(ctx)) for name in blank_without_a_model)
+    timed = _ctx(fake_problem, gen, ref, sample_seconds=1.5, model_params=1000, train_seconds=1800.0, n_train_steps=4000)
+    assert METRICS["generation_seconds"].fn(timed) == pytest.approx(1.5 / len(gen)), "seconds for one design, not the batch"
     assert METRICS["n_parameters"].fn(timed) == 1000
-    assert METRICS["train_minutes"].fn(timed) == 30.0
+    assert METRICS["train_seconds"].fn(timed) == 1800.0
+    assert METRICS["n_train_steps"].fn(timed) == 4000
+
+
+def _break_even_context(
+    fake_problem: Any, generated_path: list[float], *, sample_seconds: float = 2.0
+) -> EvaluationContext:
+    """Two designs polished from a model's output, against two runs from the problem's default start.
+
+    Every path is five calls long and every run took five seconds, so one call
+    costs one second. The reference objective is 10, so "near optimal" means a
+    gap of 0.5 or less. The default start needs four calls to get there.
+    """
+    shape = fake_problem.design_space.shape
+    from_default = OptimizationResults(
+        trajectories=[np.array([5.0, 4.0, 3.0, 2.0, 0.0])] * 2,
+        reference_objectives=[10.0, 10.0],
+        optimizer_seconds=[5.0, 5.0],
+    )
+    ctx = _ctx(
+        fake_problem,
+        np.zeros((2, *shape)),
+        np.zeros((2, *shape)),
+        sample_seconds=sample_seconds,
+        train_seconds=120.0,
+        train_designs_fn=lambda: np.zeros((100, *shape)),
+        default_start_fn=lambda: from_default,
+    )
+    ctx.__dict__["optimization"] = OptimizationResults(
+        trajectories=[np.array(generated_path)] * 2,
+        reference_objectives=[10.0, 10.0],
+        optimizer_seconds=[5.0, 5.0],
+    )
+    return ctx
+
+
+def test_break_even_divides_the_upfront_cost_by_the_saving_per_design(fake_problem: Any) -> None:
+    """Worked by hand, so the formula is pinned and not just exercised.
+
+    The generated design is near optimal after 1 call and the default start
+    after 4, so 3 calls are saved, which is 3 seconds. Generating one design
+    takes 2.0 / 2 = 1 second, leaving 2 seconds saved per design. The dataset
+    holds 100 designs at 5 seconds each, and training took 120 seconds:
+    (500 + 120) / 2 = 310 designs.
+    """
+    ctx = _break_even_context(fake_problem, [5.0, 0.0, 0.0, 0.0, 0.0])
+    assert METRICS["designs_to_break_even"].fn(ctx) == pytest.approx(310.0)
+
+
+def test_break_even_is_infinite_when_the_model_saves_nothing(fake_problem: Any) -> None:
+    as_slow_as_the_default_start = _break_even_context(fake_problem, [5.0, 4.0, 3.0, 2.0, 0.0])
+    assert METRICS["designs_to_break_even"].fn(as_slow_as_the_default_start) == float("inf")
+    generation_eats_the_saving = _break_even_context(fake_problem, [5.0, 0.0, 0.0, 0.0, 0.0], sample_seconds=6.0)
+    assert METRICS["designs_to_break_even"].fn(generation_eats_the_saving) == float("inf")
+
+
+def test_break_even_is_blank_for_a_problem_with_no_default_start(fake_problem: Any) -> None:
+    ctx = _break_even_context(fake_problem, [5.0, 0.0, 0.0, 0.0, 0.0])
+    ctx.default_start_fn = lambda: None
+    assert np.isnan(METRICS["designs_to_break_even"].fn(ctx))
+
+
+def test_only_an_optimizer_that_takes_no_starting_design_has_a_default_start(fake_problem: Any) -> None:
+    """The fake optimizer requires a starting design, as photonics2d's does; beams2d's defaults it to None."""
+    gen = np.ones((2, *fake_problem.design_space.shape))
+    assert not has_default_start(fake_problem)
+    assert _ctx(fake_problem, gen, gen).optimize_from_default_start() is None
+
+    def optimize_from_its_own_start(design: Any = None, config: Any = None) -> tuple[Any, list[Any]]:
+        return fake_problem.__class__.optimize(fake_problem, gen[0] if design is None else design, config)
+
+    fake_problem.optimize = optimize_from_its_own_start
+    assert has_default_start(fake_problem)
+    runs = _ctx(fake_problem, gen, gen).optimize_from_default_start()
+    assert runs is not None
+    assert len(runs.trajectories) == len(runs.optimizer_seconds) == len(runs.reference_objectives) == 2
+
+
+def test_the_optimizer_pass_times_every_run(fake_problem: Any) -> None:
+    gen = np.ones((3, *fake_problem.design_space.shape))
+    results = _ctx(fake_problem, gen, gen).optimization
+    assert len(results.optimizer_seconds) == len(results.trajectories) == 3
+    assert all(seconds >= 0 for seconds in results.optimizer_seconds)
 
 
 # -------------------------------------------------------------------- board
