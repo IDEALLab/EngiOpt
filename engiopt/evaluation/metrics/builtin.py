@@ -529,6 +529,8 @@ def designs_to_break_even(ctx: EvaluationContext) -> float:
     if from_default is None:
         return float("nan")
     from_generated = ctx.optimization
+    if not from_default.optimizer_seconds or not from_generated.optimizer_seconds:
+        return float("nan")  # no run was timed, so there is no rate to price a call at
 
     all_seconds = sum(from_default.optimizer_seconds) + sum(from_generated.optimizer_seconds)
     all_calls = sum(len(path) for path in from_default.trajectories) + sum(

@@ -236,6 +236,47 @@ def test_break_even_is_infinite_when_the_model_saves_nothing(fake_problem: Any) 
     assert METRICS["designs_to_break_even"].fn(generation_eats_the_saving) == float("inf")
 
 
+def test_break_even_follows_the_aggregation_policy(fake_problem: Any) -> None:
+    """One design saves 3 calls and the other 1. Their mean and median are both 2, so skew one to tell them apart."""
+    ctx = _break_even_context(fake_problem, [5.0, 0.0, 0.0, 0.0, 0.0])
+    slow = np.array([5.0, 4.0, 3.0, 2.0, 0.0])
+    fast = np.array([5.0, 0.0, 0.0, 0.0, 0.0])
+    ctx.optimization.trajectories = [fast, fast, slow]
+    ctx.optimization.reference_objectives = [10.0] * 3
+    ctx.optimization.optimizer_seconds = [5.0] * 3
+    shape = fake_problem.design_space.shape
+    ctx.gen_designs = np.zeros((3, *shape))
+    ctx.sample_seconds = 0.0
+    ctx.default_start_fn = lambda: OptimizationResults(
+        trajectories=[slow] * 3, reference_objectives=[10.0] * 3, optimizer_seconds=[5.0] * 3
+    )
+    # Calls saved are 3, 3 and 0: mean 2, median 3. Upfront cost is 100 * 5 + 120 = 620 seconds.
+    assert METRICS["designs_to_break_even"].fn(ctx) == pytest.approx(620.0 / 2.0)
+    ctx.aggregation = "median"
+    assert METRICS["designs_to_break_even"].fn(ctx) == pytest.approx(620.0 / 3.0)
+
+
+def test_break_even_is_blank_when_no_optimizer_run_was_timed(fake_problem: Any) -> None:
+    """Paths without timings have no rate to price a call at; blank, not a division by zero."""
+    ctx = _break_even_context(fake_problem, [5.0, 0.0, 0.0, 0.0, 0.0])
+    ctx.optimization.optimizer_seconds = []
+    assert np.isnan(METRICS["designs_to_break_even"].fn(ctx))
+
+
+def test_break_even_runs_no_optimizer_for_a_checkpoint_that_recorded_no_training_cost(fake_problem: Any) -> None:
+    """Older checkpoints record nothing, and scoring them must not pay for runs whose result is blank anyway."""
+    ctx = _break_even_context(fake_problem, [5.0, 0.0, 0.0, 0.0, 0.0])
+    ctx.train_seconds = None
+
+    def must_not_run() -> None:
+        raise AssertionError("the default-start runs were requested")
+
+    ctx.default_start_fn = must_not_run
+    del ctx.__dict__["optimization"]
+    assert np.isnan(METRICS["designs_to_break_even"].fn(ctx))
+    assert fake_problem.optimize_calls == 0
+
+
 def test_break_even_is_blank_for_a_problem_with_no_default_start(fake_problem: Any) -> None:
     ctx = _break_even_context(fake_problem, [5.0, 0.0, 0.0, 0.0, 0.0])
     ctx.default_start_fn = lambda: None

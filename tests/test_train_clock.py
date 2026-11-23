@@ -40,6 +40,14 @@ def test_a_running_clock_refuses_to_report() -> None:
         clock.metadata(n_train_steps=1)
 
 
+def test_starting_a_running_clock_is_an_error() -> None:
+    """A second start would silently drop the span since the first."""
+    clock = TrainClock(th.device("cpu"))
+    clock.start()
+    with pytest.raises(RuntimeError, match="already running"):
+        clock.start()
+
+
 def test_pausing_a_stopped_clock_is_an_error() -> None:
     with pytest.raises(RuntimeError, match="not running"):
         TrainClock(th.device("cpu")).pause()

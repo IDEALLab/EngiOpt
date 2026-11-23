@@ -38,6 +38,8 @@ class TrainClock:
 
     def start(self) -> None:
         """Start, or resume, timing."""
+        if self._started_at is not None:
+            raise RuntimeError("TrainClock.start() was called while the clock was already running.")
         self._started_at = time.perf_counter()
 
     def pause(self) -> None:
