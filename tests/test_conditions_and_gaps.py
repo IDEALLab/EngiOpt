@@ -17,6 +17,7 @@ from engiopt.evaluation.context import MultiObjectiveScalarizationError
 from engiopt.evaluation.registry import METRICS
 from engiopt.transforms import get_image_condition_keys
 from engiopt.transforms import get_scalar_condition_keys
+from tests.conftest import FakeDataset
 from tests.conftest import FakeViolations
 
 # Importing the metrics package registers the built-ins.
@@ -283,6 +284,8 @@ def test_signs_are_per_objective_for_mixed_directions() -> None:
 
 def _feasibility_context(problem: Any, design_value: float, **kwargs: Any) -> EvaluationContext:
     designs = np.full((1, *problem.design_space.shape), design_value)
+    # A feasibility check reads the design's conditions, so a context without them reports nothing.
+    kwargs.setdefault("conditions", FakeDataset({"volfrac": [design_value]}))
     return EvaluationContext(
         problem=problem,
         problem_id="fake",
