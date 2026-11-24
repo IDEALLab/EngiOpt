@@ -129,7 +129,7 @@ class Evaluator:
         Args:
             problem_id: EngiBench problem registry key.
             spec: `"<problem_id>/<version>"`, an `EvalSpec`, or None to load
-                the problem's current spec version.
+                the newest spec committed for the problem.
             device: Torch device; auto-selected when omitted.
             registry: Metric registry override, useful in tests.
         """

@@ -1,9 +1,10 @@
 {
-  "condition_digest": "40030d1b2482e003",
+  "aggregation": "mean",
+  "condition_digest": "aa13508d396239d5",
   "condition_seed": 1,
-  "dataset_id": "IDEALLab/heat_conduction_2d_v0",
-  "dataset_revision": "9f07c1e70d244f783e34a71c96db621173871dc1",
-  "engibench_version": "0.2.0+0a028c03d02b",
+  "dataset_id": "IDEALLab/heat_conduction_2d_v1",
+  "dataset_revision": "9277ee7476626250e5c9f9ed12e0dd21d181b532",
+  "engibench_version": "0.2.0+27055ae4248f",
   "metrics": [
     "mmd",
     "coverage",
@@ -25,11 +26,11 @@
     "reaches_reference_rate"
   ],
   "n_samples": 50,
-  "notes": "Feasibility = EngiBench constraints plus the volume budget. v2: the full metric suite on the one-decorator contract; `dpp` is now the n-th-root (geometric-mean) form and is not comparable with v1's raw determinant; `novelty` became `train_distance`; aggregation is declared here and recorded in every row.",
+  "notes": "Feasibility = EngiBench constraints plus the volume budget. v3: v2 on heat_conduction_2d_v1, where the volume target is named volfrac. Same rows, same draws, same metrics as v2.",
   "objective_weight_condition": null,
   "objective_weights": null,
   "problem_conditions": [
-    "volume",
+    "volfrac",
     "length"
   ],
   "problem_id": "heatconduction2d",
@@ -39,8 +40,7 @@
     3
   ],
   "sigma": null,
-  "version": "v2",
+  "version": "v3",
   "volfrac_tol": 0.01,
-  "volume_condition": "volume",
-  "aggregation": "mean"
+  "volume_condition": "volfrac"
 }
