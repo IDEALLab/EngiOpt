@@ -8,6 +8,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import time
+from typing import Literal
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import matplotlib.pyplot as plt
@@ -53,6 +54,8 @@ class Args:
     """Enable strict deterministic operations for reproducibility debugging."""
     save_model: bool = False
     """Saves the model to disk."""
+    checkpoint_backend: Literal["hf", "local"] = "hf"
+    """Where the package goes. `hf` publishes it. `local` writes it to this machine, to try the loader first."""
 
     # Algorithm specific
     n_epochs: int = 200
@@ -288,7 +291,7 @@ if __name__ == "__main__":
                 th.save(ckpt_gen, "generator.pth")
                 th.save(ckpt_disc, "discriminator.pth")
                 save_checkpoint_package(
-                    checkpoint_backend="hf",
+                    checkpoint_backend=args.checkpoint_backend,
                     hf_entity=args.hf_entity,
                     hf_repo_prefix=args.hf_repo_prefix,
                     hf_private=False,

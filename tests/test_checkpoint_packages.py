@@ -83,6 +83,155 @@ def test_a_missing_local_directory_says_so(tmp_path: Path) -> None:
 
 
 # ----------------------------------------------------------------------
+# Saving to a local directory
+# ----------------------------------------------------------------------
+
+
+def _save_locally(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, *, files: tuple[str, ...] = ("generator.pth",), **overrides: Any
+) -> dict[str, Any]:
+    """Save a package with the local backend, from `tmp_path`, with the Hub made unreachable."""
+
+    def no_hub(*args: Any, **kwargs: Any) -> None:
+        raise AssertionError("a local save must not touch the Hub")
+
+    monkeypatch.setattr(checkpoint_store, "HfApi", no_hub)
+    monkeypatch.chdir(tmp_path)
+    for name in files:
+        (tmp_path / name).write_bytes(name.encode())
+    arguments: dict[str, Any] = {
+        "checkpoint_backend": "local",
+        "hf_entity": "nobody",
+        "hf_repo_prefix": "engiopt",
+        "hf_private": False,
+        "problem_id": "beams2d",
+        "algo": "demo",
+        "seed": 1,
+        "checkpoint_files": {name: str(tmp_path / name) for name in files},
+        "run_config": {"latent_dim": 32},
+    }
+    return checkpoint_store.save_checkpoint_package(**{**arguments, **overrides})
+
+
+def _load_locally(*, required_files: tuple[str, ...] = ("generator.pth",)) -> checkpoint_store.ResolvedCheckpoint:
+    """Load the `demo` package by name, with no directory given."""
+    return checkpoint_store.resolve_named_checkpoint(
+        model_source="local",
+        problem_id="beams2d",
+        algo="demo",
+        seed=1,
+        hf_entity="nobody",
+        hf_repo_prefix="engiopt",
+        required_files=list(required_files),
+    )
+
+
+def test_a_local_save_is_found_by_a_local_load_with_no_path_typed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Training with the local backend and loading with the local source must meet without a directory argument."""
+    info = _save_locally(tmp_path, monkeypatch, metadata={"n_train_steps": 200}, condition_keys=("volfrac",))
+
+    resolved = _load_locally()
+
+    assert Path(info["local_package_dir"]) == Path("local_checkpoints/demo/beams2d/seed_1")
+    assert resolved.source == "local"
+    assert resolved.run_config == {"latent_dim": 32}
+    assert Path(resolved.files["generator.pth"]).read_bytes() == b"generator.pth"
+    assert resolved.metadata["n_train_steps"] == 200, "what the training script recorded travels with a local package too"
+    assert resolved.metadata["condition_keys"] == ["volfrac"]
+    assert resolved.content_hash
+
+
+def test_a_local_save_leaves_the_published_address_blank(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A row scored from it must be refused by the board, so it must not look as if it were published."""
+    info = _save_locally(tmp_path, monkeypatch)
+    resolved = _load_locally()
+
+    assert info["hf_repo_id"] is None
+    assert info["hf_package_path"] is None
+    assert resolved.repo_id is None
+    assert resolved.revision is None
+
+
+def test_a_second_local_save_replaces_the_first(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A rerun that saves fewer files must not load a mixture of two runs' weights."""
+    _save_locally(tmp_path, monkeypatch, files=("generator.pth", "discriminator.pth"))
+    _save_locally(tmp_path, monkeypatch, files=("generator.pth",))
+
+    assert sorted(path.name for path in Path("local_checkpoints/demo/beams2d/seed_1").iterdir()) == [
+        "generator.pth",
+        "metadata.json",
+        "run_config.json",
+    ]
+
+
+def test_a_local_save_refuses_a_directory_that_is_not_a_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Replacing a package deletes what was there, so only a package may be replaced."""
+    notes = tmp_path / "thesis"
+    notes.mkdir()
+    (notes / "chapter1.tex").write_text("irreplaceable")
+
+    with pytest.raises(ValueError, match="not a checkpoint package"):
+        _save_locally(tmp_path, monkeypatch, local_dir=str(notes))
+
+    assert (notes / "chapter1.tex").read_text() == "irreplaceable"
+
+
+def test_a_local_save_survives_its_weights_already_being_in_the_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Saving over a package from inside it must not delete the file it is about to copy."""
+    package = _write_package(tmp_path / "pkg", weights=b"retrained")
+
+    _save_locally(
+        tmp_path,
+        monkeypatch,
+        files=(),
+        checkpoint_files={"generator.pth": str(package / "generator.pth")},
+        local_dir=str(package),
+    )
+
+    assert (package / "generator.pth").read_bytes() == b"retrained"
+
+
+def test_an_unfinished_local_stage_adds_to_the_package(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A multi-stage model saves stage by stage, and a later stage must not delete an earlier one's file."""
+    _save_locally(tmp_path, monkeypatch, files=("stage_one.pth",), package_complete=False)
+    _save_locally(tmp_path, monkeypatch, files=("stage_two.pth",), package_complete=False)
+
+    present = {path.name for path in Path("local_checkpoints/demo/beams2d/seed_1").iterdir()}
+    assert {"stage_one.pth", "stage_two.pth"} <= present
+
+
+def test_the_template_trains_saves_and_loads_without_an_account(
+    fake_problem: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The newcomer's first hour: save the template's network locally, load it by name, generate designs."""
+    from engiopt.generators._template.adapter import MyModel
+    from engiopt.generators._template.my_model import Generator as TemplateNet
+
+    keys = ("volfrac", "rmin")
+    trained = TemplateNet(latent_dim=8, n_conds=len(keys), design_shape=fake_problem.design_space.shape)
+    monkeypatch.chdir(tmp_path)
+    th.save({"generator": trained.state_dict()}, "generator.pth")
+    _save_locally(
+        tmp_path,
+        monkeypatch,
+        files=(),
+        algo="my_model",
+        problem_id="fake",
+        checkpoint_files={"generator.pth": "generator.pth"},
+        run_config={"latent_dim": 8},
+        condition_keys=keys,
+    )
+
+    loaded = MyModel.from_pretrained(fake_problem, problem_id="fake", device=th.device("cpu"), model_source="local")
+
+    for name, weights in trained.state_dict().items():
+        assert th.equal(loaded.net.state_dict()[name], weights), name
+    assert loaded.sample(th.full((4, len(keys)), 0.5), n=4, seed=0).shape == (4, *fake_problem.design_space.shape)
+
+
+# ----------------------------------------------------------------------
 # Identifying the exact weights
 # ----------------------------------------------------------------------
 

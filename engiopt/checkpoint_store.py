@@ -122,8 +122,25 @@ def identity_metadata(metadata: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in metadata.items() if key not in ADDRESS_METADATA_FIELDS}
 
 
-CheckpointBackend = Literal["hf", "none"]
+CheckpointBackend = Literal["hf", "local", "none"]
 ModelSource = Literal["auto", "hf", "local"]
+
+LOCAL_PACKAGE_DIR = "local_checkpoints/{algo}/{problem_id}/seed_{seed}"
+"""Where a `local` save writes a package, and where a `local` load looks for one.
+
+Relative to the working directory. One location for both sides, so training
+with `--checkpoint-backend local` and evaluating with `--model-source local`
+find each other with no path typed. There is one package per model, problem
+and seed: a local package is for trying a model out, so a second run replaces
+the first instead of being filed beside it under its own configuration.
+"""
+
+
+def local_package_dir(algo: str, problem_id: str, seed: int) -> str:
+    """The directory a local package for this model, problem and seed lives in."""
+    return LOCAL_PACKAGE_DIR.format(
+        algo=_sanitize_path_component(algo), problem_id=_sanitize_path_component(problem_id), seed=seed
+    )
 
 
 @dataclass(frozen=True)
@@ -191,8 +208,19 @@ def save_checkpoint_package(
     condition_normalizer: dict[str, Any] | None = None,
     design_normalizer: dict[str, Any] | None = None,
     package_complete: bool = True,
+    local_dir: str | None = None,
 ) -> dict[str, Any]:
-    """Save a checkpoint package to HuggingFace.
+    """Save a checkpoint package, to HuggingFace or to a local directory.
+
+    `checkpoint_backend="local"` writes the same package to a directory on this
+    machine and uploads nothing. It exists so a loader can be tested against
+    what its training script saved before anything is published: no account, no
+    token, and no public repository. The directory is `local_dir`, or the
+    standard `LOCAL_PACKAGE_DIR` when that is omitted, which is also where
+    `model_source="local"` looks. A row scored from a local package cannot be
+    published, because nobody else could fetch the weights.
+
+    The rest of this describes the HuggingFace layout.
 
     A run is filed under up to three paths in its model repo:
 
@@ -253,6 +281,16 @@ def save_checkpoint_package(
         package_complete=package_complete,
     )
     base_metadata.update(_build_wandb_run_metadata())
+
+    if checkpoint_backend == "local":
+        if config_fingerprint:
+            base_metadata["config_fingerprint"] = config_fingerprint
+        info["local_package_dir"] = _write_local_package(
+            directory=local_dir or local_package_dir(algo, problem_id, seed),
+            checkpoint_files=checkpoint_files,
+            run_config=run_config,
+            metadata=base_metadata,
+        )
 
     if checkpoint_backend == "hf":
         repo_id = build_hf_repo_id(hf_entity, hf_repo_prefix, algo)
@@ -348,6 +386,10 @@ def resolve_named_checkpoint(
             if model_source == "hf":
                 raise
             errors.append(f"hf: {exc}")
+
+    # Asked for a local package and given no directory: look where a local save writes one.
+    if local_model_dir is None and model_source == "local":
+        local_model_dir = local_package_dir(algo, problem_id, seed)
 
     if local_model_dir is not None and model_source in {"auto", "local"}:
         return _resolve_local_package(local_model_dir, required_files)
@@ -556,6 +598,48 @@ def _upload_package_to_hf(
     return getattr(commit_info, "oid", None)
 
 
+def _write_local_package(
+    *,
+    directory: str,
+    checkpoint_files: dict[str, str],
+    run_config: dict[str, Any],
+    metadata: dict[str, Any],
+) -> str:
+    """Write a package into a local directory, replacing a package already there.
+
+    The same rule as an upload: a complete package *is* its files, so whatever a
+    previous run left in the directory is removed first. Otherwise a rerun that
+    saves fewer files would load a mixture of two runs' weights.
+
+    Removing files is only safe in a directory that holds a package and nothing
+    else, so a directory that has contents and no `run_config.json` is refused
+    instead of being cleared.
+    """
+    target = Path(directory)
+    if target.is_dir() and any(target.iterdir()) and not (target / RUN_CONFIG_FILE).exists():
+        raise ValueError(
+            f"{directory} holds files and is not a checkpoint package (it has no {RUN_CONFIG_FILE}). "
+            "Refusing to write a package into it. Choose an empty directory, or one that holds an earlier package."
+        )
+    # Staged first, as an upload is, so a weight file that already sits in the
+    # target directory is read before the old package is cleared.
+    with tempfile.TemporaryDirectory() as tmpdir:
+        stage_dir = Path(tmpdir)
+        for package_name, file_path in checkpoint_files.items():
+            shutil.copy2(file_path, stage_dir / package_name)
+        _write_json(stage_dir / RUN_CONFIG_FILE, run_config)
+        _write_json(stage_dir / METADATA_FILE, metadata)
+
+        target.mkdir(parents=True, exist_ok=True)
+        if metadata.get(PACKAGE_COMPLETE_FIELD, True):
+            for entry in target.iterdir():
+                if entry.is_file():
+                    entry.unlink()
+        for staged in stage_dir.iterdir():
+            shutil.copy2(staged, target / staged.name)
+    return str(target)
+
+
 def _stale_file_patterns(metadata: dict[str, Any]) -> list[str] | None:
     """What to delete from a package path that this upload is not replacing.
 
@@ -604,7 +688,10 @@ def _resolve_hf_package(
 
 def _resolve_local_package(local_model_dir: str, required_files: list[str]) -> ResolvedCheckpoint:
     if not os.path.isdir(local_model_dir):
-        raise FileNotFoundError(f"Local checkpoint directory not found: {local_model_dir}")
+        raise FileNotFoundError(
+            f"Local checkpoint directory not found: {local_model_dir}. A training script that saves with "
+            'checkpoint_backend="local" writes one, relative to the directory it was run from.'
+        )
     return _load_package_from_directory(root_dir=local_model_dir, required_files=required_files, source="local")
 
 
