@@ -514,9 +514,19 @@ def designs_to_break_even(ctx: EvaluationContext) -> float:
       the problem's default start, minus the calls needed from the generated
       design, times the seconds one call takes, minus the time to generate the
       design. Both call counts use the band of `calls_to_near_optimum`.
-    - `dataset_seconds`: the number of training designs times the seconds of
-      one whole optimizer run from the default start. An estimate, since it
-      prices the dataset on this machine rather than the one that made it.
+    - `dataset_seconds`: the number of training designs times the optimizer
+      calls to get near the optimum from the default start, times the seconds
+      one call takes. An estimate, since it prices the dataset on this machine
+      rather than the one that made it.
+
+    The dataset and the saving are priced by the same stopping rule, the band.
+    Pricing the dataset at whole runs and the saving at the band would charge
+    the model for optimizer calls that a run from scratch is never credited
+    with avoiding: on beams2d a whole run is about 90 calls and the band is
+    reached after about 20. With one rule the metric has a reading that is easy
+    to check. A model that generates the optimum itself, at no cost and with no
+    training, saves exactly what one training design cost, so it breaks even at
+    the size of its own training set.
 
     Every time is measured in this evaluation except `train_seconds`, which the
     training script declares. NaN when the checkpoint records no training time,
@@ -551,5 +561,5 @@ def designs_to_break_even(ctx: EvaluationContext) -> float:
     if seconds_saved_per_design <= 0:
         return float("inf")
 
-    dataset_seconds = len(ctx.train_designs) * ctx.reduce(from_default.optimizer_seconds)
+    dataset_seconds = len(ctx.train_designs) * ctx.reduce(default_calls) * seconds_per_call
     return float((dataset_seconds + ctx.train_seconds) / seconds_saved_per_design)
