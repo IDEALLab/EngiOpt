@@ -12,7 +12,7 @@ The contract is two methods and a handful of class attributes.
 
 ## The whole path at a glance
 
-One directory, two files, four steps. The sections below explain each one.
+One directory, three files, four steps. The sections below explain each one.
 
 | Step | What you do | What you get |
 |---|---|---|
@@ -33,6 +33,11 @@ python -m engiopt.evaluate --problem-id beams2d --generators my_model --seeds 1 
   --hf-entity my-hf-username --include-expensive --push-to IDEALLab/engiopt-leaderboard
 ```
 
+Two accounts are involved before you start. Publishing needs a HuggingFace
+account and a write token (`huggingface-cli login`). Training logs to Weights &
+Biases by default, which needs a login of its own. Pass `--no-track` to train
+without one.
+
 Three steps still need a maintainer today. Your code has to be merged before a
 row can be ranked, because the runner rebuilds your model from this repository.
 `--push-to` needs write access to the board. A maintainer runs the verification.
@@ -46,6 +51,23 @@ cp -r engiopt/generators/_template engiopt/generators/my_model
 
 The directory name **is** your `algo_id`: it keys the registry, the leaderboard,
 and your HuggingFace repo. Use lowercase with underscores.
+
+The template is a working pair of a training script and a loader, plus an empty
+`__init__.py`. If your model is not called `my_model`, the name has to change in
+three places, and they must agree:
+
+| Where | What to change |
+|---|---|
+| The training script's filename | `my_model.py` becomes `<your_name>.py`. The script names its checkpoint repository after its own filename |
+| `algo_id` in `adapter.py` | `"my_model"` becomes `"<your_name>"` |
+| The import at the top of `adapter.py` | It must point at `engiopt.generators.<your_name>.<your_name>` |
+
+A mismatch is easy to miss, because the model is still listed. This test
+catches it:
+
+```bash
+python -m pytest tests/test_generator_registry.py -q
+```
 
 ## 2. Write the training script
 
@@ -184,15 +206,33 @@ Then implement the two methods:
   and clamping are handled for you; return whatever shape is natural.
 
 ```python
+def __init__(self, net, latent_dim, **kwargs):
+    super().__init__(**kwargs)  # the base class keeps the problem, device and checkpoint details
+    self.net = net
+    self.latent_dim = latent_dim
+
+
 @classmethod
 def build(cls, resolved, problem, device, **base):
     config = resolved.run_config
-    net = MyNet(latent_dim=config["latent_dim"], design_shape=problem.design_space.shape).to(device)
+    net = MyNet(
+        latent_dim=config["latent_dim"],
+        n_conds=len(condition_keys_for(problem, resolved)),
+        design_shape=design_shape_of(problem),
+    ).to(device)
     state = th.load(resolved.files["generator.pth"], map_location=device, weights_only=True)
     net.load_state_dict(state[cls.primary_state_key])
     net.eval()
     return cls(net=net, latent_dim=config["latent_dim"], problem=problem, device=device, **base)
 ```
+
+This is the code in the template's `adapter.py`, which runs as copied against
+the template's training script. `condition_keys_for` and `design_shape_of` come
+from `engiopt.core`.
+
+Three names have to match between the two files, because one writes what the
+other reads: the checkpoint filename (`generator.pth`), the key the weights are
+saved under (`generator`), and the network's constructor arguments.
 
 Exactly one `Generator` subclass per adapter module. EngiBench applies the same
 rule to `Problem` classes, so the name-to-model mapping stays unambiguous.
@@ -207,6 +247,12 @@ conditions.dataset  # original columns, if you need them
 conditions.keys  # condition names, in column order
 ```
 
+The base class prepares that tensor before `_sample` is called. It selects the
+columns your run recorded as `condition_keys`, in that order, and applies the
+`condition_stats` your run recorded, if any. So `require_tensor` returns what
+your network saw in training, and `_sample` does no scaling of its own. If you
+recorded no `condition_stats`, the values arrive unscaled.
+
 Most models want `require_tensor`. Reach for `dataset` only for conditions that
 **cannot travel in the dense tensor at all**. thermoelastic2d's 65x65 boundary
 matrices are one example, and `condition_keys` excludes them for exactly that reason.
@@ -218,6 +264,8 @@ split's statistics nor the same set of columns that never vary. Anything you
 fitted during training travels with the weights instead, and is replayed on load:
 
 ```python
+from engiopt.transforms import normalizer_state
+
 save_checkpoint_package(
     ...,
     condition_stats={"mean": [...], "std": [...]},  # if you rescaled conditions
@@ -237,9 +285,25 @@ still handed conditions so that `cond_sens` can measure it. See
 ## 4. Check it
 
 ```bash
+python -m pytest tests/test_generator_registry.py -q      # the names agree
 python -m engiopt.evaluate --list-generators              # your model should appear
 python -m engiopt.evaluate --problem-id beams2d --generators my_model --hf-entity my-hf-username
 ```
+
+The last command loads the checkpoint trained at your script's default
+settings. A run with any setting changed, such as a short `--n-steps 50` trial,
+is stored under its own configuration fingerprint and is not what the bare model
+name resolves to. To evaluate such a run, name its fingerprint. The
+package path in your HuggingFace repository shows it as `cfg_<fingerprint>`:
+
+```bash
+python -m engiopt.evaluate --problem-id beams2d --generators my_model \
+  --config-fingerprints my_model:<fingerprint> --hf-entity my-hf-username
+```
+
+There is no way yet to check the loader against a checkpoint without publishing
+it. The first test that `build` matches what the training script saved is this
+evaluation, after an upload.
 
 The default pass runs every metric that needs no simulator: the set-level
 ones (`mmd`, `coverage`, `vendi`, `dpp`), the per-condition ones
@@ -313,7 +377,7 @@ in a notebook cell and it will appear in the next leaderboard you build.
 
 HuggingFace holds everything that must be reloaded or compared; W&B holds what
 you only look at. Nothing in the evaluation path requires W&B. Training with
-`--track false` produces exactly the same checkpoints and scores.
+`--no-track` produces exactly the same checkpoints and scores.
 
 To attach a model's scores to its own checkpoint:
 

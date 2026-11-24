@@ -74,8 +74,8 @@ class Args:
     Feasibility is *not* here. `viol` describes the design as generated, so it
     is a constraint check rather than a solver run, and it still reports when
     the optimizer refuses to start from an invalid design -- the case where the
-    answer matters most. The cheap pass is `mmd`, `dpp`, `viol`, `novelty` and
-    `cond_sens`."""
+    answer matters most. The cheap pass is every metric
+    `--list-metrics` marks cheap."""
     output_csv: str = "leaderboard_{problem_id}.csv"
     """Where to append results locally; may include `{problem_id}`."""
     push_to: str | None = None
