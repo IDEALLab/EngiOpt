@@ -222,11 +222,24 @@ def test_break_even_divides_the_upfront_cost_by_the_saving_per_design(fake_probl
     The generated design is near optimal after 1 call and the default start
     after 4, so 3 calls are saved, which is 3 seconds. Generating one design
     takes 2.0 / 2 = 1 second, leaving 2 seconds saved per design. The dataset
-    holds 100 designs at 5 seconds each, and training took 120 seconds:
-    (500 + 120) / 2 = 310 designs.
+    holds 100 designs, each priced at the 4 calls the default start needs, so 400
+    seconds, and training took 120 seconds: (400 + 120) / 2 = 260 designs.
     """
     ctx = _break_even_context(fake_problem, [5.0, 0.0, 0.0, 0.0, 0.0])
-    assert METRICS["designs_to_break_even"].fn(ctx) == pytest.approx(310.0)
+    assert METRICS["designs_to_break_even"].fn(ctx) == pytest.approx(260.0)
+
+
+def test_a_perfect_free_model_breaks_even_at_the_size_of_its_training_set(fake_problem: Any) -> None:
+    """The reading that makes the number checkable by eye.
+
+    A model that returns the optimum itself needs no optimizer calls. If it also
+    generates and trains for free, each design saves exactly what one training
+    design cost, because both are priced by the same stopping rule. It has then
+    repaid its dataset after as many designs as the dataset holds: 100.
+    """
+    ctx = _break_even_context(fake_problem, [0.0, 0.0, 0.0, 0.0, 0.0], sample_seconds=0.0)
+    ctx.train_seconds = 0.0
+    assert METRICS["designs_to_break_even"].fn(ctx) == pytest.approx(100.0)
 
 
 def test_break_even_is_infinite_when_the_model_saves_nothing(fake_problem: Any) -> None:
@@ -250,10 +263,10 @@ def test_break_even_follows_the_aggregation_policy(fake_problem: Any) -> None:
     ctx.default_start_fn = lambda: OptimizationResults(
         trajectories=[slow] * 3, reference_objectives=[10.0] * 3, optimizer_seconds=[5.0] * 3
     )
-    # Calls saved are 3, 3 and 0: mean 2, median 3. Upfront cost is 100 * 5 + 120 = 620 seconds.
-    assert METRICS["designs_to_break_even"].fn(ctx) == pytest.approx(620.0 / 2.0)
+    # Calls saved are 3, 3 and 0: mean 2, median 3. Upfront cost is 100 * 4 + 120 = 520 seconds.
+    assert METRICS["designs_to_break_even"].fn(ctx) == pytest.approx(520.0 / 2.0)
     ctx.aggregation = "median"
-    assert METRICS["designs_to_break_even"].fn(ctx) == pytest.approx(620.0 / 3.0)
+    assert METRICS["designs_to_break_even"].fn(ctx) == pytest.approx(520.0 / 3.0)
 
 
 def test_break_even_is_blank_when_no_optimizer_run_was_timed(fake_problem: Any) -> None:
