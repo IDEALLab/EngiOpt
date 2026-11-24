@@ -11,7 +11,12 @@ from training:
 The placeholder model is a small conditional network trained to reproduce the
 dataset's designs. It is here to show the plumbing, not to be a good model.
 
-Run it as, for example:
+Try it first without publishing anything:
+
+    python engiopt/generators/my_model/my_model.py --problem-id beams2d --n-steps 200 --no-track --save-model --checkpoint-backend local
+    python -m engiopt.evaluate --problem-id beams2d --generators my_model --model-source local
+
+Then publish a real run:
 
     python engiopt/generators/my_model/my_model.py --problem-id beams2d --seed 1 --save-model --hf-entity my-hf-username
 
@@ -23,7 +28,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import os
 import time
-from typing import TYPE_CHECKING
+from typing import Literal, TYPE_CHECKING
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import numpy as np
@@ -68,7 +73,9 @@ class Args:
     seed: int = 1
     """Random seed."""
     save_model: bool = False
-    """Publish the checkpoint package when training ends. Off by default, so a trial run uploads nothing."""
+    """Save the checkpoint package when training ends. Off by default, so a trial run saves nothing."""
+    checkpoint_backend: Literal["hf", "local"] = "hf"
+    """Where the package goes. `hf` publishes it. `local` writes it to this machine, to try the loader first."""
     sample_interval: int = 100
     """Steps between logged losses."""
 
@@ -162,7 +169,7 @@ if __name__ == "__main__":
     if args.save_model:
         th.save({"generator": generator.state_dict()}, "generator.pth")
         save_checkpoint_package(
-            checkpoint_backend="hf",
+            checkpoint_backend=args.checkpoint_backend,
             hf_entity=args.hf_entity,
             hf_repo_prefix=args.hf_repo_prefix,
             hf_private=False,

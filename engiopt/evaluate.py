@@ -97,7 +97,9 @@ class Args:
 
     The package layout is the one `save_checkpoint_package` writes: the weight
     files plus `run_config.json` and `metadata.json`. `{algo}` and `{seed}` are
-    substituted, so one directory template can serve a multi-model run."""
+    substituted, so one directory template can serve a multi-model run. Omit it
+    to load from where a training script run with `--checkpoint-backend local`
+    saves, which is `local_checkpoints/{algo}/{problem_id}/seed_{seed}`."""
     hf_entity: str = "IDEALLab"
     """HF org/user holding the checkpoints."""
     hf_repo_prefix: str = "engiopt"

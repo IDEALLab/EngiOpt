@@ -33,10 +33,11 @@ python -m engiopt.evaluate --problem-id beams2d --generators my_model --seeds 1 
   --hf-entity my-hf-username --include-expensive --push-to IDEALLab/engiopt-leaderboard
 ```
 
-Two accounts are involved before you start. Publishing needs a HuggingFace
-account and a write token (`huggingface-cli login`). Training logs to Weights &
-Biases by default, which needs a login of its own. Pass `--no-track` to train
-without one.
+You need no account to try a model. Section 4 trains, saves, loads and scores
+one on your own machine. Two accounts come in later. Publishing needs a
+HuggingFace account and a write token (`huggingface-cli login`). Training logs
+to Weights & Biases by default, which needs a login of its own. Pass
+`--no-track` to train without one.
 
 Three steps still need a maintainer today. Your code has to be merged before a
 row can be ranked, because the runner rebuilds your model from this repository.
@@ -284,26 +285,45 @@ still handed conditions so that `cond_sens` can measure it. See
 
 ## 4. Check it
 
+Check the loader on this machine first, before publishing anything. It needs
+no account and no token:
+
 ```bash
 python -m pytest tests/test_generator_registry.py -q      # the names agree
 python -m engiopt.evaluate --list-generators              # your model should appear
+
+python engiopt/generators/my_model/my_model.py --problem-id beams2d \
+  --n-steps 200 --no-track --save-model --checkpoint-backend local
+python -m engiopt.evaluate --problem-id beams2d --generators my_model --model-source local
+```
+
+`--checkpoint-backend local` writes the same package a published run would, into
+`local_checkpoints/my_model/beams2d/seed_1` under the directory you ran from.
+`--model-source local` loads from that same place, so no path is typed. A second
+local run replaces the first. This is the quickest proof that `build` matches
+what your training script saved, and that your conditions reach the network.
+
+Your script needs a `checkpoint_backend` argument that it passes to
+`save_checkpoint_package`, as the template's does. A row scored from a local
+package cannot be pushed to the board, because nobody else could fetch the
+weights.
+
+Then check the published model:
+
+```bash
 python -m engiopt.evaluate --problem-id beams2d --generators my_model --hf-entity my-hf-username
 ```
 
-The last command loads the checkpoint trained at your script's default
-settings. A run with any setting changed, such as a short `--n-steps 50` trial,
-is stored under its own configuration fingerprint and is not what the bare model
-name resolves to. To evaluate such a run, name its fingerprint. The
-package path in your HuggingFace repository shows it as `cfg_<fingerprint>`:
+That command loads the checkpoint trained at your script's default settings. A
+published run with any setting changed, such as a short `--n-steps 50` trial, is
+stored under its own configuration fingerprint and is not what the bare model
+name resolves to. To evaluate such a run, name its fingerprint. The package path
+in your HuggingFace repository shows it as `cfg_<fingerprint>`:
 
 ```bash
 python -m engiopt.evaluate --problem-id beams2d --generators my_model \
   --config-fingerprints my_model:<fingerprint> --hf-entity my-hf-username
 ```
-
-There is no way yet to check the loader against a checkpoint without publishing
-it. The first test that `build` matches what the training script saved is this
-evaluation, after an upload.
 
 The default pass runs every metric that needs no simulator: the set-level
 ones (`mmd`, `coverage`, `vendi`, `dpp`), the per-condition ones
