@@ -105,9 +105,11 @@ def test_builtin_metrics_declare_their_cost() -> None:
         "vendi",
         "generation_seconds",
         "n_parameters",
-        "train_minutes",
+        "train_seconds",
+        "n_train_steps",
     }
     assert {spec.name for spec in METRICS.select(cost="expensive")} == {
+        "designs_to_break_even",
         "iog",
         "cog",
         "fog",

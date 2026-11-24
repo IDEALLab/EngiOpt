@@ -431,12 +431,15 @@ def reaches_reference_rate(ctx: EvaluationContext) -> float:
     pixel_only=True,
 )
 def generation_seconds(ctx: EvaluationContext) -> float:
-    """Wall-clock seconds the model took to generate the evaluation batch. Comparable only between models run on the same machine.
+    """Wall-clock seconds the model took to generate one design. Comparable only between models run on the same machine.
 
-    Wall-clock, so it compares models within one run on one machine, not across
-    machines. NaN when the designs did not come from a timed `Generator.sample`.
+    The evaluation batch is timed after one untimed warm-up draw, and the time
+    is divided by the number of designs, so the value does not change with the
+    spec's sample count. Wall-clock, so it compares models within one run on one
+    machine, not across machines. NaN when the designs did not come from a
+    timed `Generator.sample`.
     """
-    return float("nan") if ctx.sample_seconds is None else float(ctx.sample_seconds)
+    return float("nan") if ctx.sample_seconds is None else float(ctx.sample_seconds) / ctx.n_samples
 
 
 @register_metric(
@@ -457,18 +460,106 @@ def n_parameters(ctx: EvaluationContext) -> float:
 
 
 @register_metric(
-    "train_minutes",
+    "train_seconds",
     family="cost",
     cost="cheap",
     higher_is_better=False,
     pixel_only=True,
 )
-def train_minutes(ctx: EvaluationContext) -> float:
-    """Wall-clock minutes the model took to train, when the checkpoint records it. Blank where no checkpoint does.
+def train_seconds(ctx: EvaluationContext) -> float:
+    """Wall-clock seconds spent in the gradient steps of training, as the training script recorded them. Blank where the checkpoint records none.
 
     Prices the decision to adopt the method rather than a forward pass; it is
     where a lookup table and a diffusion model differ by orders of magnitude.
-    NaN unless the checkpoint records it, which today none do -- that gap is
-    itself a finding.
+    Logging, validation and uploads are excluded by the `TrainClock` that
+    measures it. Declared by whoever trained the model, on their own machine:
+    read it beside `n_train_steps`, which no machine changes. NaN unless the
+    training script recorded it.
     """
-    return float("nan") if ctx.train_minutes is None else float(ctx.train_minutes)
+    return float("nan") if ctx.train_seconds is None else float(ctx.train_seconds)
+
+
+@register_metric(
+    "n_train_steps",
+    family="cost",
+    cost="cheap",
+    higher_is_better=None,
+    pixel_only=True,
+)
+def n_train_steps(ctx: EvaluationContext) -> float:
+    """Passes of the training loop that produced the checkpoint. Blank where the checkpoint records none.
+
+    The part of the training cost that is the same on every machine. One pass
+    is one step, however many networks it updates. A diagnostic: fewer steps is
+    not better in itself, and steps of different models do not cost the same.
+    """
+    return float("nan") if ctx.n_train_steps is None else float(ctx.n_train_steps)
+
+
+@register_metric(
+    "designs_to_break_even",
+    family="cost",
+    cost="expensive",
+    higher_is_better=False,
+    pixel_only=True,
+)
+def designs_to_break_even(ctx: EvaluationContext) -> float:
+    """How many designs must be requested before the model is cheaper than running the optimizer from scratch every time. Infinite when a design from the model is no cheaper to finish than a fresh run.
+
+    A model is paid for once and saves a little on every design after that:
+
+        designs_to_break_even = (dataset_seconds + train_seconds) / seconds_saved_per_design
+
+    - `seconds_saved_per_design`: optimizer calls to get near the optimum from
+      the problem's default start, minus the calls needed from the generated
+      design, times the seconds one call takes, minus the time to generate the
+      design. Both call counts use the band of `calls_to_near_optimum`.
+    - `dataset_seconds`: the number of training designs times the optimizer
+      calls to get near the optimum from the default start, times the seconds
+      one call takes. An estimate, since it prices the dataset on this machine
+      rather than the one that made it.
+
+    The dataset and the saving are priced by the same stopping rule, the band.
+    Pricing the dataset at whole runs and the saving at the band would charge
+    the model for optimizer calls that a run from scratch is never credited
+    with avoiding: on beams2d a whole run is about 90 calls and the band is
+    reached after about 20. With one rule the metric has a reading that is easy
+    to check. A model that generates the optimum itself, at no cost and with no
+    training, saves exactly what one training design cost, so it breaks even at
+    the size of its own training set.
+
+    Every time is measured in this evaluation except `train_seconds`, which the
+    training script declares. NaN when the checkpoint records no training time,
+    the designs were not generated by a timed model, the problem has no
+    training split, or its optimizer has no default start.
+    """
+    if ctx.train_seconds is None or ctx.sample_seconds is None or ctx.train_designs is None:
+        return float("nan")
+    from_default = ctx.default_start_fn() if ctx.default_start_fn is not None else None
+    if from_default is None:
+        return float("nan")
+    from_generated = ctx.optimization
+    if not from_default.optimizer_seconds or not from_generated.optimizer_seconds:
+        return float("nan")  # no run was timed, so there is no rate to price a call at
+
+    all_seconds = sum(from_default.optimizer_seconds) + sum(from_generated.optimizer_seconds)
+    all_calls = sum(len(path) for path in from_default.trajectories) + sum(
+        len(path) for path in from_generated.trajectories
+    )
+    seconds_per_call = all_seconds / all_calls
+
+    default_calls = [
+        _calls_to_near_optimum(path, scale)
+        for path, scale in zip(from_default.trajectories, from_default.reference_objectives)
+    ]
+    generated_calls = [
+        _calls_to_near_optimum(path, scale)
+        for path, scale in zip(from_generated.trajectories, from_generated.reference_objectives)
+    ]
+    calls_saved = ctx.reduce(np.subtract(default_calls, generated_calls))
+    seconds_saved_per_design = calls_saved * seconds_per_call - ctx.sample_seconds / ctx.n_samples
+    if seconds_saved_per_design <= 0:
+        return float("inf")
+
+    dataset_seconds = len(ctx.train_designs) * ctx.reduce(default_calls) * seconds_per_call
+    return float((dataset_seconds + ctx.train_seconds) / seconds_saved_per_design)

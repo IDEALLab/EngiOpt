@@ -303,6 +303,7 @@ class Generator(abc.ABC):
         checkpoint_hash: str | None = None,
         checkpoint_repo: str | None = None,
         checkpoint_path: str | None = None,
+        checkpoint_metadata: dict[str, Any] | None = None,
     ) -> None:
         self.problem = problem
         self.problem_id = problem_id
@@ -325,6 +326,8 @@ class Generator(abc.ABC):
         """
         self.checkpoint_path = checkpoint_path
         """Package path inside `checkpoint_repo`, e.g. `beams2d/cfg_023dd1fb/seed_1`."""
+        self.checkpoint_metadata = checkpoint_metadata or {}
+        """The package's `metadata.json`, which is where a training script records what training cost."""
         self.last_sample_seconds: float | None = None
         """Wall-clock seconds for the most recent `sample` call (cost metrics)."""
 
@@ -420,6 +423,7 @@ class Generator(abc.ABC):
             checkpoint_hash=resolved.content_hash,
             checkpoint_repo=resolved.repo_id,
             checkpoint_path=resolved.package_path,
+            checkpoint_metadata=resolved.metadata,
             **kwargs,
         )
 
