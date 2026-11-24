@@ -202,7 +202,7 @@ def test_a_row_evaluated_from_a_local_directory_is_refused() -> None:
     """
     problems = admission_problems(_publishable(checkpoint_repo=None, checkpoint_path=None, checkpoint_revision=None))
 
-    assert any("--checkpoint-backend hf" in problem for problem in problems)
+    assert any("--save-model" in problem for problem in problems)
 
 
 def test_a_submitter_cannot_stamp_their_own_row_as_verified() -> None:

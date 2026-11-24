@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 import numpy as np
 import pytest
@@ -30,6 +30,43 @@ def test_algo_ids_match_directory_names() -> None:
 def test_template_is_not_registered() -> None:
     """The copy-me template must never appear as a real model."""
     assert "_template" not in BUILTIN_GENERATORS
+
+
+def test_the_template_loader_rebuilds_what_the_template_script_saves(fake_problem: Any, tmp_path: Path) -> None:
+    """The two template files are a pair, and a copy of them must work before anything is changed.
+
+    The training script writes its network's weights under one filename and one
+    key. The loader reads that filename and that key and rebuilds the network
+    from the saved settings. Nothing checks at import time that the two agree,
+    so this does: save the way the script saves, load the way the loader loads.
+    """
+    from engiopt.core import CONDITION_KEYS_METADATA_FIELD
+    from engiopt.generators._template.adapter import MyModel
+    from engiopt.generators._template.my_model import Generator as TemplateNet
+
+    keys = ("volfrac", "rmin")
+    latent_dim = 8
+    trained = TemplateNet(latent_dim=latent_dim, n_conds=len(keys), design_shape=fake_problem.design_space.shape)
+    th.save({"generator": trained.state_dict()}, tmp_path / "generator.pth")
+
+    class _Package:
+        run_config: ClassVar[dict[str, Any]] = {"latent_dim": latent_dim}
+        files: ClassVar[dict[str, str]] = {"generator.pth": str(tmp_path / "generator.pth")}
+        metadata: ClassVar[dict[str, Any]] = {CONDITION_KEYS_METADATA_FIELD: list(keys)}
+
+    loaded = MyModel.build(
+        _Package,
+        problem=fake_problem,
+        device=th.device("cpu"),
+        problem_id="fake",
+        seed=1,
+        condition_keys=keys,
+    )
+
+    for name, weights in trained.state_dict().items():
+        assert th.equal(loaded.net.state_dict()[name], weights), name
+    designs = loaded.sample(th.full((4, len(keys)), 0.5), n=4, seed=0)
+    assert designs.shape == (4, *fake_problem.design_space.shape)
 
 
 def test_every_generator_declares_the_files_it_needs() -> None:

@@ -12,12 +12,14 @@ This repository contains the code for optimization and machine learning algorith
 
 ## Coding Philosophy
 As much as we can, we follow the [CleanRL](https://github.com/vwxyzjn/cleanrl) philosophy: single-file, high-quality implementations with research-friendly features:
-* Single-file implementation: every training detail is in one file, so you can easily understand and modify the code. Evaluation is not per-model — every model is scored by one shared evaluator through the `Generator` contract in `adapter.py`, so a metric is added once rather than once per model.
+* Single-file implementation: every training detail is in one file, so you can easily understand and modify the code. Evaluation is not per-model. Every model is scored by one shared evaluator through the `Generator` contract in `adapter.py`, so a metric is added once rather than once per model.
 * High-quality: we use type hints, docstrings, and comments to make the code easy to understand. We also rely on linters for formatting and checking our code.
 * Logging: we use experiment tracking tools like [Weights & Biases](https://wandb.ai/site) to log the results of our experiments. All our "official" runs are logged in the [EngiOpt project](https://wandb.ai/engibench/engiopt).
 * Reproducibility: we seed all the random number generators, make PyTorch deterministic, report the hyperparameters and code in WandB.
 
 ## Implemented algorithms
+
+To add your own, follow [CONTRIBUTING_A_MODEL.md](CONTRIBUTING_A_MODEL.md). It covers the code, the checkpoints and the leaderboard on one page.
 
 
 **Algorithm** | **Class** | **Dimensions** | **Conditional?** | **Model**
@@ -42,7 +44,7 @@ Every algorithm above is registered, meaning this repository holds an adapter th
 can rebuild it. Being *evaluable* additionally needs published weights, and the two
 are not the same: `cgan_cnn_2d`, `diffusion_2d_cond`, `gan_cnn_2d`, and `vqgan` have
 checkpoints on HuggingFace, and the rest must be trained before they can be scored.
-The `Dimensions` column is the other half of the answer — a 1D or 3D generator has no
+The `Dimensions` column is the other half of the answer. A 1D or 3D generator has no
 `beams2d` checkpoint because it cannot serve a 2D problem at all, not because one is
 missing. For the live answer rather than this snapshot:
 
@@ -54,7 +56,7 @@ Historical W&B-era checkpoints are **not** being migrated; see
 [docs/checkpoint_layout.md](docs/checkpoint_layout.md#historical-checkpoints).
 
 ## Dashboards
-HuggingFace hosts everything that has to be reloaded or compared — model weights, run configs, evaluation metrics, and the leaderboard. WandB hosts what you only look at: loss curves and sample images. Nothing in the evaluation path requires WandB, so training with `--track false` produces exactly the same checkpoints and scores. You can access some of our runs at https://wandb.ai/engibench/engiopt.
+HuggingFace hosts everything that has to be reloaded or compared: model weights, run configs, evaluation metrics, and the leaderboard. WandB hosts what you only look at: loss curves and sample images. Nothing in the evaluation path requires WandB, so training with `--no-track` produces exactly the same checkpoints and scores. You can access some of our runs at https://wandb.ai/engibench/engiopt.
 <img src="imgs/wandb_dashboard.png" alt="WandB dashboards"/>
 
 
@@ -129,7 +131,7 @@ python -m engiopt.evaluate --problem-id "beams2d" --generators cgan_cnn_2d --see
 ```
 Evaluation pulls the checkpoint from HF automatically. Pass `--hf-entity` / `--hf-repo-prefix` to point at a different HF repo, and `--config-fingerprints` to score specific hyperparameter configurations instead of the default one.
 
-The fingerprint is needed here rather than optional. A bare `--seeds 1` resolves the **canonical** package, `{problem_id}/seed_1`, which only a run using the training script's default hyperparameters writes — and a hyperparameter sweep never writes one, because every arm varies something. `IDEALLab/engiopt-cgan-cnn-2d` currently holds 46 beams2d packages and no canonical path, so a bare `--seeds 1` there fails and lists what the repo does hold. `diffusion_2d_cond` and `vqgan` do have canonical packages and can be evaluated by seed alone:
+The fingerprint is needed here rather than optional. A bare `--seeds 1` resolves the **canonical** package, `{problem_id}/seed_1`, which only a run using the training script's default hyperparameters writes. A hyperparameter sweep never writes one, because every arm varies something. `IDEALLab/engiopt-cgan-cnn-2d` currently holds 46 beams2d packages and no canonical path, so a bare `--seeds 1` there fails and lists what the repo does hold. `diffusion_2d_cond` and `vqgan` do have canonical packages and can be evaluated by seed alone:
 
 ```
 python -m engiopt.evaluate --problem-id beams2d --generators diffusion_2d_cond --seeds 1 2 3
@@ -142,7 +144,7 @@ python -m engiopt.promote_checkpoint --algo cgan_cnn_2d --problem-id beams2d --l
 python -m engiopt.promote_checkpoint --algo cgan_cnn_2d --problem-id beams2d --seed 1 --config-fingerprint 825831f6
 ```
 
-`825831f6` is the one cgan_cnn_2d configuration trained on seeds 1–10; the rest of the sweep is seed 42 only, so promoting any other arm to `seed_1` would name a package that does not exist.
+`825831f6` is the one cgan_cnn_2d configuration trained on seeds 1 to 10; the rest of the sweep is seed 42 only, so promoting any other arm to `seed_1` would name a package that does not exist.
 
 ### Leaderboard
 
@@ -154,7 +156,7 @@ python -m engiopt.evaluate --problem-id beams2d --generators cgan_cnn_2d --seeds
     --push-to IDEALLab/engiopt-leaderboard
 ```
 
-Publishing downloads the existing board, merges on the row key, and uploads the result conditional on the revision it read, so adding one model never recomputes or overwrites anyone else's rows. Ranks restart at 1 within each `(problem_id, spec_version)` — a beams2d score and a photonics2d score measure different things and are never placed in one ordering. `--skip-existing` skips rows the board already holds for the exact weights, compared by `checkpoint_hash`.
+Publishing downloads the existing board, merges on the row key, and uploads the result conditional on the revision it read, so adding one model never recomputes or overwrites anyone else's rows. Ranks restart at 1 within each `(problem_id, spec_version)`, because a beams2d score and a photonics2d score measure different things and are never placed in one ordering. `--skip-existing` skips rows the board already holds for the exact weights, compared by `checkpoint_hash`.
 
 Every row records what produced it: **which repo, path, revision, and content hash** the weights came from, the EngiOpt version, and the EngiBench version that ran the evaluation. The spec records what it was frozen against, including the pinned dataset revision, so a change to either side is visible rather than silently shifting every number.
 
@@ -165,9 +167,9 @@ python -m engiopt.verify --board IDEALLab/engiopt-leaderboard            # audit
 python -m engiopt.verify --board ... --verifier ideallab-ci --publish    # the official runner
 ```
 
-Because the row carries the full address, that audit is not privileged — anyone can run the same command and get the same answer.
+Because the row carries the full address, that audit is not privileged. Anyone can run the same command and get the same answer.
 
-**Two integrity metrics decide whether a score means what it looks like.** The evaluation protocol is public, so a lookup table keyed on the condition vector returns the dataset-optimal designs and posts a perfect `mmd` and a zero `viol` — measured on beams2d, it beats a trained cGAN on every headline metric. `train_distance` reads zero for it, and `cond_sens` catches a model that ignores the conditions it claims to use. Both are diagnostic rather than ranked, because ranking on them would just reward the opposite extreme. Flagged rows are published and left out of the ordering. The whole suite — what each column measures, which way is better, how to change the space or the aggregation, and how to add a metric — is in [`example_metrics_suite.ipynb`](example_metrics_suite.ipynb).
+**Two integrity metrics decide whether a score means what it looks like.** The evaluation protocol is public, so a lookup table keyed on the condition vector returns the dataset-optimal designs and posts a perfect `mmd` and a zero `viol`. Measured on beams2d, it beats a trained cGAN on every headline metric. `train_distance` reads zero for it, and `cond_sens` catches a model that ignores the conditions it claims to use. Both are diagnostic rather than ranked, because ranking on them would just reward the opposite extreme. Flagged rows are published and left out of the ordering. The whole suite is in [`example_metrics_suite.ipynb`](example_metrics_suite.ipynb): what each column measures, which way is better, how to change the space or the aggregation, and how to add a metric.
 
 See **[LEADERBOARD.md](LEADERBOARD.md)** for the submission path, the flags, and what would actually close the copying hole.
 
