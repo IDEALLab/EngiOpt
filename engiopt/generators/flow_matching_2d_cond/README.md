@@ -29,7 +29,10 @@ python -m engiopt.evaluate --problem-id beams2d --generators flow_matching_2d_co
 
 The study prefix selects the Euler/16 package at the pinned release for that seed. For a different solver's selected checkpoint, download its directory from the [release](https://huggingface.co/IDEALLab/engiopt-engopt2026-flow-matching-2d-cond/tree/58ae97c4aa59784fbe22ab232b5d196ff088e4c7) and use `model_source="local", local_model_dir="..."`. Keep the same `problem_id` and training seed as the package.
 
-Use `problem_id = "heatconduction2d"` for the thermal benchmark. The published weights expect the scalar conditions in the training order, as defined by EngiBench at `217394232bd628484a72b72ce624b1bdd955245a`. The package configuration selects the solver and its step count. Each Euler step uses one velocity evaluation, midpoint uses two, and RK4 uses four.
+Use `problem_id = "heatconduction2d"` for the thermal benchmark. Its first condition is the target volume fraction: `volume` in dataset v0 (evaluation spec v2), `volfrac` in dataset v1 (spec v3). The second is `length` in both. The same published weights work with either pair; use the EngiBench version pinned by your EngiOpt checkout so the evaluator can verify the spec. The package selects the solver and step count. Each Euler step uses one velocity evaluation, midpoint two, and RK4 four.
+
+Scores for the published model can be written to a CSV. Do not pass `--attach-metrics` with the study prefix: the evaluator refuses writes to the historical model repository.
+
 ## Train a local checkpoint
 
 For a CPU smoke test on Beams2D, run:
@@ -44,3 +47,38 @@ Use a new output directory. The trainer reads the training split to determine it
 Without `--output`, the package goes into `local_checkpoints/flow_matching_2d_cond/{problem_id}/seed_{seed}`. Existing directories are never overwritten. The package records the number of optimizer steps, elapsed training seconds and device; dataset preparation and saving the checkpoint are not timed.
 
 For a longer run, omit `--max-batches` and set `--n-epochs` and `--device`. The package contains the **final** weights. The study instead shortlisted checkpoints on validation MMD and chose between them on validation COG.
+
+To score this checkpoint with the current EngiOpt evaluator, run:
+
+```sh
+python -m engiopt.evaluate --problem-id beams2d --generators flow_matching_2d_cond \
+  --seeds 1 --model-source local --local-model-dir ./cfm-smoke \
+  --metrics mmd --on-error raise --output-csv ./cfm-smoke-scores.csv
+```
+
+Use the seed you trained with. For a downloaded study package, pass its directory (the one containing `model.pth`) instead of `./cfm-smoke`. This evaluates the weights under the current EngiOpt spec, not the paper's test protocol. Neither command uploads anything.
+
+## Reproduce a published result
+
+[Felder, Habibi, Massoudi and Fuge (2026)](https://arxiv.org/abs/2609.00863) report Beams2D cumulative optimality gap (COG) by solver and step count in Table 4. The following Python snippet reproduces the Euler/16 entry using the ten released per-seed test results. It downloads only metadata; it does not run inference or rerun the downstream optimizer.
+
+```python
+import json
+from statistics import median, stdev
+from urllib.request import urlopen
+
+root = "https://huggingface.co/IDEALLab/engiopt-engopt2026-flow-matching-2d-cond/resolve"
+revision = "58ae97c4aa59784fbe22ab232b5d196ff088e4c7"
+cog = []
+for seed in range(1, 11):
+    package = f"beams2d/selected/v1/euler_16/seed_{seed}"
+    with urlopen(f"{root}/{revision}/{package}/metadata.json", timeout=30) as response:
+        metrics = json.load(response)["test_metrics"]
+    assert (metrics["seed"], metrics["method"], metrics["integration_steps"]) == (seed, "euler", 16)
+    cog.append(metrics["cog"])
+print(f"{median(cog):.3f} +/- {stdev(cog):.3f}")  # 1.182 +/- 3.126
+```
+
+The first number is the **median**, not the mean; the second is the sample standard deviation across seeds. Each seed uses 50 test conditions. Test scores are read after checkpoint selection, never used to choose the epoch.
+
+To regenerate the underlying scores rather than aggregate them, use the [study workflow and Slurm launchers](https://github.com/IDEALLab/EngiOpt/tree/8b9d30f4e350677a6234bc6dbae3a95c2b261937/reproducibility/conditional_flow_matching). The [campaign manifest](https://github.com/IDEALLab/EngiOpt/blob/8b9d30f4e350677a6234bc6dbae3a95c2b261937/reproducibility/conditional_flow_matching/manifest.json) fixes the run mapping; the [artifact index](https://github.com/IDEALLab/EngiOpt/blob/8b9d30f4e350677a6234bc6dbae3a95c2b261937/reproducibility/conditional_flow_matching/ARTIFACTS.md) lists the exact dataset and checkpoint revisions. Start with the dry run. The published COG is an optimizer-based metric; an MMD-only smoke test is not a substitute.
