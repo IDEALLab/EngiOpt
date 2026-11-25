@@ -5,6 +5,7 @@ from types import SimpleNamespace
 
 from datasets import Dataset
 import numpy as np
+import pytest
 import torch
 
 from engiopt.generators.flow_matching_2d_cond import adapter
@@ -37,3 +38,17 @@ def test_train_and_reload(tmp_path, monkeypatch, fake_problem):
     designs = generator.sample(torch.zeros(2, 2), seed=2001)
     assert designs.shape == (2, *fake_problem.design_space.shape)
     assert np.isfinite(designs).all()
+    np.testing.assert_array_equal(designs, generator.sample(torch.zeros(2, 2), seed=2001))
+    with pytest.raises(FileExistsError):
+        training.train(training.Args(output=package))
+
+
+def test_numeric_rows_stay_paired_across_batches():
+    index = np.arange(131, dtype=np.float32)
+    split = Dataset.from_dict({"optimal_design": [[float(i)] * 6 for i in index], "a": index, "b": -index})
+    designs, conditions = training._training_tensors(split, ["b", "a"], (2, 3))
+    assert designs.shape == (131, 1, 2, 3)
+    assert conditions.shape == (131, 1, 2)
+    torch.testing.assert_close(designs[:, 0, 1, 2], torch.from_numpy(index))
+    torch.testing.assert_close(conditions[:, 0, 0], -designs[:, 0, 0, 0])
+    torch.testing.assert_close(conditions[:, 0, 1], designs[:, 0, 0, 0])

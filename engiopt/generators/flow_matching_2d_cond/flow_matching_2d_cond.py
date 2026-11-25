@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from typing import Literal
+from typing import Literal, TYPE_CHECKING
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
 import torch as th
@@ -21,6 +21,9 @@ from engiopt.generators.flow_matching_2d_cond.model import build_model
 from engiopt.reproducibility import make_dataloader_generator
 from engiopt.reproducibility import seed_training
 from engiopt.transforms import condition_keys
+
+if TYPE_CHECKING:
+    from datasets import Dataset
 
 
 @dataclass
@@ -43,10 +46,29 @@ class Args:
     output: Path = Path("flow_matching_checkpoint")
 
 
+def _training_tensors(split: Dataset, keys: list[str], shape: tuple[int, ...]) -> tuple[th.Tensor, th.Tensor]:
+    """Read only the numeric columns, keeping at most one decoded batch alongside the tensors."""
+    if not len(split) or not keys:
+        raise ValueError("Training requires designs and at least one scalar condition.")
+    designs = th.empty((len(split), 1, *shape), dtype=th.float32)
+    conditions = th.empty((len(split), 1, len(keys)), dtype=th.float32)
+    rows = split.with_format("numpy", columns=["optimal_design", *keys])
+    start = 0
+    for batch in rows.iter(batch_size=128):
+        n = len(batch["optimal_design"])
+        designs[start : start + n] = th.as_tensor(batch["optimal_design"]).reshape(n, 1, *shape)
+        for i, key in enumerate(keys):
+            conditions[start : start + n, 0, i] = th.as_tensor(batch[key])
+        start += n
+    return designs, conditions
+
+
 def train(args: Args) -> None:
     """Train with uniform continuous times and save the final model as a local package."""
     if args.output.exists():
         raise FileExistsError(args.output)
+    if not args.clip_min < args.clip_max:
+        raise ValueError("clip_min must be smaller than clip_max.")
     if min(args.n_epochs, args.batch_size, args.integration_steps, args.num_train_timesteps) < 1 or (
         args.max_batches is not None and args.max_batches < 1
     ):
@@ -55,12 +77,10 @@ def train(args: Args) -> None:
     device = pick_device() if args.device == "auto" else th.device(args.device)
     problem = BUILTIN_PROBLEMS[args.problem_id]()
     keys = condition_keys(problem)
-    split = problem.dataset["train"].with_format("torch")
     shape = problem.design_space.shape
-    designs = split["optimal_design"][:].float().reshape(-1, 1, *shape)
+    designs, conditions = _training_tensors(problem.dataset["train"], keys, shape)
     lower, upper = float(designs.min()), float(designs.max())
-    designs = (designs - lower) / max(upper - lower, 1e-8)
-    conditions = th.stack([split[key][:].float() for key in keys], dim=1).unsqueeze(1)
+    designs.sub_(lower).div_(max(upper - lower, 1e-8))
     loader = DataLoader(
         TensorDataset(designs, conditions),
         batch_size=args.batch_size,
