@@ -6,7 +6,6 @@ from typing import Any, TYPE_CHECKING
 
 import torch as th
 
-from engiopt.core import condition_keys_for
 from engiopt.core import ConditionBatch
 from engiopt.core import design_shape_of
 from engiopt.core import Generator
@@ -30,10 +29,13 @@ class FlowMatching2DCond(Generator):
     @classmethod
     def build(cls, resolved: ResolvedCheckpoint, problem: Problem, device: th.device, **base: Any) -> FlowMatching2DCond:
         """Restore the velocity field and sampling configuration from a package."""
-        checkpoint = th.load(resolved.files["model.pth"], map_location=device, weights_only=True)
         config = resolved.run_config
+        model = cls(problem, device=device, **base)
+        for key, expected in (("problem_id", model.problem_id), ("seed", model.seed)):
+            if config[key] != expected:
+                raise ValueError(f"Checkpoint {key}={config[key]!r}, requested {expected!r}.")
         shape = design_shape_of(problem)
-        keys = condition_keys_for(problem, resolved)
+        keys = model.condition_keys
         if resolved.metadata.get("bundle_type") == "selected_checkpoint" and not resolved.metadata.get("condition_keys"):
             study_keys = {
                 "beams2d": ("volfrac", "rmin", "forcedist", "overhang_constraint"),
@@ -41,12 +43,12 @@ class FlowMatching2DCond(Generator):
             }
             if keys != study_keys.get(config["problem_id"]):
                 raise ValueError(f"Problem conditions {keys} differ from the published checkpoint schema.")
+        checkpoint = th.load(resolved.files["model.pth"], map_location="cpu", weights_only=True)
         if tuple(checkpoint["design_shape"]) != shape or checkpoint["encoder_hid_dim"] != len(keys):
             raise ValueError("Checkpoint design shape or condition count differs from the problem.")
-        model = cls(problem, device=device, **base)
-        model.net = build_model(shape, len(keys), config["layers_per_block"]).to(device)
+        model.net = build_model(shape, len(keys), config["layers_per_block"])
         model.net.load_state_dict(checkpoint["model"])
-        model.net.eval()
+        model.net.to(device).eval()
         model.output_clip = (config["clip_min"], config["clip_max"])
         return model
 
