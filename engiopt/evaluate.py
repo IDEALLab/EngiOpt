@@ -376,6 +376,13 @@ def main(args: Args) -> int:
 
 def _publish(args: Args, board: pd.DataFrame) -> None:
     """Push the results wherever the flags asked, then print the ranking comparison."""
+    if args.attach_metrics:
+        from engiopt.checkpoint_store import build_hf_repo_id
+        from engiopt.generators.flow_matching_2d_cond.adapter import STUDY_REPO_ID
+
+        if any(build_hf_repo_id(args.hf_entity, args.hf_repo_prefix, algo) == STUDY_REPO_ID for algo in board["algo_id"]):
+            raise ValueError("The published EngOpt flow matching checkpoints are read-only. Omit --attach-metrics.")
+
     if args.push_to:
         merged = push_to_hub(board, args.push_to)
         print(f"Published {len(board)} row(s) to {args.push_to}; board now holds {len(merged)} rows.")

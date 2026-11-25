@@ -22,6 +22,9 @@ if TYPE_CHECKING:
     from engiopt.checkpoint_store import ResolvedCheckpoint
 
 
+STUDY_REPO_ID = "IDEALLab/engiopt-engopt2026-flow-matching-2d-cond"
+
+
 class FlowMatching2DCond(Generator):
     """Conditional 2D design generator with a learned velocity field."""
 
@@ -51,7 +54,7 @@ class FlowMatching2DCond(Generator):
         ):
             return resolve_checkpoint_reference(
                 model_source="hf",
-                model_ref=f"hf://IDEALLab/engiopt-engopt2026-flow-matching-2d-cond/{problem_id}/selected/v1/euler_16/seed_{seed}",
+                model_ref=f"hf://{STUDY_REPO_ID}/{problem_id}/selected/v1/euler_16/seed_{seed}",
                 revision="58ae97c4aa59784fbe22ab232b5d196ff088e4c7",
                 required_files=list(cls.checkpoint_files),
             )
@@ -77,10 +80,11 @@ class FlowMatching2DCond(Generator):
         keys = model.condition_keys
         if resolved.metadata.get("bundle_type") == "selected_checkpoint" and not resolved.metadata.get("condition_keys"):
             study_keys = {
-                "beams2d": ("volfrac", "rmin", "forcedist", "overhang_constraint"),
-                "heatconduction2d": ("volume", "length"),
+                "beams2d": {("volfrac", "rmin", "forcedist", "overhang_constraint")},
+                # EngiBench v1 renamed the first dataset column without changing its values.
+                "heatconduction2d": {("volume", "length"), ("volfrac", "length")},
             }
-            if keys != study_keys.get(config["problem_id"]):
+            if keys not in study_keys.get(config["problem_id"], set()):
                 raise ValueError(f"Problem conditions {keys} differ from the published checkpoint schema.")
         checkpoint = th.load(resolved.files["model.pth"], map_location="cpu", weights_only=True)
         if tuple(checkpoint["design_shape"]) != shape or checkpoint["encoder_hid_dim"] != len(keys):

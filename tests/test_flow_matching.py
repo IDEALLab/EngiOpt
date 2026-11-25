@@ -69,6 +69,38 @@ def test_study_prefix_resolves_pinned_weights(monkeypatch):
     }
 
 
+@pytest.mark.parametrize("name", ["volume", "volfrac"])
+def test_selected_thermal_weights_accept_both_dataset_versions(name, tmp_path, fake_problem, monkeypatch):
+    from engiopt.generators.flow_matching_2d_cond import adapter
+
+    net = torch.nn.Linear(2, 1)
+    weights = tmp_path / "model.pth"
+    torch.save({"model": net.state_dict(), "design_shape": fake_problem.design_space.shape, "encoder_hid_dim": 2}, weights)
+    config = {"problem_id": "heatconduction2d", "seed": 1, "layers_per_block": 2, "clip_min": 0.001, "clip_max": 1.0}
+    package = ResolvedCheckpoint(
+        "local", str(tmp_path), {"model.pth": str(weights)}, config, {"bundle_type": "selected_checkpoint"}
+    )
+    monkeypatch.setattr(adapter, "build_model", lambda *_: torch.nn.Linear(2, 1))
+    args = dict(problem_id="heatconduction2d", seed=1)
+    loaded = FlowMatching2DCond.build(package, fake_problem, torch.device("cpu"), condition_keys=(name, "length"), **args)
+    assert loaded.condition_keys == (name, "length")
+    with pytest.raises(ValueError, match="conditions"):
+        FlowMatching2DCond.build(package, fake_problem, torch.device("cpu"), condition_keys=("length", name), **args)
+
+
+def test_study_metrics_are_read_only(monkeypatch):
+    import pandas as pd
+
+    from engiopt import evaluate
+
+    args = evaluate.Args(attach_metrics=True, hf_repo_prefix="engiopt-engopt2026", push_to="example/board")
+    board = pd.DataFrame([{"algo_id": "flow_matching_2d_cond"}])
+    monkeypatch.setattr(evaluate, "push_to_hub", lambda *_: pytest.fail("unexpected board upload"))
+    monkeypatch.setattr(evaluate, "publish_checkpoint_metrics", lambda **_: pytest.fail("unexpected checkpoint upload"))
+    with pytest.raises(ValueError, match="Omit --attach-metrics"):
+        evaluate._publish(args, board)
+
+
 @pytest.mark.parametrize(
     "options",
     [

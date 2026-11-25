@@ -41,10 +41,8 @@ As much as we can, we follow the [CleanRL](https://github.com/vwxyzjn/cleanrl) p
 
 Every algorithm above is registered, meaning this repository holds an adapter that
 can rebuild it. Being *evaluable* additionally needs published weights, and the two
-are not the same: `cgan_cnn_2d`, `diffusion_2d_cond`, `gan_cnn_2d`, and `vqgan` have
-checkpoints in the standard Hugging Face layout. For `flow_matching_2d_cond`, download the
-[study checkpoint](engiopt/generators/flow_matching_2d_cond/README.md) through the evaluator with `--hf-repo-prefix engiopt-engopt2026`.
-The remaining generators must be trained before they can be scored.
+are not the same: `cgan_cnn_2d`, `diffusion_2d_cond`, [`flow_matching_2d_cond`](engiopt/generators/flow_matching_2d_cond/README.md), `gan_cnn_2d`, and `vqgan` have
+checkpoints on HuggingFace, and the rest must be trained before they can be scored.
 The `Dimensions` column is the other half of the answer — a 1D or 3D generator has no
 `beams2d` checkpoint because it cannot serve a 2D problem at all, not because one is
 missing. For the live answer rather than this snapshot:
