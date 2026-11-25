@@ -30,6 +30,7 @@ As much as we can, we follow the [CleanRL](https://github.com/vwxyzjn/cleanrl) p
 [cgan_vae](engiopt/generators/cgan_vae/) | Inverse Design | 3D | ✅ | MultiView GAN + VAE
 [diffusion_1d](engiopt/generators/diffusion_1d/) | Inverse Design | 1D | ❌ | Diffusion
 [diffusion_2d_cond](engiopt/generators/diffusion_2d_cond/) | Inverse Design | 2D | ✅ | Diffusion
+[flow_matching_2d_cond](engiopt/generators/flow_matching_2d_cond/) | Inverse Design | 2D | ✅ | Conditional flow matching
 [gan_1d](engiopt/generators/gan_1d/) | Inverse Design | 1D | ❌ | GAN MLP
 [gan_2d](engiopt/generators/gan_2d/) | Inverse Design | 2D | ❌ | GAN MLP
 [gan_bezier](engiopt/generators/gan_bezier/) | Inverse Design | 1D | ❌ | GAN + Bezier layer
@@ -40,7 +41,7 @@ As much as we can, we follow the [CleanRL](https://github.com/vwxyzjn/cleanrl) p
 
 Every algorithm above is registered, meaning this repository holds an adapter that
 can rebuild it. Being *evaluable* additionally needs published weights, and the two
-are not the same: `cgan_cnn_2d`, `diffusion_2d_cond`, `gan_cnn_2d`, and `vqgan` have
+are not the same: `cgan_cnn_2d`, `diffusion_2d_cond`, [`flow_matching_2d_cond`](engiopt/generators/flow_matching_2d_cond/README.md), `gan_cnn_2d`, and `vqgan` have
 checkpoints on HuggingFace, and the rest must be trained before they can be scored.
 The `Dimensions` column is the other half of the answer — a 1D or 3D generator has no
 `beams2d` checkpoint because it cannot serve a 2D problem at all, not because one is
