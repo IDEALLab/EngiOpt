@@ -39,6 +39,6 @@ python -m engiopt.generators.flow_matching_2d_cond.flow_matching_2d_cond \
   --problem-id beams2d --device cpu --batch-size 2 --max-batches 1 --output ./cfm-smoke
 ```
 
-Use a new output directory. The trainer reads the training split to determine its design range, even for a single update. Reload the package using the example above with `local_model_dir="./cfm-smoke"` instead of downloading weights. A one-update model tests the pipeline, not design quality.
+Use a new output directory. The trainer reads the training split to determine its design range, even for a single update. To reload your own weights in Python, replace `hf_repo_prefix="engiopt-engopt2026"` in the example above with `model_source="local", local_model_dir="./cfm-smoke"`. A one-update model tests the pipeline, not design quality.
 
 For a longer run, omit `--max-batches` and set `--n-epochs` and `--device`. The package contains the **final** weights. The study instead shortlisted checkpoints on validation MMD and chose between them on validation COG.
