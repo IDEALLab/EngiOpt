@@ -79,7 +79,7 @@ class FlowMatching2DCond(Generator):
         shape = design_shape_of(problem)
         keys = model.condition_keys
         if resolved.metadata.get("bundle_type") == "selected_checkpoint" and not resolved.metadata.get("condition_keys"):
-            study_keys = {
+            study_keys: dict[str, set[tuple[str, ...]]] = {
                 "beams2d": {("volfrac", "rmin", "forcedist", "overhang_constraint")},
                 # EngiBench v1 renamed the first dataset column without changing its values.
                 "heatconduction2d": {("volume", "length"), ("volfrac", "length")},
