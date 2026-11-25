@@ -46,6 +46,16 @@ Without `--output`, the package goes into `local_checkpoints/flow_matching_2d_co
 
 For a longer run, omit `--max-batches` and set `--n-epochs` and `--device`. The package contains the **final** weights. The study instead shortlisted checkpoints on validation MMD and chose between them on validation COG.
 
+To score this checkpoint with the current EngiOpt evaluator, run:
+
+```sh
+python -m engiopt.evaluate --problem-id beams2d --generators flow_matching_2d_cond \
+  --seeds 1 --model-source local --local-model-dir ./cfm-smoke \
+  --metrics mmd --on-error raise --output-csv ./cfm-smoke-scores.csv
+```
+
+Use the seed you trained with. For a downloaded study package, pass its directory (the one containing `model.pth`) instead of `./cfm-smoke`. This evaluates the weights under the current EngiOpt spec, not the paper's test protocol. Neither command uploads anything.
+
 ## Reproduce a published result
 
 [Felder, Habibi, Massoudi and Fuge (2026)](https://arxiv.org/abs/2609.00863) report Beams2D cumulative optimality gap (COG) by solver and step count in Table 4. The following Python snippet reproduces the Euler/16 entry using the ten released per-seed test results. It downloads only metadata; it does not run inference or rerun the downstream optimizer.
