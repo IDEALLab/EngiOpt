@@ -161,6 +161,7 @@ cython_debug/
 
 wandb/*
 images/*
+local_checkpoints/
 logs/*
 *.csv
 # Editors

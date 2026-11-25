@@ -24,6 +24,7 @@ if TYPE_CHECKING:
 
 
 STUDY_REPO_ID = "IDEALLab/engiopt-engopt2026-flow-matching-2d-cond"
+_THERMAL_SCHEMAS: set[tuple[str, ...]] = {("volume", "length"), ("volfrac", "length")}
 
 
 class FlowMatching2DCond(Generator):
@@ -79,6 +80,12 @@ class FlowMatching2DCond(Generator):
     def build(cls, resolved: ResolvedCheckpoint, problem: Problem, device: th.device, **base: Any) -> FlowMatching2DCond:
         """Restore the velocity field and sampling configuration from a package."""
         config = resolved.run_config
+        if config["problem_id"] == "heatconduction2d" and resolved.metadata.get("condition_keys"):
+            recorded = tuple(resolved.metadata["condition_keys"])
+            current = tuple(problem.conditions_keys)
+            # Only the volume column's name changed between these dataset versions.
+            if recorded in _THERMAL_SCHEMAS and current in _THERMAL_SCHEMAS:
+                base["condition_keys"] = current
         model = cls(problem, device=device, **base)
         for key, expected in (("problem_id", model.problem_id), ("seed", model.seed)):
             if config[key] != expected:
@@ -88,8 +95,7 @@ class FlowMatching2DCond(Generator):
         if resolved.metadata.get("bundle_type") == "selected_checkpoint" and not resolved.metadata.get("condition_keys"):
             study_keys: dict[str, set[tuple[str, ...]]] = {
                 "beams2d": {("volfrac", "rmin", "forcedist", "overhang_constraint")},
-                # EngiBench v1 renamed the first dataset column without changing its values.
-                "heatconduction2d": {("volume", "length"), ("volfrac", "length")},
+                "heatconduction2d": _THERMAL_SCHEMAS,
             }
             if keys not in study_keys.get(config["problem_id"], set()):
                 raise ValueError(f"Problem conditions {keys} differ from the published checkpoint schema.")
