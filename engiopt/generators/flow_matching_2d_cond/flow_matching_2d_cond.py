@@ -52,7 +52,9 @@ def _training_tensors(split: Dataset, keys: list[str], shape: tuple[int, ...]) -
         raise ValueError("Training requires designs and at least one scalar condition.")
     designs = th.empty((len(split), 1, *shape), dtype=th.float32)
     conditions = th.empty((len(split), 1, len(keys)), dtype=th.float32)
-    rows = split.with_format("numpy", columns=["optimal_design", *keys])
+    # The NumPy and Torch formatters in datasets can import torchvision's video
+    # decoder even for numeric columns. These two problems need only plain lists.
+    rows = split.with_format(None, columns=["optimal_design", *keys])
     start = 0
     for batch in rows.iter(batch_size=128):
         n = len(batch["optimal_design"])
