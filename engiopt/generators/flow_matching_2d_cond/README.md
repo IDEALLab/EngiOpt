@@ -29,7 +29,9 @@ python -m engiopt.evaluate --problem-id beams2d --generators flow_matching_2d_co
 
 The study prefix selects the Euler/16 package at the pinned release for that seed. For a different solver's selected checkpoint, download its directory from the [release](https://huggingface.co/IDEALLab/engiopt-engopt2026-flow-matching-2d-cond/tree/58ae97c4aa59784fbe22ab232b5d196ff088e4c7) and use `model_source="local", local_model_dir="..."`. Keep the same `problem_id` and training seed as the package.
 
-Use `problem_id = "heatconduction2d"` for the thermal benchmark. The published weights expect the scalar conditions in the training order, as defined by EngiBench at `217394232bd628484a72b72ce624b1bdd955245a`. The package configuration selects the solver and its step count. Each Euler step uses one velocity evaluation, midpoint uses two, and RK4 uses four.
+Use `problem_id = "heatconduction2d"` for the thermal benchmark. Its first condition is the target volume fraction: `volume` in dataset v0 (evaluation spec v2), `volfrac` in dataset v1 (spec v3). The second is `length` in both. The same published weights work with either pair; use the EngiBench version pinned by your EngiOpt checkout so the evaluator can verify the spec. The package selects the solver and step count. Each Euler step uses one velocity evaluation, midpoint two, and RK4 four.
+
+Scores for the published model can be written to a CSV. Do not pass `--attach-metrics` with the study prefix: the evaluator refuses writes to the historical model repository.
 
 ## Train a local checkpoint
 
