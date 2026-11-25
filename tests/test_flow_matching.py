@@ -52,3 +52,37 @@ def test_refuse_mismatched_study_package(fake_problem, problem_id, seed, message
         FlowMatching2DCond.build(
             package, fake_problem, torch.device("cpu"), problem_id=problem_id, seed=seed, condition_keys=keys
         )
+
+
+def test_study_prefix_resolves_pinned_weights(monkeypatch):
+    from engiopt.generators.flow_matching_2d_cond import adapter
+
+    monkeypatch.setattr(adapter, "resolve_checkpoint_reference", lambda **kwargs: kwargs)
+    resolved = FlowMatching2DCond.resolve_checkpoint(
+        problem_id="heatconduction2d", seed=3, hf_repo_prefix="engiopt-engopt2026"
+    )
+    assert resolved == {
+        "model_source": "hf",
+        "model_ref": "hf://IDEALLab/engiopt-engopt2026-flow-matching-2d-cond/heatconduction2d/selected/v1/euler_16/seed_3",
+        "required_files": ["model.pth"],
+        "revision": "58ae97c4aa59784fbe22ab232b5d196ff088e4c7",
+    }
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {},
+        {"hf_entity": "another-team", "hf_repo_prefix": "engiopt-engopt2026"},
+        {"hf_repo_prefix": "engiopt-engopt2026", "config_fingerprint": "special"},
+        {"hf_repo_prefix": "engiopt-engopt2026", "model_source": "local", "local_model_dir": "pkg"},
+    ],
+)
+def test_other_sources_use_standard_layout(monkeypatch, options):
+    from engiopt import core
+
+    monkeypatch.setattr(core, "resolve_named_checkpoint", lambda **kwargs: kwargs)
+    resolved = FlowMatching2DCond.resolve_checkpoint(problem_id="beams2d", seed=7, **options)
+    assert resolved["algo"] == "flow_matching_2d_cond"
+    assert resolved["seed"] == 7
+    assert resolved["local_model_dir"] == options.get("local_model_dir")
