@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from typing import cast
+
 from diffusers import UNet2DConditionModel
 import torch as th
 
 
-def build_model(shape: tuple[int, ...], n_conditions: int, layers: int) -> UNet2DConditionModel:
+def build_model(shape: tuple[int, ...], n_conditions: int, layers: int) -> th.nn.Module:
     """Build the conditional velocity network used by the published checkpoints."""
-    return UNet2DConditionModel(
+    model = UNet2DConditionModel(
         sample_size=shape,
         in_channels=1,
         out_channels=1,
@@ -21,10 +23,11 @@ def build_model(shape: tuple[int, ...], n_conditions: int, layers: int) -> UNet2
         encoder_hid_dim=n_conditions,
         only_cross_attention=True,
     )
+    return cast("th.nn.Module", model)
 
 
 def integrate(
-    net: UNet2DConditionModel, state: th.Tensor, conditions: th.Tensor, steps: int, timesteps: int, method: str
+    net: th.nn.Module, state: th.Tensor, conditions: th.Tensor, steps: int, timesteps: int, method: str
 ) -> th.Tensor:
     """Integrate from the supplied Gaussian noise to a design over unit time."""
     if steps < 1 or timesteps < 1 or method not in {"euler", "midpoint", "rk4"}:

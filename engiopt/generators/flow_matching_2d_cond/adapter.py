@@ -14,7 +14,6 @@ from engiopt.generators.flow_matching_2d_cond.model import build_model
 from engiopt.generators.flow_matching_2d_cond.model import integrate
 
 if TYPE_CHECKING:
-    from diffusers import UNet2DConditionModel
     from engibench.core import Problem
 
     from engiopt.checkpoint_store import ResolvedCheckpoint
@@ -26,7 +25,7 @@ class FlowMatching2DCond(Generator):
     algo_id = "flow_matching_2d_cond"
     checkpoint_files = ("model.pth",)
     primary_state_key = "model"
-    net: UNet2DConditionModel
+    net: th.nn.Module
 
     @classmethod
     def build(cls, resolved: ResolvedCheckpoint, problem: Problem, device: th.device, **base: Any) -> FlowMatching2DCond:
