@@ -81,7 +81,7 @@ def test_selected_thermal_weights_accept_both_dataset_versions(name, tmp_path, f
         "local", str(tmp_path), {"model.pth": str(weights)}, config, {"bundle_type": "selected_checkpoint"}
     )
     monkeypatch.setattr(adapter, "build_model", lambda *_: torch.nn.Linear(2, 1))
-    args = dict(problem_id="heatconduction2d", seed=1)
+    args = {"problem_id": "heatconduction2d", "seed": 1}
     loaded = FlowMatching2DCond.build(package, fake_problem, torch.device("cpu"), condition_keys=(name, "length"), **args)
     assert loaded.condition_keys == (name, "length")
     with pytest.raises(ValueError, match="conditions"):
