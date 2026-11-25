@@ -66,6 +66,19 @@ def _training_tensors(split: Dataset, keys: list[str], shape: tuple[int, ...]) -
     return designs, conditions
 
 
+def _training_cost(device: th.device, started: float, updates: int) -> dict[str, str | float | int]:
+    """Measure completed accelerator work before writing the checkpoint."""
+    if device.type == "cuda":
+        th.cuda.synchronize(device)
+    elif device.type == "mps":
+        th.mps.synchronize()
+    return {
+        "n_train_steps": updates,
+        "train_seconds": perf_counter() - started,
+        "train_device": th.cuda.get_device_name(device) if device.type == "cuda" else device.type,
+    }
+
+
 def train(args: Args) -> None:
     """Train with uniform continuous times and save the final model as a local package."""
     algo = "flow_matching_2d_cond"
@@ -114,11 +127,7 @@ def train(args: Args) -> None:
         if updates == args.max_batches:
             break
 
-    if device.type == "cuda":
-        th.cuda.synchronize(device)
-    elif device.type == "mps":
-        th.mps.synchronize()
-    train_seconds = perf_counter() - started
+    cost = _training_cost(device, started, updates)
 
     output.parent.mkdir(parents=True, exist_ok=True)
     with TemporaryDirectory(dir=output.parent) as tmp:
@@ -139,9 +148,7 @@ def train(args: Args) -> None:
         metadata = {
             "condition_keys": keys,
             "primary_files": ["model.pth"],
-            "n_train_steps": updates,
-            "train_seconds": train_seconds,
-            "train_device": th.cuda.get_device_name(device) if device.type == "cuda" else device.type,
+            **cost,
             "problem_id": args.problem_id,
             "seed": args.seed,
             "algo": algo,
