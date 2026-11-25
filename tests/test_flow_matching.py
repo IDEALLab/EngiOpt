@@ -54,12 +54,13 @@ def test_refuse_mismatched_study_package(fake_problem, problem_id, seed, message
         )
 
 
-def test_study_prefix_resolves_pinned_weights(monkeypatch):
+@pytest.mark.parametrize("local_dir", [None, "fallback"])
+def test_study_prefix_resolves_pinned_weights(monkeypatch, local_dir):
     from engiopt.generators.flow_matching_2d_cond import adapter
 
     monkeypatch.setattr(adapter, "resolve_checkpoint_reference", lambda **kwargs: kwargs)
     resolved = FlowMatching2DCond.resolve_checkpoint(
-        problem_id="heatconduction2d", seed=3, hf_repo_prefix="engiopt-engopt2026"
+        problem_id="heatconduction2d", seed=3, hf_repo_prefix="engiopt-engopt2026", local_model_dir=local_dir
     )
     assert resolved == {
         "model_source": "hf",
@@ -67,6 +68,29 @@ def test_study_prefix_resolves_pinned_weights(monkeypatch):
         "required_files": ["model.pth"],
         "revision": "58ae97c4aa59784fbe22ab232b5d196ff088e4c7",
     }
+
+
+@pytest.mark.parametrize("source", ["auto", "hf"])
+def test_missing_study_package_uses_local_fallback_only_in_auto(monkeypatch, source):
+    from engiopt.generators.flow_matching_2d_cond import adapter
+
+    calls = []
+
+    def resolve(**kwargs):
+        calls.append(kwargs["model_source"])
+        if kwargs["model_source"] == "hf":
+            raise FileNotFoundError("study package unavailable")
+        return kwargs["model_ref"]
+
+    monkeypatch.setattr(adapter, "resolve_checkpoint_reference", resolve)
+    options = {"hf_repo_prefix": "engiopt-engopt2026", "local_model_dir": "fallback", "model_source": source}
+    if source == "auto":
+        assert FlowMatching2DCond.resolve_checkpoint(problem_id="beams2d", seed=1, **options) == "fallback"
+        assert calls == ["hf", "local"]
+    else:
+        with pytest.raises(FileNotFoundError, match="study package unavailable"):
+            FlowMatching2DCond.resolve_checkpoint(problem_id="beams2d", seed=1, **options)
+        assert calls == ["hf"]
 
 
 @pytest.mark.parametrize("name", ["volume", "volfrac"])
