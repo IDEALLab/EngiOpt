@@ -20,7 +20,10 @@ root = snapshot_download(
 )
 problem = BUILTIN_PROBLEMS[problem_id]()
 generator = BUILTIN_GENERATORS["flow_matching_2d_cond"].from_pretrained(
-    problem, problem_id=problem_id, model_source="local", local_model_dir=str(Path(root) / package),
+    problem,
+    problem_id=problem_id,
+    model_source="local",
+    local_model_dir=str(Path(root) / package),
 )
 rows = problem.dataset["test"][:2]
 conditions = torch.tensor([[rows[key][i] for key in generator.condition_keys] for i in range(2)])
