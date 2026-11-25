@@ -21,16 +21,22 @@ class _Field(torch.nn.Module):
         return SimpleNamespace(sample=self.scale * x)
 
 
-def test_train_and_reload(tmp_path, monkeypatch, fake_problem):
+@pytest.mark.parametrize("use_default_dir", [True, False])
+def test_train_and_reload(tmp_path, monkeypatch, fake_problem, use_default_dir):
     split = Dataset.from_dict(dict(fake_problem.dataset["train"][:]))
     monkeypatch.setattr(type(fake_problem), "dataset", property(lambda self: {"train": split}))
     monkeypatch.setitem(training.BUILTIN_PROBLEMS, "beams2d", lambda: fake_problem)
     for module in (training, adapter):
         monkeypatch.setattr(module, "build_model", lambda *_: _Field())
 
-    package = tmp_path / "checkpoint"
-    training.train(training.Args(output=package, device="cpu", batch_size=2, max_batches=1))
-    assert json.loads((package / "metadata.json").read_text())["training_updates"] == 1
+    monkeypatch.chdir(tmp_path)
+    package = tmp_path / ("local_checkpoints/flow_matching_2d_cond/beams2d/seed_1" if use_default_dir else "checkpoint")
+    args = training.Args(output=None if use_default_dir else package, device="cpu", batch_size=2, max_batches=1)
+    training.train(args)
+    metadata = json.loads((package / "metadata.json").read_text())
+    assert metadata["n_train_steps"] == 1
+    assert metadata["train_device"] == "cpu"
+    assert metadata["train_seconds"] > 0
     generator = adapter.FlowMatching2DCond.from_pretrained(
         fake_problem, problem_id="beams2d", device=torch.device("cpu"), model_source="local", local_model_dir=str(package)
     )
@@ -40,7 +46,7 @@ def test_train_and_reload(tmp_path, monkeypatch, fake_problem):
     assert np.isfinite(designs).all()
     np.testing.assert_array_equal(designs, generator.sample(torch.zeros(2, 2), seed=2001))
     with pytest.raises(FileExistsError):
-        training.train(training.Args(output=package))
+        training.train(args)
 
 
 def test_numeric_rows_stay_paired_across_batches():

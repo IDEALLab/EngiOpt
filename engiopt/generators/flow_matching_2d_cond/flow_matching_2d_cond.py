@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from time import perf_counter
 from typing import Literal, TYPE_CHECKING
 
 from engibench.utils.all_problems import BUILTIN_PROBLEMS
@@ -43,7 +44,7 @@ class Args:
     clip_min: float = 0.001
     clip_max: float = 1.0
     device: str = "auto"
-    output: Path = Path("flow_matching_checkpoint")
+    output: Path | None = None
 
 
 def _training_tensors(split: Dataset, keys: list[str], shape: tuple[int, ...]) -> tuple[th.Tensor, th.Tensor]:
@@ -67,8 +68,10 @@ def _training_tensors(split: Dataset, keys: list[str], shape: tuple[int, ...]) -
 
 def train(args: Args) -> None:
     """Train with uniform continuous times and save the final model as a local package."""
-    if args.output.exists():
-        raise FileExistsError(args.output)
+    algo = "flow_matching_2d_cond"
+    output = args.output or Path("local_checkpoints", algo, args.problem_id, f"seed_{args.seed}")
+    if output.exists():
+        raise FileExistsError(output)
     if not args.clip_min < args.clip_max:
         raise ValueError("clip_min must be smaller than clip_max.")
     if min(args.n_epochs, args.batch_size, args.integration_steps, args.num_train_timesteps) < 1 or (
@@ -92,6 +95,7 @@ def train(args: Args) -> None:
     net = build_model(shape, len(keys), args.layers_per_block).to(device)
     optimizer = th.optim.AdamW(net.parameters(), lr=args.lr)
     updates = 0
+    started = perf_counter()
     for _ in range(args.n_epochs):
         for designs_batch, cond in loader:
             target = designs_batch.to(device)
@@ -110,8 +114,14 @@ def train(args: Args) -> None:
         if updates == args.max_batches:
             break
 
-    args.output.parent.mkdir(parents=True, exist_ok=True)
-    with TemporaryDirectory(dir=args.output.parent) as tmp:
+    if device.type == "cuda":
+        th.cuda.synchronize(device)
+    elif device.type == "mps":
+        th.mps.synchronize()
+    train_seconds = perf_counter() - started
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with TemporaryDirectory(dir=output.parent) as tmp:
         package = Path(tmp) / "package"
         package.mkdir()
         th.save(
@@ -129,14 +139,19 @@ def train(args: Args) -> None:
         metadata = {
             "condition_keys": keys,
             "primary_files": ["model.pth"],
-            "training_updates": updates,
+            "n_train_steps": updates,
+            "train_seconds": train_seconds,
+            "train_device": th.cuda.get_device_name(device) if device.type == "cuda" else device.type,
             "problem_id": args.problem_id,
             "seed": args.seed,
-            "algo": "flow_matching_2d_cond",
+            "algo": algo,
+            "checkpoint_backend": "local",
+            "checkpoint_files": ["model.pth"],
+            "package_complete": True,
         }
         for filename, data in (("metadata.json", metadata), ("run_config.json", config)):
             (package / filename).write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
-        package.rename(args.output)
+        package.rename(output)
 
 
 if __name__ == "__main__":
