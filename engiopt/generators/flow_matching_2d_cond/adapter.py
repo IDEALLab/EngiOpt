@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any, TYPE_CHECKING
 
+from huggingface_hub.utils import HfHubHTTPError
 import torch as th
 
 from engiopt.checkpoint_store import resolve_checkpoint_reference
@@ -49,15 +50,21 @@ class FlowMatching2DCond(Generator):
         if (
             (hf_entity, hf_repo_prefix) == ("IDEALLab", "engiopt-engopt2026")
             and model_source in {"auto", "hf"}
-            and not (model_source == "auto" and local_model_dir is not None)
             and config_fingerprint is None
         ):
-            return resolve_checkpoint_reference(
-                model_source="hf",
-                model_ref=f"hf://{STUDY_REPO_ID}/{problem_id}/selected/v1/euler_16/seed_{seed}",
-                revision="58ae97c4aa59784fbe22ab232b5d196ff088e4c7",
-                required_files=list(cls.checkpoint_files),
-            )
+            try:
+                return resolve_checkpoint_reference(
+                    model_source="hf",
+                    model_ref=f"hf://{STUDY_REPO_ID}/{problem_id}/selected/v1/euler_16/seed_{seed}",
+                    revision="58ae97c4aa59784fbe22ab232b5d196ff088e4c7",
+                    required_files=list(cls.checkpoint_files),
+                )
+            except (OSError, HfHubHTTPError):
+                if model_source != "auto" or local_model_dir is None:
+                    raise
+                return resolve_checkpoint_reference(
+                    model_source="local", model_ref=local_model_dir, required_files=list(cls.checkpoint_files)
+                )
         return super().resolve_checkpoint(
             problem_id=problem_id,
             seed=seed,
