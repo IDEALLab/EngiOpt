@@ -310,6 +310,9 @@ def _drop_already_published(args: Args, evaluator: Evaluator, generators: list[G
 def _attach_metrics_to_checkpoints(args: Args, board: pd.DataFrame) -> None:
     """Write each row's scores into the checkpoint package it describes."""
     for row in board.to_dict("records"):
+        if not all(isinstance(row.get(key), str) and row[key].strip() for key in ("checkpoint_repo", "checkpoint_path")):
+            print(f"  skipping metrics upload for {row['algo_id']}: checkpoint has no Hub address")
+            continue
         fingerprint = row.get("config_fingerprint")
         try:
             path = publish_checkpoint_metrics(

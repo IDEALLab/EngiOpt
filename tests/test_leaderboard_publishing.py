@@ -61,6 +61,25 @@ def _row(algo: str, mmd: float) -> dict[str, Any]:
     }
 
 
+def test_attach_metrics_skips_checkpoints_without_a_hub_address(monkeypatch, capsys):
+    from engiopt import evaluate
+
+    local = _row("local", 0.5)
+    del local["checkpoint_repo"], local["checkpoint_path"]
+    partial = {**_row("partial", 0.4), "checkpoint_path": ""}
+    board = pd.DataFrame([local, partial, _row("remote", 0.3)])
+    uploaded = []
+
+    def record_upload(**kwargs):
+        uploaded.append(kwargs["algo"])
+        return "p/seed_1/metrics.json"
+
+    monkeypatch.setattr(evaluate, "publish_checkpoint_metrics", record_upload)
+    evaluate._attach_metrics_to_checkpoints(evaluate.Args(hf_entity="someone"), board)
+    assert uploaded == ["remote"]
+    assert capsys.readouterr().out.count("checkpoint has no Hub address") == 2
+
+
 class _FakeApi:
     """Records uploads and can fail the first one, like a lost commit race."""
 
